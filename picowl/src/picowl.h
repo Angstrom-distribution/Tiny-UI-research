@@ -16,6 +16,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -263,6 +264,8 @@ struct pw_server {
 
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_mgr;
 	struct wlr_idle_notifier_v1 *idle_notifier;
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
+	bool idle_inhibited;       /* last visibility result pushed by idle.c */
 	struct wlr_output_power_manager_v1 *output_power_mgr;
 	struct wl_event_source *idle_timer;
 	bool blanked;
@@ -279,6 +282,7 @@ struct pw_server {
 	struct wl_listener new_output;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_layer_surface;
+	struct wl_listener new_idle_inhibitor;
 	struct wl_listener new_input;
 	struct wl_listener new_virtual_keyboard;
 	struct wl_listener request_set_cursor;
@@ -392,8 +396,8 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
  * idle.c
  */
 
-/* Create the idle notifier and the idle timer from config->idle_timeout_ms.
- * Called by pw_server_init(). */
+/* Create the idle notifier and the idle-inhibit manager. Called by
+ * pw_server_init(). */
 void pw_idle_init(struct pw_server *server);
 
 /* Report user activity: notify idle clients, rearm the timer, and unblank if
@@ -403,6 +407,12 @@ void pw_idle_activity(struct pw_server *server);
 /* Only notify ext-idle-notify clients of activity (no dim/blank handling);
  * input.c pairs it with pw_power_activity() to get the swallow result. */
 void pw_idle_notify(struct pw_server *server);
+
+/* Re-evaluate whether a visible surface holds an idle inhibitor and push the
+ * result to the idle notifier and power.c on change. Cheap; called from
+ * pw_panel_update() (every focus/stacking change) and from the inhibitor
+ * create/destroy/map/unmap handlers. NULL-safe before pw_idle_init(). */
+void pw_idle_inhibit_update(struct pw_server *server);
 
 /*
  * server.c

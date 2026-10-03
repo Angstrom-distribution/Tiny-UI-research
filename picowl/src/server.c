@@ -338,6 +338,7 @@ void pw_server_finish(struct pw_server *server)
 	listener_drop(&server->new_output);
 	listener_drop(&server->new_xdg_toplevel);
 	listener_drop(&server->new_layer_surface);
+	listener_drop(&server->new_idle_inhibitor); /* wlroots asserts it is empty at display destroy */
 	listener_drop(&server->output_power_set_mode);
 
 	pw_zerocopy_finish(server);
