@@ -1,0 +1,352 @@
+From: picowl <picowl@localhost>
+Subject: [PATCH 1/3] render/pixman: read DMA-BUF client buffers via mmap
+
+Buffers without data pointer access (linux-dmabuf client buffers on
+GPU-less devices) are mapped once with mmap(MAP_SHARED) if they have a
+single linear plane. The mapping is cached per buffer until it is
+destroyed. Each access is bracketed with DMA_BUF_IOCTL_SYNC. DMA-BUF
+formats are still not advertised as texture formats.
+
+Upstream-Status: Inappropriate [picowl specific]
+---
+ include/render/pixman.h  |  29 +++++++-
+ render/pixman/pass.c     |  10 +--
+ render/pixman/renderer.c | 167 ++++++++++++++++++++++++++++++++++++++++++++---
+ 3 files changed, 190 insertions(+), 16 deletions(-)
+
+diff --git a/include/render/pixman.h b/include/render/pixman.h
+index 09842144..f9fbf4fe 100644
+--- a/include/render/pixman.h
++++ b/include/render/pixman.h
+@@ -19,6 +19,7 @@ struct wlr_pixman_renderer {
+ 
+ 	struct wl_list buffers; // wlr_pixman_buffer.link
+ 	struct wl_list textures; // wlr_pixman_texture.link
++	struct wl_list dmabuf_maps; // wlr_pixman_dmabuf_map.link
+ 
+ 	struct wlr_drm_format_set drm_formats;
+ };
+@@ -33,6 +34,25 @@ struct wlr_pixman_buffer {
+ 	struct wl_list link; // wlr_pixman_renderer.buffers
+ };
+ 
++/*
++ * A persistent CPU mapping of a single-plane linear DMA-BUF. Created on first
++ * access, kept until the buffer is destroyed (or the renderer goes away).
++ */
++struct wlr_pixman_dmabuf_map {
++	struct wlr_buffer *buffer;
++	struct wl_list link; // wlr_pixman_renderer.dmabuf_maps
++	struct wl_listener buffer_destroy;
++
++	void *map;
++	size_t len;
++	bool writable;
++	int fd; // not owned, borrowed from the buffer's DMA-BUF attributes
++	size_t offset, stride;
++	uint32_t format;
++
++	uint64_t sync_flags; // DMA_BUF_SYNC_* of the access in progress, 0 if idle
++};
++
+ struct wlr_pixman_texture {
+ 	struct wlr_texture wlr_texture;
+ 	struct wlr_pixman_renderer *renderer;
+@@ -55,8 +75,13 @@ pixman_format_code_t get_pixman_format_from_drm(uint32_t fmt);
+ uint32_t get_drm_format_from_pixman(pixman_format_code_t fmt);
+ const uint32_t *get_pixman_drm_formats(size_t *len);
+ 
+-bool begin_pixman_data_ptr_access(struct wlr_buffer *buffer, pixman_image_t **image_ptr,
+-	uint32_t flags);
++bool pixman_buffer_access_begin(struct wlr_pixman_renderer *renderer,
++	struct wlr_buffer *buffer, uint32_t flags, void **data,
++	uint32_t *format, size_t *stride);
++void pixman_buffer_access_end(struct wlr_pixman_renderer *renderer,
++	struct wlr_buffer *buffer);
++bool begin_pixman_data_ptr_access(struct wlr_pixman_renderer *renderer,
++	struct wlr_buffer *buffer, pixman_image_t **image_ptr, uint32_t flags);
+ 
+ struct wlr_pixman_render_pass *begin_pixman_render_pass(
+ 	struct wlr_pixman_buffer *buffer);
+diff --git a/render/pixman/pass.c b/render/pixman/pass.c
+index 4ae742ca..2c159c2b 100644
+--- a/render/pixman/pass.c
++++ b/render/pixman/pass.c
+@@ -19,7 +19,7 @@ static struct wlr_pixman_texture *get_texture(struct wlr_texture *wlr_texture) {
+ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
+ 	struct wlr_pixman_render_pass *pass = get_render_pass(wlr_pass);
+ 
+-	wlr_buffer_end_data_ptr_access(pass->buffer->buffer);
++	pixman_buffer_access_end(pass->buffer->renderer, pass->buffer->buffer);
+ 	wlr_buffer_unlock(pass->buffer->buffer);
+ 	free(pass);
+ 
+@@ -42,8 +42,8 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 	struct wlr_pixman_texture *texture = get_texture(options->texture);
+ 	struct wlr_pixman_buffer *buffer = pass->buffer;
+ 
+-	if (texture->buffer != NULL && !begin_pixman_data_ptr_access(texture->buffer,
+-			&texture->image, WLR_BUFFER_DATA_PTR_ACCESS_READ)) {
++	if (texture->buffer != NULL && !begin_pixman_data_ptr_access(texture->renderer,
++			texture->buffer, &texture->image, WLR_BUFFER_DATA_PTR_ACCESS_READ)) {
+ 		return;
+ 	}
+ 
+@@ -190,7 +190,7 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 	pixman_image_set_clip_region32(buffer->image, NULL);
+ 
+ 	if (texture->buffer != NULL) {
+-		wlr_buffer_end_data_ptr_access(texture->buffer);
++		pixman_buffer_access_end(texture->renderer, texture->buffer);
+ 	}
+ 
+ 	if (mask != NULL) {
+@@ -240,7 +240,7 @@ struct wlr_pixman_render_pass *begin_pixman_render_pass(
+ 
+ 	wlr_render_pass_init(&pass->base, &render_pass_impl);
+ 
+-	if (!begin_pixman_data_ptr_access(buffer->buffer, &buffer->image,
++	if (!begin_pixman_data_ptr_access(buffer->renderer, buffer->buffer, &buffer->image,
+ 			WLR_BUFFER_DATA_PTR_ACCESS_READ | WLR_BUFFER_DATA_PTR_ACCESS_WRITE)) {
+ 		free(pass);
+ 		return NULL;
+diff --git a/render/pixman/renderer.c b/render/pixman/renderer.c
+index 4631a33a..f1c77719 100644
+--- a/render/pixman/renderer.c
++++ b/render/pixman/renderer.c
+@@ -1,7 +1,11 @@
+ #include <assert.h>
+ #include <drm_fourcc.h>
++#include <errno.h>
++#include <linux/dma-buf.h>
+ #include <pixman.h>
+ #include <stdlib.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
+ #include <wayland-util.h>
+ #include <wlr/render/interface.h>
+ #include <wlr/util/box.h>
+@@ -23,14 +27,152 @@ static struct wlr_pixman_renderer *get_renderer(
+ 	return renderer;
+ }
+ 
+-bool begin_pixman_data_ptr_access(struct wlr_buffer *wlr_buffer, pixman_image_t **image_ptr,
+-		uint32_t flags) {
++static void dmabuf_map_destroy(struct wlr_pixman_dmabuf_map *map) {
++	wl_list_remove(&map->link);
++	wl_list_remove(&map->buffer_destroy.link);
++	munmap(map->map, map->len);
++	free(map);
++}
++
++static void dmabuf_map_handle_buffer_destroy(struct wl_listener *listener,
++		void *data) {
++	struct wlr_pixman_dmabuf_map *map =
++		wl_container_of(listener, map, buffer_destroy);
++	dmabuf_map_destroy(map);
++}
++
++static struct wlr_pixman_dmabuf_map *dmabuf_map_find(
++		struct wlr_pixman_renderer *renderer, struct wlr_buffer *buffer) {
++	struct wlr_pixman_dmabuf_map *map;
++	wl_list_for_each(map, &renderer->dmabuf_maps, link) {
++		if (map->buffer == buffer) {
++			return map;
++		}
++	}
++	return NULL;
++}
++
++// DMA_BUF_IOCTL_SYNC; fds which are not real DMA-BUFs (e.g. memfds used in
++// tests) or old kernels reject it, which is fine for CPU-coherent memory
++static bool dmabuf_sync(int fd, uint64_t flags) {
++	struct dma_buf_sync sync = { .flags = flags };
++	while (ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync) != 0) {
++		if (errno == EINTR) {
++			continue;
++		}
++		if (errno == ENOTTY || errno == EINVAL || errno == ENOSYS) {
++			return true;
++		}
++		wlr_log_errno(WLR_ERROR, "DMA_BUF_IOCTL_SYNC failed");
++		return false;
++	}
++	return true;
++}
++
++static struct wlr_pixman_dmabuf_map *dmabuf_map_get(
++		struct wlr_pixman_renderer *renderer, struct wlr_buffer *buffer,
++		bool write) {
++	struct wlr_pixman_dmabuf_map *map = dmabuf_map_find(renderer, buffer);
++	if (map != NULL && (map->writable || !write)) {
++		return map;
++	}
++
++	struct wlr_dmabuf_attributes attribs;
++	if (!wlr_buffer_get_dmabuf(buffer, &attribs)) {
++		return NULL;
++	}
++	if (attribs.n_planes != 1 || (attribs.modifier != DRM_FORMAT_MOD_LINEAR &&
++			attribs.modifier != DRM_FORMAT_MOD_INVALID)) {
++		wlr_log(WLR_DEBUG, "Cannot map DMA-BUF: %d planes, modifier 0x%"PRIX64,
++			attribs.n_planes, attribs.modifier);
++		return NULL;
++	}
++	if (get_pixman_format_from_drm(attribs.format) == 0) {
++		wlr_log(WLR_DEBUG, "Cannot map DMA-BUF: unsupported format 0x%"PRIX32,
++			attribs.format);
++		return NULL;
++	}
++
++	size_t len = (size_t)attribs.offset[0] +
++		(size_t)attribs.stride[0] * (size_t)attribs.height;
++	int prot = PROT_READ | (write ? PROT_WRITE : 0);
++	void *ptr = mmap(NULL, len, prot, MAP_SHARED, attribs.fd[0], 0);
++	if (ptr == MAP_FAILED) {
++		wlr_log_errno(WLR_ERROR, "Failed to mmap DMA-BUF");
++		return NULL;
++	}
++
++	if (map != NULL) {
++		// Upgrade a read-only mapping to read-write
++		munmap(map->map, map->len);
++	} else {
++		map = calloc(1, sizeof(*map));
++		if (map == NULL) {
++			wlr_log_errno(WLR_ERROR, "Allocation failed");
++			munmap(ptr, len);
++			return NULL;
++		}
++		map->buffer = buffer;
++		map->buffer_destroy.notify = dmabuf_map_handle_buffer_destroy;
++		wl_signal_add(&buffer->events.destroy, &map->buffer_destroy);
++		wl_list_insert(&renderer->dmabuf_maps, &map->link);
++	}
++	map->map = ptr;
++	map->len = len;
++	map->writable = write;
++	map->fd = attribs.fd[0];
++	map->offset = attribs.offset[0];
++	map->stride = attribs.stride[0];
++	map->format = attribs.format;
++	return map;
++}
++
++bool pixman_buffer_access_begin(struct wlr_pixman_renderer *renderer,
++		struct wlr_buffer *buffer, uint32_t flags, void **data,
++		uint32_t *format, size_t *stride) {
++	if (wlr_buffer_begin_data_ptr_access(buffer, flags, data, format, stride)) {
++		return true;
++	}
++
++	bool write = flags & WLR_BUFFER_DATA_PTR_ACCESS_WRITE;
++	struct wlr_pixman_dmabuf_map *map = dmabuf_map_get(renderer, buffer, write);
++	if (map == NULL) {
++		return false;
++	}
++	assert(map->sync_flags == 0);
++	uint64_t sync_flags = write ? DMA_BUF_SYNC_RW : DMA_BUF_SYNC_READ;
++	if (!dmabuf_sync(map->fd, DMA_BUF_SYNC_START | sync_flags)) {
++		return false;
++	}
++	map->sync_flags = sync_flags;
++
++	*data = (char *)map->map + map->offset;
++	*format = map->format;
++	*stride = map->stride;
++	return true;
++}
++
++void pixman_buffer_access_end(struct wlr_pixman_renderer *renderer,
++		struct wlr_buffer *buffer) {
++	if (buffer->accessing_data_ptr) {
++		wlr_buffer_end_data_ptr_access(buffer);
++		return;
++	}
++
++	struct wlr_pixman_dmabuf_map *map = dmabuf_map_find(renderer, buffer);
++	assert(map != NULL && map->sync_flags != 0);
++	dmabuf_sync(map->fd, DMA_BUF_SYNC_END | map->sync_flags);
++	map->sync_flags = 0;
++}
++
++bool begin_pixman_data_ptr_access(struct wlr_pixman_renderer *renderer,
++		struct wlr_buffer *wlr_buffer, pixman_image_t **image_ptr, uint32_t flags) {
+ 	pixman_image_t *image = *image_ptr;
+ 
+ 	void *data = NULL;
+ 	uint32_t drm_format;
+ 	size_t stride;
+-	if (!wlr_buffer_begin_data_ptr_access(wlr_buffer, flags,
++	if (!pixman_buffer_access_begin(renderer, wlr_buffer, flags,
+ 			&data, &drm_format, &stride)) {
+ 		return false;
+ 	}
+@@ -44,7 +186,7 @@ bool begin_pixman_data_ptr_access(struct wlr_buffer *wlr_buffer, pixman_image_t
+ 		pixman_image_t *new_image = pixman_image_create_bits_no_clear(format,
+ 			wlr_buffer->width, wlr_buffer->height, data, stride);
+ 		if (new_image == NULL) {
+-			wlr_buffer_end_data_ptr_access(wlr_buffer);
++			pixman_buffer_access_end(renderer, wlr_buffer);
+ 			return false;
+ 		}
+ 
+@@ -156,13 +298,13 @@ static struct wlr_pixman_buffer *create_buffer(
+ 	void *data = NULL;
+ 	uint32_t drm_format;
+ 	size_t stride;
+-	if (!wlr_buffer_begin_data_ptr_access(wlr_buffer,
++	if (!pixman_buffer_access_begin(renderer, wlr_buffer,
+ 			WLR_BUFFER_DATA_PTR_ACCESS_READ | WLR_BUFFER_DATA_PTR_ACCESS_WRITE,
+ 			&data, &drm_format, &stride)) {
+ 		wlr_log(WLR_ERROR, "Failed to get buffer data");
+ 		goto error_buffer;
+ 	}
+-	wlr_buffer_end_data_ptr_access(wlr_buffer);
++	pixman_buffer_access_end(renderer, wlr_buffer);
+ 
+ 	pixman_format_code_t format = get_pixman_format_from_drm(drm_format);
+ 	if (format == 0) {
+@@ -220,6 +362,7 @@ static struct wlr_pixman_texture *pixman_texture_create(
+ 
+ 	wlr_texture_init(&texture->wlr_texture, &renderer->wlr_renderer,
+ 		&texture_impl, width, height);
++	texture->renderer = renderer;
+ 
+ 	texture->format_info = drm_get_pixel_format_info(drm_format);
+ 	if (!texture->format_info) {
+@@ -248,11 +391,11 @@ static struct wlr_texture *pixman_texture_from_buffer(
+ 	void *data = NULL;
+ 	uint32_t drm_format;
+ 	size_t stride;
+-	if (!wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+-			&data, &drm_format, &stride)) {
++	if (!pixman_buffer_access_begin(renderer, buffer,
++			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &drm_format, &stride)) {
+ 		return NULL;
+ 	}
+-	wlr_buffer_end_data_ptr_access(buffer);
++	pixman_buffer_access_end(renderer, buffer);
+ 
+ 	struct wlr_pixman_texture *texture = pixman_texture_create(renderer,
+ 		drm_format, buffer->width, buffer->height);
+@@ -287,6 +430,11 @@ static void pixman_destroy(struct wlr_renderer *wlr_renderer) {
+ 		wlr_texture_destroy(&tex->wlr_texture);
+ 	}
+ 
++	struct wlr_pixman_dmabuf_map *map, *map_tmp;
++	wl_list_for_each_safe(map, map_tmp, &renderer->dmabuf_maps, link) {
++		dmabuf_map_destroy(map);
++	}
++
+ 	wlr_drm_format_set_finish(&renderer->drm_formats);
+ 
+ 	free(renderer);
+@@ -330,6 +478,7 @@ struct wlr_renderer *wlr_pixman_renderer_create(void) {
+ 	renderer->wlr_renderer.features.output_color_transform = false;
+ 	wl_list_init(&renderer->buffers);
+ 	wl_list_init(&renderer->textures);
++	wl_list_init(&renderer->dmabuf_maps);
+ 
+ 	size_t len = 0;
+ 	const uint32_t *formats = get_pixman_drm_formats(&len);

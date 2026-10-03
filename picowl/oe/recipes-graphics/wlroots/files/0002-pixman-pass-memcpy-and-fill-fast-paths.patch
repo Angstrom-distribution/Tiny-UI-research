@@ -1,0 +1,340 @@
+From: picowl <picowl@localhost>
+Subject: [PATCH 2/3] render/pixman: memcpy and fill fast paths, no per-frame allocations
+
+Untransformed unscaled opaque texture copies between images of the same
+format become row memcpys, opaque or blend-none rects become pixman_fill
+calls for r5g6b5/x8r8g8b8/a8r8g8b8. Translucent rects reuse a cached solid
+fill image and the render pass is embedded in the render buffer. The
+output is pixel-identical to the pixman_image_composite32 path.
+
+Upstream-Status: Inappropriate [picowl specific]
+---
+ include/render/pixman.h  |  18 +++--
+ render/pixman/pass.c     | 190 +++++++++++++++++++++++++++++++++++++++++++----
+ render/pixman/renderer.c |   3 +
+ 3 files changed, 191 insertions(+), 20 deletions(-)
+
+diff --git a/include/render/pixman.h b/include/render/pixman.h
+index f9fbf4fe..27a8aa07 100644
+--- a/include/render/pixman.h
++++ b/include/render/pixman.h
+@@ -14,6 +14,11 @@ struct wlr_pixman_pixel_format {
+ 
+ struct wlr_pixman_buffer;
+ 
++struct wlr_pixman_render_pass {
++	struct wlr_render_pass base;
++	struct wlr_pixman_buffer *buffer;
++};
++
+ struct wlr_pixman_renderer {
+ 	struct wlr_renderer wlr_renderer;
+ 
+@@ -30,6 +35,14 @@ struct wlr_pixman_buffer {
+ 
+ 	pixman_image_t *image;
+ 
++	// Render pass reused for every frame, avoids an allocation per frame
++	struct wlr_pixman_render_pass pass;
++	bool pass_busy;
++
++	// Solid fill image for translucent rects, re-created on colour change
++	pixman_image_t *fill;
++	struct pixman_color fill_color;
++
+ 	struct wl_listener buffer_destroy;
+ 	struct wl_list link; // wlr_pixman_renderer.buffers
+ };
+@@ -66,11 +79,6 @@ struct wlr_pixman_texture {
+ 	struct wlr_buffer *buffer; // if created via texture_from_buffer
+ };
+ 
+-struct wlr_pixman_render_pass {
+-	struct wlr_render_pass base;
+-	struct wlr_pixman_buffer *buffer;
+-};
+-
+ pixman_format_code_t get_pixman_format_from_drm(uint32_t fmt);
+ uint32_t get_drm_format_from_pixman(pixman_format_code_t fmt);
+ const uint32_t *get_pixman_drm_formats(size_t *len);
+diff --git a/render/pixman/pass.c b/render/pixman/pass.c
+index 2c159c2b..3720f1ca 100644
+--- a/render/pixman/pass.c
++++ b/render/pixman/pass.c
+@@ -1,5 +1,6 @@
+ #include <assert.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include "render/pixman.h"
+ 
+ static const struct wlr_render_pass_impl render_pass_impl;
+@@ -18,10 +19,17 @@ static struct wlr_pixman_texture *get_texture(struct wlr_texture *wlr_texture) {
+ 
+ static bool render_pass_submit(struct wlr_render_pass *wlr_pass) {
+ 	struct wlr_pixman_render_pass *pass = get_render_pass(wlr_pass);
++	struct wlr_pixman_buffer *buffer = pass->buffer;
++	struct wlr_buffer *wlr_buffer = buffer->buffer;
+ 
+-	pixman_buffer_access_end(pass->buffer->renderer, pass->buffer->buffer);
+-	wlr_buffer_unlock(pass->buffer->buffer);
+-	free(pass);
++	pixman_buffer_access_end(buffer->renderer, wlr_buffer);
++	if (pass == &buffer->pass) {
++		buffer->pass_busy = false;
++	} else {
++		free(pass);
++	}
++	// May destroy the wlr_pixman_buffer (and the embedded pass)
++	wlr_buffer_unlock(wlr_buffer);
+ 
+ 	return true;
+ }
+@@ -36,6 +44,91 @@ static pixman_op_t get_pixman_blending(enum wlr_render_blend_mode mode) {
+ 	abort();
+ }
+ 
++
++static int clip_n_rects(const pixman_region32_t *clip) {
++	return clip != NULL ? pixman_region32_n_rects(clip) : 1;
++}
++
++/*
++ * Rectangle i of clip (NULL means unclipped) intersected with box and the
++ * bounds of image. Returns false if the intersection is empty.
++ */
++static bool clip_rect(const pixman_region32_t *clip, int i,
++		const struct wlr_box *box, pixman_image_t *image, struct wlr_box *out) {
++	int x1 = 0, y1 = 0;
++	int x2 = pixman_image_get_width(image), y2 = pixman_image_get_height(image);
++	if (clip != NULL) {
++		const pixman_box32_t *r = &pixman_region32_rectangles(clip, NULL)[i];
++		x1 = r->x1 > x1 ? r->x1 : x1;
++		y1 = r->y1 > y1 ? r->y1 : y1;
++		x2 = r->x2 < x2 ? r->x2 : x2;
++		y2 = r->y2 < y2 ? r->y2 : y2;
++	}
++	x1 = box->x > x1 ? box->x : x1;
++	y1 = box->y > y1 ? box->y : y1;
++	x2 = box->x + box->width < x2 ? box->x + box->width : x2;
++	y2 = box->y + box->height < y2 ? box->y + box->height : y2;
++	*out = (struct wlr_box){ .x = x1, .y = y1, .width = x2 - x1, .height = y2 - y1 };
++	return out->width > 0 && out->height > 0;
++}
++
++/*
++ * Untransformed, unscaled, opaque copy between images of the same format:
++ * a plain row memcpy per clip rectangle. Returns false if not applicable.
++ */
++static bool try_copy_texture(struct wlr_pixman_buffer *buffer,
++		struct wlr_pixman_texture *texture, pixman_op_t op,
++		const pixman_region32_t *clip, const struct wlr_box *src_box,
++		const struct wlr_box *dst_box) {
++	pixman_image_t *src = texture->image, *dst = buffer->image;
++	pixman_format_code_t fmt = pixman_image_get_format(dst);
++	if (pixman_image_get_format(src) != fmt) {
++		return false;
++	}
++	// OVER with an alpha-less source is the same as SRC
++	if (op != PIXMAN_OP_SRC &&
++			!(op == PIXMAN_OP_OVER && PIXMAN_FORMAT_A(fmt) == 0)) {
++		return false;
++	}
++	int bpp = PIXMAN_FORMAT_BPP(fmt);
++	if (bpp < 8 || bpp % 8 != 0) {
++		return false;
++	}
++	// Out-of-bounds source pixels would be transparent, not copied
++	if (src_box->x < 0 || src_box->y < 0 ||
++			src_box->x + src_box->width > pixman_image_get_width(src) ||
++			src_box->y + src_box->height > pixman_image_get_height(src)) {
++		return false;
++	}
++	uint8_t *src_data = (uint8_t *)pixman_image_get_data(src);
++	uint8_t *dst_data = (uint8_t *)pixman_image_get_data(dst);
++	if (src_data == NULL || dst_data == NULL || src_data == dst_data) {
++		return false;
++	}
++	int src_stride = pixman_image_get_stride(src);
++	int dst_stride = pixman_image_get_stride(dst);
++	int bytes_pp = bpp / 8;
++
++	struct wlr_box rect;
++	int n = clip_n_rects(clip);
++	for (int i = 0; i < n; i++) {
++		if (!clip_rect(clip, i, dst_box, dst, &rect)) {
++			continue;
++		}
++		int sx = rect.x - dst_box->x + src_box->x;
++		int sy = rect.y - dst_box->y + src_box->y;
++		const uint8_t *s = src_data + (ptrdiff_t)sy * src_stride + sx * bytes_pp;
++		uint8_t *d = dst_data + (ptrdiff_t)rect.y * dst_stride + rect.x * bytes_pp;
++		size_t len = (size_t)rect.width * bytes_pp;
++		for (int y = 0; y < rect.height; y++) {
++			memcpy(d, s, len);
++			s += src_stride;
++			d += dst_stride;
++		}
++	}
++	return true;
++}
++
+ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 		const struct wlr_render_texture_options *options) {
+ 	struct wlr_pixman_render_pass *pass = get_render_pass(wlr_pass);
+@@ -48,7 +141,6 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 	}
+ 
+ 	pixman_op_t op = get_pixman_blending(options->blend_mode);
+-	pixman_image_set_clip_region32(buffer->image, options->clip);
+ 
+ 	struct wlr_fbox src_fbox;
+ 	wlr_render_texture_options_get_src_box(options, &src_fbox);
+@@ -62,8 +154,16 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 	struct wlr_box dst_box;
+ 	wlr_render_texture_options_get_dst_box(options, &dst_box);
+ 
+-	pixman_image_t *mask = NULL;
+ 	float alpha = wlr_render_texture_options_get_alpha(options);
++	if (alpha == 1 && options->transform == WL_OUTPUT_TRANSFORM_NORMAL &&
++			src_box.width == dst_box.width && src_box.height == dst_box.height &&
++			try_copy_texture(buffer, texture, op, options->clip, &src_box, &dst_box)) {
++		goto out;
++	}
++
++	pixman_image_set_clip_region32(buffer->image, options->clip);
++
++	pixman_image_t *mask = NULL;
+ 	if (alpha != 1) {
+ 		mask = pixman_image_create_solid_fill(&(struct pixman_color){
+ 			.alpha = 0xFFFF * alpha,
+@@ -189,12 +289,34 @@ static void render_pass_add_texture(struct wlr_render_pass *wlr_pass,
+ 
+ 	pixman_image_set_clip_region32(buffer->image, NULL);
+ 
++	if (mask != NULL) {
++		pixman_image_unref(mask);
++	}
++
++out:
+ 	if (texture->buffer != NULL) {
+ 		pixman_buffer_access_end(texture->renderer, texture->buffer);
+ 	}
++}
+ 
+-	if (mask != NULL) {
+-		pixman_image_unref(mask);
++// Same conversion as pixman's solid fill fast path (truncating)
++static bool color_to_pixel(pixman_format_code_t fmt,
++		const struct pixman_color *color, uint32_t *pixel) {
++	uint32_t c32 = ((uint32_t)color->alpha >> 8 << 24) |
++		((uint32_t)color->red >> 8 << 16) |
++		((uint32_t)color->green & 0xff00) |
++		((uint32_t)color->blue >> 8);
++	switch (fmt) {
++	case PIXMAN_r5g6b5:
++		*pixel = ((c32 >> 3) & 0x001f) | ((c32 >> 5) & 0x07e0) |
++			((c32 >> 8) & 0xf800);
++		return true;
++	case PIXMAN_x8r8g8b8:
++	case PIXMAN_a8r8g8b8:
++		*pixel = c32;
++		return true;
++	default:
++		return false;
+ 	}
+ }
+ 
+@@ -215,14 +337,41 @@ static void render_pass_add_rect(struct wlr_render_pass *wlr_pass,
+ 		.alpha = options->color.a * 0xFFFF,
+ 	};
+ 
+-	pixman_image_t *fill = pixman_image_create_solid_fill(&color);
++	uint32_t pixel;
++	pixman_format_code_t fmt = pixman_image_get_format(buffer->image);
++	uint32_t *bits = pixman_image_get_data(buffer->image);
++	if (op == PIXMAN_OP_SRC && bits != NULL && color_to_pixel(fmt, &color, &pixel)) {
++		int bpp = PIXMAN_FORMAT_BPP(fmt);
++		int stride = pixman_image_get_stride(buffer->image) / (int)sizeof(uint32_t);
++		struct wlr_box rect;
++		int n = clip_n_rects(options->clip);
++		for (int i = 0; i < n; i++) {
++			if (!clip_rect(options->clip, i, &box, buffer->image, &rect)) {
++				continue;
++			}
++			pixman_fill(bits, stride, bpp, rect.x, rect.y,
++				rect.width, rect.height, pixel);
++		}
++		return;
++	}
++
++	if (buffer->fill == NULL ||
++			memcmp(&buffer->fill_color, &color, sizeof(color)) != 0) {
++		pixman_image_t *fill = pixman_image_create_solid_fill(&color);
++		if (fill == NULL) {
++			return;
++		}
++		if (buffer->fill != NULL) {
++			pixman_image_unref(buffer->fill);
++		}
++		buffer->fill = fill;
++		buffer->fill_color = color;
++	}
+ 
+ 	pixman_image_set_clip_region32(buffer->image, options->clip);
+-	pixman_image_composite32(op, fill, NULL, buffer->image,
++	pixman_image_composite32(op, buffer->fill, NULL, buffer->image,
+ 		0, 0, 0, 0, box.x, box.y, box.width, box.height);
+ 	pixman_image_set_clip_region32(buffer->image, NULL);
+-
+-	pixman_image_unref(fill);
+ }
+ 
+ static const struct wlr_render_pass_impl render_pass_impl = {
+@@ -233,18 +382,29 @@ static const struct wlr_render_pass_impl render_pass_impl = {
+ 
+ struct wlr_pixman_render_pass *begin_pixman_render_pass(
+ 		struct wlr_pixman_buffer *buffer) {
+-	struct wlr_pixman_render_pass *pass = calloc(1, sizeof(*pass));
+-	if (pass == NULL) {
+-		return NULL;
++	struct wlr_pixman_render_pass *pass;
++	if (!buffer->pass_busy) {
++		pass = &buffer->pass;
++		*pass = (struct wlr_pixman_render_pass){0};
++	} else {
++		pass = calloc(1, sizeof(*pass));
++		if (pass == NULL) {
++			return NULL;
++		}
+ 	}
+ 
+ 	wlr_render_pass_init(&pass->base, &render_pass_impl);
+ 
+ 	if (!begin_pixman_data_ptr_access(buffer->renderer, buffer->buffer, &buffer->image,
+ 			WLR_BUFFER_DATA_PTR_ACCESS_READ | WLR_BUFFER_DATA_PTR_ACCESS_WRITE)) {
+-		free(pass);
++		if (pass != &buffer->pass) {
++			free(pass);
++		}
+ 		return NULL;
+ 	}
++	if (pass == &buffer->pass) {
++		buffer->pass_busy = true;
++	}
+ 
+ 	wlr_buffer_lock(buffer->buffer);
+ 	pass->buffer = buffer;
+diff --git a/render/pixman/renderer.c b/render/pixman/renderer.c
+index f1c77719..bc8a243f 100644
+--- a/render/pixman/renderer.c
++++ b/render/pixman/renderer.c
+@@ -275,6 +275,9 @@ static void destroy_buffer(struct wlr_pixman_buffer *buffer) {
+ 	wl_list_remove(&buffer->buffer_destroy.link);
+ 
+ 	pixman_image_unref(buffer->image);
++	if (buffer->fill != NULL) {
++		pixman_image_unref(buffer->fill);
++	}
+ 
+ 	free(buffer);
+ }

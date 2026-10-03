@@ -11,6 +11,14 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=89e064f90bcb87796ca335cbd2ce4179"
 # S defaults to ${UNPACKDIR}/${BP} and BB_GIT_DEFAULT_DESTSUFFIX is ${BP}, so
 # no S assignment is needed (see ../../../README.md).
 SRC_URI = "git://gitlab.freedesktop.org/wlroots/wlroots.git;protocol=https;branch=0.19;tag=${PV}"
+
+# picowl patches (byte-identical copies of picowl/subprojects/packagefiles/wlroots)
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI += " \
+    file://0001-pixman-read-dmabuf-client-buffers-via-mmap.patch \
+    file://0002-pixman-pass-memcpy-and-fill-fast-paths.patch \
+    file://0003-drm-hardware-rotation-and-copy-type.patch \
+"
 SRCREV = "13a62a23a258d96f902c740310d5c7c59784a4d1"
 
 UPSTREAM_CHECK_GITTAGREGEX = "^(?P<pver>\d+\.\d+\.\d+)$"
