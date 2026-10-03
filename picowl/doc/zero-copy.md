@@ -7,12 +7,13 @@ after rendering.
 
 Targets:
 
-| Driver | Kind | Notes |
-|---|---|---|
-| mq11xx (MediaQ, h2210/h5550) | copy-type | shmem shadow plane; the kernel copies FB_DAMAGE_CLIPS rectangles to VRAM during the commit; primary plane has `rotation` |
-| w100 (hx4700) | copy-type | as above |
-| sa1100-lcdc (h3870) | copy-type | persistent buffer, as above |
-| pxa-lcdc (h3970) | scanout | scans GEM DMA buffers directly from a 1 MiB CMA pool |
+| Driver | Kind | `caching` (client buffers) | Notes |
+|---|---|---|---|
+| mq11xx (MediaQ, h2210/h5550) | copy-type | cacheable | shmem shadow plane; the kernel copies FB_DAMAGE_CLIPS rectangles to VRAM during the commit; primary plane has `rotation` |
+| w100 (hx4700) | copy-type | cacheable | as above |
+| sa1100-lcdc (h3870) | copy-type | write_combined | persistent buffer, as above, but CMA (per `mediaplayer-integration.md`; unverified, see the checklist) |
+| pxa-lcdc (h3970) | scanout | write_combined | scans GEM DMA buffers directly from a 1 MiB CMA pool |
+| anything else | scanout | write_combined | the safe default |
 
 Every display is RGB565.
 
@@ -134,6 +135,34 @@ overrides per output (`auto | yes | no`). The result is passed to wlroots with
 `wlr_drm_connector_set_copy_type` (patch 0003), and reported to clients through
 the `copy_type` event. The log line is
 `output NAME: driver 'X' copy_type=yes|no rotation_mode=...`.
+
+## Caching event
+
+picowl-buffer-v1 version 2 adds `caching` to the manager: once, on bind, after
+`copy_type`. It tells whether the CPU mapping of the dmabufs is cacheable
+(`1`) or write-combined or uncached (`0`), so that a client knows if it may
+read back from a buffer or decode into one. It is not derived from `copy_type`,
+which describes the outputs: an old kernel without CLOSEFB, a `[copytype]`
+override or a runtime change of `copy_type` does not change the memory.
+
+`pw_zerocopy_init` reads the driver name of the backend's DRM fd with
+`drmGetVersion` (picowl has one allocator, so one value) and
+`pw_caching_resolve` (`src/copytype.c`) maps it with the table above, or with
+the `[zerocopy] caching` override (`auto | cacheable | write_combined`). The
+value is fixed for the life of the process. `pw_zbproto_send_bind`
+(`src/zbproto.c`) sends `format`, `copy_type` and `caching`, and sends
+`caching` only to managers bound at version 2 or later: libwayland does not
+check event versions on the server side, and a version 1 client would be
+disconnected or abort. The log line is
+`zero-copy enabled (copy_type=N caching=cacheable|write_combined driver 'D')`.
+An unknown driver, or a failed `drmGetVersion`, gives `write_combined`, which
+is wrong only in the safe direction (one extra pass in the player instead of
+slow reads); `[zerocopy] caching = cacheable` fixes it. If the table says
+cacheable for memory that is really write-combined, the output stays correct
+but every read-back is slow, which `pw-test-client --zerocopy --readback`
+shows. `caching` does not change the commit and answer rules (`copied`,
+`retained`). The CPU cache coherency of the driver's damage copy is the kernel
+driver's job, as before.
 
 ## Single-buffer swapchain
 
@@ -301,6 +330,21 @@ are compiled and unit tested only. On a device verify:
   app_id from another binary gets the default limits; on the h3970 a rule of 7
   is granted what CMA allows, then `no_memory`, and picowl keeps rendering
   (check dmesg for CMA warnings; unblank and rotate still work).
+- caching event: the log line `zero-copy enabled (copy_type=... caching=...
+  driver '...')` shows h2210 and h5550 `1 cacheable`, hx4700 `1 cacheable`,
+  h3870 `1 write_combined`, h3970 `0 write_combined`;
+  `pw-test-client --zerocopy --readback` prints a `caching=` matching the log,
+  and `readback_us` on `write_combined` boards should be several times that
+  of `cacheable` boards at the same size. If sa1100-lcdc or mq11xx read like
+  the other class, the table is wrong (does the sa1100-lcdc driver use CMA,
+  and do mq11xx and w100 set `map_wc` on their shmem objects? Both are out of
+  tree and unverified);
+- a client built from the v1 XML (or `--bind-version 1`) runs 5 frames with no
+  protocol error, and a version 2 client against an old (version 1) picowl
+  binds 1 and prints `caching=-1`;
+- blank, unblank and output hot-unplug re-send `copy_type` only, never
+  `caching` (`WAYLAND_DEBUG=1`);
+- on a kernel without CLOSEFB, mq11xx shows `copy_type=0 caching=cacheable`.
 
 ## C8 / 8-bpp palettised output on MediaQ
 

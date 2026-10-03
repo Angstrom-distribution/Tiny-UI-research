@@ -60,7 +60,7 @@ Plan:
 The KMS front-end keys caching off `drmGetVersion()`. A Wayland client has no DRM fd.
 
 - **Interim heuristic:** `copy_type = 1` means a shmem (cacheable) driver, and `copy_type = 0` means treat the buffers as write-combined. That matches all four drivers today: the copy-type ones are mq11xx and w100, which are shmem, plus sa1100-lcdc, which is CMA and write-combined but whose memory is only written. The core's rule (never decode into, never read back from display buffers) holds either way.
-- **[picowl]** Replace the heuristic with an explicit `caching` event in `picowl_buffer_manager_v1` v2: `cacheable | write_combined`, taken from the driver name on picowl's side.
+- **[picowl]** Done: an explicit `caching` event in `picowl_buffer_manager_v1` version 2 (`cacheable | write_combined`, taken from the driver name on picowl's side, overridable with `[zerocopy] caching`). The player binds `min(advertised, 2)`, always installs the `caching` handler, and keeps the heuristic above only when no `caching` event arrives (a version 1 picowl). See `doc/buffers.md`.
 
 ### 2.5 Keeping direct scanout (and the copy budget)
 

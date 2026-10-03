@@ -109,6 +109,11 @@ color = #101010
 # budget_kb: memory shared by all clients without an [app.*] buffer rule.
 #   Range 0..65536 (default 2048); 0 = none of them may allocate.
 # total_kb: ceiling over all pools. 0 = no extra limit (default), else 1..65536.
+# caching: what the caching event (picowl-buffer-v1 version 2) tells clients about
+#   the CPU mapping of the buffers: auto (default, from the DRM driver: cacheable for
+#   mq11xx and w100, write_combined for everything else, sa1100-lcdc included),
+#   cacheable or write_combined. Case-insensitive; an invalid value keeps auto.
+#   Clients never read back from, or decode into, write_combined buffers.
 # Sizes are counted in whole pages as allocated. A request over a limit gets
 # failed(no_memory). Out-of-range values are rejected and the default is kept.
 # enable = true
@@ -117,6 +122,7 @@ color = #101010
 # max_buffers_per_client = 3
 # budget_kb = 2048
 # total_kb = 0
+# caching = auto
 
 # Per-app buffer limits: an [app.<app_id>] section (the one used for the hold
 # overrides above) with zerocopy_* keys gets its own pool, shared by all
