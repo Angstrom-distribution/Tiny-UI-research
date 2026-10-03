@@ -131,7 +131,12 @@ static void focus_surface(struct pw_server *server, struct wlr_surface *surface)
 		struct pw_view *view;
 		wl_list_for_each(view, &server->views, link) {
 			if (view->xdg_toplevel == top) {
-				if (view != server->focused_view)
+				/* An on-demand layer surface may hold the keyboard
+				 * while this view is still focused_view. */
+				struct wlr_surface *kf =
+					server->seat->keyboard_state.focused_surface;
+				if (view != server->focused_view ||
+				    (kf && wlr_layer_surface_v1_try_from_wlr_surface(kf)))
 					pw_view_focus(view);
 				return;
 			}
@@ -206,14 +211,17 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 
 /* ---- keyboard --------------------------------------------------------- */
 
-static bool handle_keybinding(struct pw_server *server,
+/* Binding matching a key press, or NULL. Without an xkb state (keymap failed
+ * to compile) only keycode bindings (e.g. the power key) can match. */
+static struct pw_keybinding *find_keybinding(struct pw_server *server,
 	struct wlr_keyboard *kb, uint32_t keycode)
 {
 	if (!server->config)
-		return false;
+		return NULL;
 	uint32_t mods = wlr_keyboard_get_modifiers(kb) & PW_MOD_MASK;
-	const xkb_keysym_t *syms;
-	int nsyms = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
+	const xkb_keysym_t *syms = NULL;
+	int nsyms = kb->xkb_state ?
+		xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms) : 0;
 
 	struct pw_keybinding *b;
 	wl_list_for_each(b, &server->config->keybindings, link) {
@@ -236,12 +244,10 @@ static bool handle_keybinding(struct pw_server *server,
 		} else {
 			match = b->keycode == keycode;
 		}
-		if (match) {
-			pw_input_run_action(server, b);
-			return true;
-		}
+		if (match)
+			return b;
 	}
-	return false;
+	return NULL;
 }
 
 static void keyboard_handle_modifiers(struct wl_listener *l, void *data)
@@ -260,22 +266,35 @@ static void keyboard_handle_key(struct wl_listener *l, void *data)
 	bool pressed = ev->state == WL_KEYBOARD_KEY_STATE_PRESSED;
 
 	/* Releases never wake the display. */
-	if (!pressed) {
-		if (swallow_get(ev->keycode)) {
-			swallow_set(ev->keycode, false);
-			return;
-		}
-		if (server->blanked)
-			return;
+	if (!pressed && swallow_get(ev->keycode)) {
+		swallow_set(ev->keycode, false);
+		return;
 	}
-	bool was_blanked = activity(server);
+
+	struct pw_keybinding *bind = pressed ?
+		find_keybinding(server, k->wlr_keyboard, ev->keycode) : NULL;
+	if (bind && bind->action == PW_ACTION_TOGGLE_BLANK && !server->blanked) {
+		/* Blank straight from ACTIVE/DIMMED: activity() would first undim
+		 * to full brightness, which then stays for the whole blank. */
+		pw_idle_notify(server);
+		swallow_set(ev->keycode, true);
+		pw_input_run_action(server, bind);
+		return;
+	}
+
+	/* A release whose press was delivered must reach the client even while
+	 * blanked, or the key stays down there; it is not activity. */
+	bool was_blanked = false;
+	if (pressed || !server->blanked)
+		was_blanked = activity(server);
 
 	if (pressed && was_blanked) {
 		swallow_set(ev->keycode, true);
 		return;
 	}
-	if (pressed && handle_keybinding(server, k->wlr_keyboard, ev->keycode)) {
+	if (bind) {
 		swallow_set(ev->keycode, true);
+		pw_input_run_action(server, bind);
 		return;
 	}
 
@@ -306,8 +325,8 @@ static void keyboard_add(struct pw_server *server, struct wlr_keyboard *wlr_kb,
 	k->wlr_keyboard = wlr_kb;
 
 	/* Virtual keyboards get their keymap from the client. */
-	if (!virtual && st.keymap)
-		wlr_keyboard_set_keymap(wlr_kb, st.keymap);
+	if (!virtual && st.keymap && !wlr_keyboard_set_keymap(wlr_kb, st.keymap))
+		pw_log(WLR_ERROR, "failed to set keymap on keyboard");
 	wlr_keyboard_set_repeat_info(wlr_kb, 25, 600);
 
 	k->modifiers.notify = keyboard_handle_modifiers;
@@ -360,15 +379,14 @@ static void cursor_handle_button(struct wl_listener *l, void *data)
 	struct pw_server *server = st.server;
 	uint32_t bit = ev->button >= BTN_LEFT && ev->button < BTN_LEFT + 32 ?
 		1u << (ev->button - BTN_LEFT) : 0;
-	if (ev->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		if (st.btn_swallowed & bit) {
-			st.btn_swallowed &= ~bit;
-			return;
-		}
-		if (server->blanked)
-			return;
+	bool released = ev->state == WL_POINTER_BUTTON_STATE_RELEASED;
+	if (released && (st.btn_swallowed & bit)) {
+		st.btn_swallowed &= ~bit;
+		return;
 	}
-	if (activity(server)) {
+	/* A release must reach the client even while blanked, or its implicit
+	 * grab never ends; it is not activity and does not wake the display. */
+	if (!(released && server->blanked) && activity(server)) {
 		st.btn_swallowed |= bit;
 		return;
 	}
@@ -465,6 +483,25 @@ void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
 		pw_log(WLR_INFO, "built without libinput: no touch calibration");
 	}
 #endif
+}
+
+/* wlr_cursor keeps a raw pointer to the output a touch device is mapped to:
+ * unmap it before the output is freed and follow a surviving output. */
+void pw_input_output_removed(struct pw_server *server, struct pw_output *gone)
+{
+	if (!server->cursor)
+		return;
+	struct pw_touch_dev *t;
+	wl_list_for_each(t, &touch_devs, link)
+		wlr_cursor_map_input_to_output(server->cursor, t->dev, NULL);
+
+	struct pw_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (o != gone) {
+			pw_input_apply_rotation(server, o);
+			break;
+		}
+	}
 }
 
 static int64_t now_ms(void)
@@ -711,7 +748,7 @@ static void handle_request_set_cursor(struct wl_listener *l, void *data)
 	(void)l; (void)data;
 }
 
-void pw_input_init(struct pw_server *server)
+bool pw_input_init(struct pw_server *server)
 {
 	memset(&st, 0, sizeof(st));
 	wl_list_init(&touch_devs);
@@ -730,6 +767,16 @@ void pw_input_init(struct pw_server *server)
 	wl_list_init(&server->keyboards);
 	server->seat = wlr_seat_create(server->display, "seat0");
 	server->cursor = wlr_cursor_create();
+	server->virtual_keyboard_mgr =
+		wlr_virtual_keyboard_manager_v1_create(server->display);
+	if (!server->seat || !server->cursor || !server->virtual_keyboard_mgr) {
+		pw_log(WLR_ERROR, "cannot create seat, cursor or virtual keyboard");
+		/* no listeners yet: pw_input_finish must see no cursor */
+		if (server->cursor)
+			wlr_cursor_destroy(server->cursor);
+		server->cursor = NULL;
+		return false;
+	}
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
 	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
@@ -738,8 +785,6 @@ void pw_input_init(struct pw_server *server)
 	st.th_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server->display), th_timer_cb, NULL);
 
-	server->virtual_keyboard_mgr =
-		wlr_virtual_keyboard_manager_v1_create(server->display);
 	server->new_virtual_keyboard.notify = handle_new_virtual_keyboard;
 	wl_signal_add(&server->virtual_keyboard_mgr->events.new_virtual_keyboard,
 		&server->new_virtual_keyboard);
@@ -773,6 +818,7 @@ void pw_input_init(struct pw_server *server)
 	wl_signal_add(&server->seat->events.request_set_cursor, &server->request_set_cursor);
 	server->request_set_selection.notify = handle_request_set_selection;
 	wl_signal_add(&server->seat->events.request_set_selection, &server->request_set_selection);
+	return true;
 }
 
 void pw_input_finish(struct pw_server *server)

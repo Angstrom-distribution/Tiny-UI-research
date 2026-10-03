@@ -313,6 +313,7 @@ static void output_destroy(struct wl_listener *listener, void *data)
 		}
 	}
 
+	pw_input_output_removed(output->server, output);
 	pw_zerocopy_output_removed(output);
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->present.link);

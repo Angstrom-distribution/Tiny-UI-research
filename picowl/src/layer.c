@@ -149,11 +149,28 @@ void pw_layer_arrange(struct pw_output *output)
 	}
 }
 
+/* A mapped TOP surface with exclusive keyboard focus (launcher, OSK) must
+ * stay visible, or it would grab the keyboard unseen. */
+static bool top_has_exclusive(struct pw_server *s)
+{
+	struct pw_output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		struct pw_layer_surface *ls;
+		wl_list_for_each(ls, &o->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP], link) {
+			if (ls->mapped && ls->wlr_layer_surface->current.keyboard_interactive
+					== ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE)
+				return true;
+		}
+	}
+	return false;
+}
+
 void pw_panel_update(struct pw_server *s)
 {
 	struct pw_view *fv = s->focused_view;
 	bool hidden = s->config && s->config->panel_autohide
-		&& fv && fv->mapped && !s->panel_forced_visible;
+		&& fv && fv->mapped && !s->panel_forced_visible
+		&& !top_has_exclusive(s);
 
 	if (hidden == s->panel_hidden)
 		return;
@@ -177,10 +194,15 @@ static void handle_map(struct wl_listener *listener, void *data)
 	ls->mapped = true;
 
 	enum zwlr_layer_shell_v1_layer layer = ls->wlr_layer_surface->current.layer;
-	if (ls->wlr_layer_surface->current.keyboard_interactive
-			!= ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
-			&& (layer == ZWLR_LAYER_SHELL_V1_LAYER_TOP
-				|| layer == ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY)) {
+	enum zwlr_layer_surface_v1_keyboard_interactivity ki =
+		ls->wlr_layer_surface->current.keyboard_interactive;
+	/* An on-demand TOP surface hidden by panel autohide must not take the
+	 * keyboard unseen (an exclusive one unhides the panel in the update). */
+	if (ki != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
+			&& (layer == ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY
+				|| (layer == ZWLR_LAYER_SHELL_V1_LAYER_TOP
+					&& (!ls->server->panel_hidden
+						|| ki == ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE)))) {
 		focus_layer_surface(ls);
 	}
 	if (ls->output) {
@@ -223,6 +245,8 @@ static void handle_commit(struct wl_listener *listener, void *data)
 			|| ls->mapped != s->surface->mapped) {
 		ls->mapped = s->surface->mapped;
 		pw_layer_arrange(ls->output);
+		/* interactivity may have changed to or from exclusive */
+		pw_panel_update(ls->server);
 	}
 }
 
