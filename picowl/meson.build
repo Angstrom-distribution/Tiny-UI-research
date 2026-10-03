@@ -25,6 +25,12 @@ if not cc.has_header_symbol('wlr/backend/drm.h', 'wlr_drm_connector_set_copy_typ
   error('wlroots-0.19 lacks the picowl patches (0001-pixman, 0002-memcpy, 0003-rotation). ' +
         'Use --force-fallback-for=wlroots or install the patched build.')
 endif
+# Patch 0004 fixes a use-after-free in the lease grant, so leasing needs it.
+if not cc.has_header_symbol('wlr/backend/drm.h', 'WLR_DRM_LEASE_OVERLAY_PLANES',
+    dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
+  error('wlroots-0.19 lacks the picowl patch 0004-drm-lease-overlay-planes. ' +
+        'Use --force-fallback-for=wlroots or install the patched build.')
+endif
 wayland_server = dependency('wayland-server')
 wayland_protos = dependency('wayland-protocols', version: '>=1.32')
 xkbcommon = dependency('xkbcommon')
@@ -86,11 +92,15 @@ sources = files(
   'src/copytype.c',
   'src/copyrel.c',
   'src/zerocopy.c',
+  'src/zbproto.c',
+  'src/zbquota.c',
   'src/mem.c',
   'src/backlight.c',
   'src/powersupply.c',
   'src/dim.c',
   'src/power.c',
+  'src/lease.c',
+  'src/leasepolicy.c',
 )
 
 pwcursorfit = static_library(

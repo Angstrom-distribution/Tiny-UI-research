@@ -28,6 +28,20 @@ void pw_power_set_blanked(struct pw_server *server, bool blanked);
  * power.c (output power management protocol). */
 void pw_power_sync_blanked(struct pw_server *server);
 
+/* Reasons to hold the idle timers (dim and blank); several can be set. */
+enum {
+	PW_INHIBIT_CLIENT  = 1 << 0, /* idle-inhibit from a visible surface (idle.c) */
+	PW_INHIBIT_SESSION = 1 << 1, /* session inactive: another VT owns the display */
+	PW_INHIBIT_LEASE   = 1 << 2, /* the display is leased to a KMS client (lease.c) */
+};
+
+/* Set or clear one inhibit reason. While any reason holds (CLIENT only if
+ * the profile's `inhibit` is on) the timers stop: a DIMMED screen is
+ * undimmed, a BLANKED one stays blank. On release the timers restart from
+ * now. The power key and the output power protocol still blank. NULL-safe
+ * like the other pw_power_* calls. */
+void pw_power_inhibit(struct pw_server *server, unsigned reason, bool on);
+
 /* Remove event sources, restore user brightness, free state. NULL-safe,
  * idempotent. Called by pw_server_finish() before the display goes away. */
 void pw_power_finish(struct pw_server *server);

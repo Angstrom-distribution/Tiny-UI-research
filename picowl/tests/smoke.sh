@@ -33,9 +33,29 @@ OUT=$("$CLIENT" --zerocopy 2>&1) || fail "zerocopy client failed: $OUT"
 echo "$OUT"
 case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy degradation message" ;; esac
 case "$OUT" in *mapped*) ;; *) fail "zerocopy client did not report mapped" ;; esac
+# Headless has no picowl-buffer global: the count request degrades the same way.
+OUT=$("$CLIENT" --zerocopy-count 7 --app-id mediaplayer 2>&1) || fail "zerocopy-count client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy-count degradation message" ;; esac
+case "$OUT" in *mapped*) ;; *) fail "zerocopy-count client did not report mapped" ;; esac
+# Likewise no global to probe, and a v2-capable client must not choke on that.
+OUT=$("$CLIENT" --probe 2>&1) || fail "probe client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"probe bufmgr none"*) ;; *) fail "headless picowl advertises picowl-buffer" ;; esac
 if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
 	fail "picowl log has 'Failed to upload buffer'"
 fi
+
+OUT=$("$CLIENT" --inhibit 2>&1) || fail "inhibit client failed: $OUT"
+case "$OUT" in *mapped*) ;; *) fail "inhibit client did not report mapped" ;; esac
+sleep 0.2
+grep -q 'idle inhibit on' "$DIR/picowl.log" || fail "no 'idle inhibit on' in picowl log"
+grep -q 'idle inhibit off' "$DIR/picowl.log" || fail "no 'idle inhibit off' in picowl log"
+
+# Headless has no DRM backend: no lease global, and a clean teardown of the
+# NULL manager (wlroots asserts on a leftover request listener).
+grep -q 'lease: no DRM backend, disabled' "$DIR/picowl.log" || fail "no 'lease: no DRM backend' in picowl log"
+OUT=$("$CLIENT" --expect-no-global wp_drm_lease_device_v1 2>&1) || fail "lease global advertised: $OUT"
 
 kill -TERM "$PID"
 i=0

@@ -7,6 +7,7 @@
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <wlr/backend/drm.h>
+#include <wlr/backend/session.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_output_layout.h>
@@ -341,11 +342,10 @@ static enum wl_output_transform output_config_transform(
 	return wild ? wild->transform : WL_OUTPUT_TRANSFORM_NORMAL;
 }
 
-static void output_new(struct wl_listener *listener, void *data)
+/* Set up a new output: format, rotation, copy-type, scene, layout. Called
+ * from output_new, or on session resume for a parked output. */
+static void output_adopt(struct pw_server *server, struct wlr_output *wlr_output)
 {
-	struct pw_server *server = wl_container_of(listener, server, new_output);
-	struct wlr_output *wlr_output = data;
-
 	if (!wlr_output_init_render(wlr_output, server->allocator,
 			server->renderer))
 		return;
@@ -459,6 +459,67 @@ static void output_new(struct wl_listener *listener, void *data)
 	pw_zerocopy_output_added(output);
 	pw_output_update_geometry(output);
 	pw_view_arrange_all(server);
+	pw_lease_offer(output);
+}
+
+/* ---- outputs which appear while the session is inactive ---------------- */
+
+/* The commit would fail without the DRM device, and wlroots does not emit
+ * new_output again on resume. This happens when a lease ends while another
+ * VT is active. The wlr_output waits here until the session is active. */
+struct pw_parked {
+	struct wl_list link;       /* parking.list */
+	struct wlr_output *wlr_output;
+	struct wl_listener destroy;
+};
+
+static struct {
+	struct pw_server *server;
+	struct wl_list list;       /* struct pw_parked */
+	struct wl_listener session_active;
+	bool listening;
+} parking;
+
+static void parked_destroy(struct wl_listener *listener, void *data)
+{
+	(void)data;
+	struct pw_parked *p = wl_container_of(listener, p, destroy);
+	wl_list_remove(&p->destroy.link);
+	wl_list_remove(&p->link);
+	free(p);
+}
+
+static void output_new(struct wl_listener *listener, void *data)
+{
+	struct pw_server *server = wl_container_of(listener, server, new_output);
+	struct wlr_output *wlr_output = data;
+
+	if (server->session && !server->session->active) {
+		struct pw_parked *p = calloc(1, sizeof(*p));
+		if (!p)
+			return;
+		p->wlr_output = wlr_output;
+		p->destroy.notify = parked_destroy;
+		wl_signal_add(&wlr_output->events.destroy, &p->destroy);
+		wl_list_insert(parking.list.prev, &p->link);
+		pw_log(WLR_INFO, "output %s: session inactive, waiting for it",
+			wlr_output->name);
+		return;
+	}
+	output_adopt(server, wlr_output);
+}
+
+static void parking_session_active(struct wl_listener *listener, void *data)
+{
+	(void)listener; (void)data;
+	if (!parking.server->session->active)
+		return;
+	struct pw_parked *p, *tmp;
+	wl_list_for_each_safe(p, tmp, &parking.list, link) {
+		struct wlr_output *wlr_output = p->wlr_output;
+		parked_destroy(&p->destroy, NULL);
+		output_adopt(parking.server, wlr_output);
+	}
 }
 
 void pw_output_rotate(struct pw_output *o, enum wl_output_transform t)
@@ -583,6 +644,13 @@ static void output_power_set_mode(struct wl_listener *listener, void *data)
 void pw_output_init(struct pw_server *server)
 {
 	wl_list_init(&server->outputs);
+	parking.server = server;
+	wl_list_init(&parking.list);
+	if (server->session) {
+		parking.session_active.notify = parking_session_active;
+		wl_signal_add(&server->session->events.active, &parking.session_active);
+		parking.listening = true;
+	}
 
 	server->new_output.notify = output_new;
 	wl_signal_add(&server->backend->events.new_output, &server->new_output);
@@ -593,6 +661,21 @@ void pw_output_init(struct pw_server *server)
 		wl_signal_add(&server->output_power_mgr->events.set_mode,
 			&server->output_power_set_mode);
 	}
+}
+
+void pw_output_finish(struct pw_server *server)
+{
+	(void)server;
+	if (!parking.server) /* pw_output_init() did not run */
+		return;
+	parking.server = NULL;
+	if (parking.listening) {
+		wl_list_remove(&parking.session_active.link);
+		parking.listening = false;
+	}
+	struct pw_parked *p, *tmp;
+	wl_list_for_each_safe(p, tmp, &parking.list, link)
+		parked_destroy(&p->destroy, NULL);
 }
 
 void pw_output_blank(struct pw_server *server, bool blank)

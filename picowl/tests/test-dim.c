@@ -258,5 +258,91 @@ int main(void)
 	EQ64(pw_dim_next_deadline(&d), 200);
 	EQ(pw_dim_tick(&d, 200), B);
 
+	/* Inhibit while ACTIVE: no timers at all */
+	fresh();
+	EQ(pw_dim_set_inhibited(&d, true, 0), 0);
+	EQ(pw_dim_tick(&d, 10000), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ(pw_dim_set_inhibited(&d, true, 10), 0); /* same value: no-op */
+
+	/* Inhibit while DIMMED: UNDIM, back to ACTIVE */
+	fresh();
+	EQ(pw_dim_tick(&d, 100), D);
+	EQ(pw_dim_set_inhibited(&d, true, 150), UD);
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ64(pw_dim_next_deadline(&d), -1);
+
+	/* Inhibit while BLANKED: stays blank; a client never unblanks */
+	fresh();
+	EQ(pw_dim_force_blank(&d), B);
+	EQ(pw_dim_set_inhibited(&d, true, 300), 0);
+	EQS(d.state, PW_DIM_BLANKED);
+	EQ(pw_dim_force_unblank(&d, 400), UB); /* power key wins, no timers after */
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQS(d.state, PW_DIM_ACTIVE);
+
+	/* Release restarts the timers from the release time */
+	fresh();
+	EQ(pw_dim_set_inhibited(&d, true, 0), 0);
+	EQ(pw_dim_set_inhibited(&d, false, 5000), 0);
+	EQ64(pw_dim_next_deadline(&d), 5100);
+	EQ(pw_dim_tick(&d, 5100), D);
+	EQ(pw_dim_set_inhibited(&d, false, 5200), 0); /* same value: no-op */
+
+	/* force_blank and BLANKED activity while inhibited */
+	fresh();
+	EQ(pw_dim_set_inhibited(&d, true, 0), 0);
+	EQ(pw_dim_force_blank(&d), B);
+	EQ(pw_dim_activity(&d, 100), UB | SW);
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ64(pw_dim_next_deadline(&d), -1);
+
+	/* set_timeouts while inhibited takes effect on release */
+	fresh();
+	EQ(pw_dim_set_inhibited(&d, true, 0), 0);
+	EQ(pw_dim_set_timeouts(&d, 50, 80, 10000), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQ(pw_dim_set_inhibited(&d, false, 20000), 0);
+	EQ64(pw_dim_next_deadline(&d), 20050);
+
+	/* Release while BLANKED: stays blank, no deadline */
+	fresh();
+	EQ(pw_dim_set_inhibited(&d, true, 0), 0);
+	EQ(pw_dim_force_blank(&d), B);
+	EQ(pw_dim_set_inhibited(&d, false, 500), 0);
+	EQS(d.state, PW_DIM_BLANKED);
+	EQ64(pw_dim_next_deadline(&d), -1);
+
+	/* Lease (lease.c): the grant unblanks first, then holds like an inhibitor,
+	 * and the end restarts the timers from that moment. */
+	fresh();
+	EQ(pw_dim_force_blank(&d), B);
+	EQ(pw_dim_force_unblank(&d, 1000), UB);
+	EQ(pw_dim_set_inhibited(&d, true, 1000), 0);
+	EQ(pw_dim_tick(&d, 900000), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQ(pw_dim_activity(&d, 5000), 0); /* touch under the lease: no wake-up swallowed */
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ(pw_dim_set_inhibited(&d, false, 60000), 0);
+	EQ64(pw_dim_next_deadline(&d), 60100);
+	EQ(pw_dim_tick(&d, 60200), B | 0); /* both due: straight to blank */
+
+	/* A DIMMED screen is undimmed by the grant; a profile switch during the
+	 * lease does not arm anything. */
+	fresh();
+	EQ(pw_dim_tick(&d, 100), D);
+	EQ(pw_dim_set_inhibited(&d, true, 150), UD);
+	EQ(pw_dim_set_timeouts(&d, 10, 20, 200), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ(pw_dim_set_inhibited(&d, false, 1000), 0);
+	EQ64(pw_dim_next_deadline(&d), 1010);
+
+	/* pw_dim_init clears the flag */
+	d.inhibited = true;
+	pw_dim_init(&d, 100, 200);
+	EQ64(pw_dim_next_deadline(&d), 100);
+
 	return fails ? 1 : 0;
 }

@@ -1,6 +1,8 @@
 # Per-app buffer budget
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** implemented.
+
+Implementation: `src/zbquota.h/.c` (pure limits), `src/zerocopy.c` (`rule_for_client`, `mgr_create_buffer`), `src/config.c` and `src/picowl.h` (keys, `[app.*]` pool fields, `pw_config_app`). Details and deviations are in the final section, "Implementation notes".
 
 Scope: make the `picowl-buffer-v1` allocation limits configurable, with a per-`app_id` override, so the media player can get up to 7 buffers (work item 7, `doc/mediaplayer-integration.md:133`). The `caching` event (the other half of item 7) is a separate plan. This plan only makes sure the two don't collide.
 
@@ -315,3 +317,14 @@ Hardware-only checklist (hx4700 and h2200 at least, plus the h3970 for the CMA p
 | Config tests, ini example, README, buffers.md, zero-copy.md, XML text | 0.25 day [est] |
 | `pw-test-client --zerocopy-count` and the hardware checklist on 2-3 boards | 0.5-1 day [est] |
 | **Total** | **about 2-2.75 days [est]**, about 250 lines of C including tests [est] |
+
+## Implementation notes
+
+- **Shared rule type.** The per-app-hold plan landed first with `struct pw_app_rule` (kind `PW_RULE_APP` or `PW_RULE_LAYER`, list `pw_config.app_rules`), so the plan's `struct pw_app_config` and `apps` list do not exist. The buffer fields (`zb_buffers`, `zb_budget_kb`, `zb_pool`, `exe`) were added to `pw_app_rule`. `pw_config_app()` returns the `PW_RULE_APP` rule for an app_id. `zerocopy_*` keys and `exe` are accepted only in `[app.*]`; in `[layer.*]` they fall into the "unknown key" log.
+- **Parsing.** One helper, `parse_int_log()`, does the range checks with `strtol` and rejects trailing junk (the plan said `atoi`). `total_kb` accepts 0..65536. A rule gets a pool if `zerocopy_buffers` or `zerocopy_budget_kb` was accepted; pool numbers are assigned after parsing, so merged sections and bad values are settled first. `exe` needs `realpath()`, so `config.c` defines `_XOPEN_SOURCE 700` (the project's `_POSIX_C_SOURCE` alone hides it in glibc).
+- **`zbquota` additions.** The plan's three functions plus `pw_zb_round()` (page rounding with overflow check, also used for the real size), `pw_zb_pool_cap()` (kb or buffers x frame, saturating) and `pw_zb_exe_match()`. The last one reads `/proc/<pid>/exe`, so unlike the rest of the module it is not integer-only, but it needs no wlroots and can be unit-tested with `getpid()`. `exe_ok` from the plan is that function.
+- **Real size.** The charge is the larger of the page-rounded request and the rounded `lseek(fd, 0, SEEK_END)` size (a smaller `lseek` result is not trusted). A buffer which only exceeds a limit by its real size is dropped and answered `no_memory`. Without a usable `lseek` the size is `stride * h`, rounded.
+- **`rule_for_client`** follows the plan. It does not walk `server->views`. With an `exe` rule that does not match, the loop goes on to the client's other toplevels instead of returning.
+- **DEBUG log.** One line per rejection with pid, app_id, the limit hit and used/cap. The plan's extra DEBUG line at refund was not added.
+- **Not done.** The open questions (OOM attribution, a `budget` event, trusted spawn) are unchanged.
+- **Tests.** `tests/test-zbquota.c` (the plan's cases, plus `pw_zb_pool_cap`, `pw_zb_round` and `pw_zb_exe_match`); `tests/test-config.c` `test_zerocopy_limits` with `tests/test-config-zb.ini`; `tests/pw-test-client.c` gets `--zerocopy-count N` and `--app-id ID`, and `tests/smoke.sh` runs `--zerocopy-count 7 --app-id mediaplayer` headless (wl_shm fallback). `rule_for_client`, the real-size path and the pools need a DRM allocator; they are on the hardware checklist in `doc/zero-copy.md`.

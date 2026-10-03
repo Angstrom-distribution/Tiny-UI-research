@@ -1,6 +1,8 @@
 # Per-app tap-and-hold setting
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** implemented.
+
+Implementation: `src/picowl.h` (enums and structures), `src/config.c` (parser and lookup), `src/touchhold.h/.c` (pw_touchhold_set_params), `src/input.c` (hold_identity and per-app binding).
 
 Adds per-`app_id` (xdg toplevels) and per-namespace (layer-shell) overrides of the `[touch]` tap-and-hold keys. The effective setting is chosen at touch-down from the surface under the finger and stays fixed until lift. It needs no protocol, no new source file and no change to `view.c`.
 
@@ -308,3 +310,11 @@ Run `picowl -d 2` with `[app.mediaplayer] hold_action = none`, and the player wi
 | Docs (README, `cursors.md`, `picowl.ini.example`) | 1 h |
 | Hardware checklist on one copy-type board and the h3900 | 2 h |
 | **Total** | **about 1.5 days** |
+
+## Implementation notes
+
+- **Parser shape.** The parser keeps a local `cur_rule`, reset at each section header and created lazily on the first key line by `find_or_add_rule()`. The `[app.*]` and `[layer.*]` sections share one branch. The empty-name error is logged at the section header, not per key.
+- **Rule validation.** Rule resolution is a loop at the end of `pw_config_load()` (there is no separate `resolve_rules()`), after the `[touch]` validation. It uses the same checks as `[touch]` (`hold_ms > hold_delay_ms`, `slop_px` 0..64). When they fail it reverts only the three timings to `[touch]` and keeps the rule's resolved `hold_action`. An invalid `hold_action` value is ignored and inherited. A negative `hold_delay_ms` is not rejected, as in `[touch]`. The state machine clamps it.
+- **`pw_touchhold_init`** is now `state = IDLE`, then `pw_touchhold_set_params()`, then clearing the down point.
+- `hold_identity()` and the `touch_handle_down` change follow the plan. `hold_identity()` is covered on hardware only.
+- Tests: `tests/test-config.ini` (the plan's rules plus `nonebad`, and empty `[app.]`/`[layer.]`) and a second file, `tests/test-config-hold.ini`, with a non-default `[touch]` to check inheritance independent of section order and the unset-key versus bad-value distinction.

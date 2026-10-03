@@ -7,12 +7,13 @@ after rendering.
 
 Targets:
 
-| Driver | Kind | Notes |
-|---|---|---|
-| mq11xx (MediaQ, h2210/h5550) | copy-type | shmem shadow plane; the kernel copies FB_DAMAGE_CLIPS rectangles to VRAM during the commit; primary plane has `rotation` |
-| w100 (hx4700) | copy-type | as above |
-| sa1100-lcdc (h3870) | copy-type | persistent buffer, as above |
-| pxa-lcdc (h3970) | scanout | scans GEM DMA buffers directly from a 1 MiB CMA pool |
+| Driver | Kind | `caching` (client buffers) | Notes |
+|---|---|---|---|
+| mq11xx (MediaQ, h2210/h5550) | copy-type | cacheable | shmem shadow plane; the kernel copies FB_DAMAGE_CLIPS rectangles to VRAM during the commit; primary plane has `rotation` |
+| w100 (hx4700) | copy-type | cacheable | as above |
+| sa1100-lcdc (h3870) | copy-type | write_combined | persistent buffer, as above, but CMA (per `mediaplayer-integration.md`; unverified, see the checklist) |
+| pxa-lcdc (h3970) | scanout | write_combined | scans GEM DMA buffers directly from a 1 MiB CMA pool |
+| anything else | scanout | write_combined | the safe default |
 
 Every display is RGB565.
 
@@ -37,8 +38,13 @@ serial logic: `src/copyrel.c` (pure integer state machine, unit tested).
    and `copy_type` (1 = the output copies damage to device memory, 0 = scanout).
 2. `create_buffer(w, h, RGB565)` allocates a compositor-owned dmabuf from the
    server allocator. The client gets `dmabuf` (fd, stride, offset, modifier)
-   and `done`, or `failed(reason)`. Limits: 3 buffers per client, 2 MiB in
-   total.
+   and `done`, or `failed(reason)`. Limits (`src/zbquota.c`, wired in
+   `mgr_create_buffer`): buffers per client, then the memory of the client's
+   pool, then an optional ceiling over all pools. Defaults: 3 buffers, one
+   2 MiB pool shared by clients without an `[app.*]` rule. A rule selected by
+   the `xdg_toplevel` app_id (see the README) has its own pool. The check runs
+   before the allocation, and sizes are page-rounded real sizes (`lseek` on the
+   dmabuf fd).
 3. The client wraps the fd in a wl_buffer with `zwp_linux_dmabuf_v1`
    (`params.add` + `create_immed`).
 4. `attach_surface(surface)` makes the compositor number the commits of that
@@ -130,6 +136,34 @@ overrides per output (`auto | yes | no`). The result is passed to wlroots with
 the `copy_type` event. The log line is
 `output NAME: driver 'X' copy_type=yes|no rotation_mode=...`.
 
+## Caching event
+
+picowl-buffer-v1 version 2 adds `caching` to the manager: once, on bind, after
+`copy_type`. It tells whether the CPU mapping of the dmabufs is cacheable
+(`1`) or write-combined or uncached (`0`), so that a client knows if it may
+read back from a buffer or decode into one. It is not derived from `copy_type`,
+which describes the outputs: an old kernel without CLOSEFB, a `[copytype]`
+override or a runtime change of `copy_type` does not change the memory.
+
+`pw_zerocopy_init` reads the driver name of the backend's DRM fd with
+`drmGetVersion` (picowl has one allocator, so one value) and
+`pw_caching_resolve` (`src/copytype.c`) maps it with the table above, or with
+the `[zerocopy] caching` override (`auto | cacheable | write_combined`). The
+value is fixed for the life of the process. `pw_zbproto_send_bind`
+(`src/zbproto.c`) sends `format`, `copy_type` and `caching`, and sends
+`caching` only to managers bound at version 2 or later: libwayland does not
+check event versions on the server side, and a version 1 client would be
+disconnected or abort. The log line is
+`zero-copy enabled (copy_type=N caching=cacheable|write_combined driver 'D')`.
+An unknown driver, or a failed `drmGetVersion`, gives `write_combined`, which
+is wrong only in the safe direction (one extra pass in the player instead of
+slow reads); `[zerocopy] caching = cacheable` fixes it. If the table says
+cacheable for memory that is really write-combined, the output stays correct
+but every read-back is slow, which `pw-test-client --zerocopy --readback`
+shows. `caching` does not change the commit and answer rules (`copied`,
+`retained`). The CPU cache coherency of the driver's damage copy is the kernel
+driver's job, as before.
+
 ## Single-buffer swapchain
 
 On a copy-type output the kernel copies out of the framebuffer during the
@@ -197,7 +231,7 @@ rotated image is produced by the display controller, not by the CPU.
   the output with `wlr_cursor_map_input_to_output`, so for software rotation
   wlr_cursor applies the output transform to the touch coordinates.
 
-## The three patches and their wiring
+## The four patches and their wiring
 
 Kept in `subprojects/packagefiles/wlroots/` and `oe/recipes-graphics/wlroots/files/`
 (byte identical, checked with `diff -r`).
@@ -205,10 +239,11 @@ Kept in `subprojects/packagefiles/wlroots/` and `oe/recipes-graphics/wlroots/fil
 1. `0001-pixman-read-dmabuf-client-buffers-via-mmap.patch`
 2. `0002-pixman-pass-memcpy-and-fill-fast-paths.patch`
 3. `0003-drm-hardware-rotation-and-copy-type.patch`
+4. `0004-drm-lease-overlay-planes.patch` (DRM lease, see `doc/lease.md`)
 
-Meson: `subprojects/wlroots.wrap` has `diff_files = wlroots/0001..., 0002..., 0003...`.
+Meson: `subprojects/wlroots.wrap` has `diff_files = wlroots/0001..., 0002..., 0003..., 0004...`.
 OpenEmbedded: `wlroots_0.19.0.bb` has `FILESEXTRAPATHS:prepend := "${THISDIR}/files:"`
-and three `file://` entries in `SRC_URI`. They apply in order on a pristine
+and four `file://` entries in `SRC_URI`. They apply in order on a pristine
 0.19.0 (13a62a23) export with both `patch -p1` and `git apply`. A host prefix
 must be rebuilt with them for picowl to link (`wlr_drm_connector_set_hw_rotation`,
 `wlr_drm_connector_set_copy_type`, `wlr_drm_connector_supports_hw_rotation`).
@@ -243,7 +278,7 @@ handler, surface commit handlers or timer callbacks. Result per file
 
 | File | Result |
 |---|---|
-| `src/zerocopy.c` | one `calloc` in the `create_buffer` request handler (client-driven, bounded by 3 buffers and 2 MiB); commit, timer, present: none |
+| `src/zerocopy.c` | one `calloc` in the `create_buffer` request handler (client-driven, bounded by the buffer count and pool limits, 3 buffers and 2 MiB by default; the rule lookup walks the xdg-shell clients and allocates nothing); commit, timer, present: none |
 | `src/copyrel.c`, `src/copytype.c`, `src/rotate.c` | none (pure logic) |
 | `src/mem.c` | none |
 | `src/output.c` | one `calloc` in `output_new` (hotplug); `output_frame`, present: none. A swapchain is created only on enable, rotate and unblank, not per frame |
@@ -285,7 +320,32 @@ are compiled and unit tested only. On a device verify:
 - direct scanout on pxa-lcdc from the 1 MiB CMA pool (a full RGB565 240x320 frame
   is 150 KiB; picowl-buffer budget 2 MiB must fit CMA together with the
   framebuffer); the software cursor is the only thing that blocks it;
-- VmHWM on device against the headless numbers above.
+- VmHWM on device against the headless numbers above;
+- buffer limits (`rule_for_client` and `exe` matching need real clients and a
+  DRM allocator, so no CI): without a rule `pw-test-client --zerocopy-count 7`
+  is granted 3 and the debug log says "over count"; with
+  `[app.picowl-test-client] zerocopy_buffers = 7` it gets 7 and, on the hx4700,
+  `Shmem` in `/proc/meminfo` grows by about 4200 KiB and returns to the
+  baseline on exit; a second client with `--app-id picowl-test-client` while
+  the first holds 7 gets none (shared pool); with `exe =` set, the same
+  app_id from another binary gets the default limits; on the h3970 a rule of 7
+  is granted what CMA allows, then `no_memory`, and picowl keeps rendering
+  (check dmesg for CMA warnings; unblank and rotate still work).
+- caching event: the log line `zero-copy enabled (copy_type=... caching=...
+  driver '...')` shows h2210 and h5550 `1 cacheable`, hx4700 `1 cacheable`,
+  h3870 `1 write_combined`, h3970 `0 write_combined`;
+  `pw-test-client --zerocopy --readback` prints a `caching=` matching the log,
+  and `readback_us` on `write_combined` boards should be several times that
+  of `cacheable` boards at the same size. If sa1100-lcdc or mq11xx read like
+  the other class, the table is wrong (does the sa1100-lcdc driver use CMA,
+  and do mq11xx and w100 set `map_wc` on their shmem objects? Both are out of
+  tree and unverified);
+- a client built from the v1 XML (or `--bind-version 1`) runs 5 frames with no
+  protocol error, and a version 2 client against an old (version 1) picowl
+  binds 1 and prints `caching=-1`;
+- blank, unblank and output hot-unplug re-send `copy_type` only, never
+  `caching` (`WAYLAND_DEBUG=1`);
+- on a kernel without CLOSEFB, mq11xx shows `copy_type=0 caching=cacheable`.
 
 ## C8 / 8-bpp palettised output on MediaQ
 

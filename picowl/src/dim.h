@@ -28,12 +28,19 @@
  *  force_blank / force_unblank: manual toggle (TOGGLE_BLANK, output power
  *    protocol). BLANKED state without timers; returns BLANK / UNBLANK (0 if
  *    already there). unblank restarts timers, no SWALLOW_INPUT.
+ *  set_inhibited: a visible client holds an idle inhibitor. While inhibited
+ *    tick() returns 0 and next_deadline() is -1; activity, force_blank and
+ *    force_unblank behave as before. on: DIMMED -> ACTIVE, UNDIM (a client
+ *    may undim, never unblank); ACTIVE and BLANKED unchanged. off: unless
+ *    BLANKED, last_activity = now (timers restart from the release), then
+ *    like tick(now). Returns 0 if the value did not change.
  *  next_deadline: absolute ms of the next transition, -1 if none (BLANKED,
  *    or all timeouts disabled).
  */
 #ifndef PICOWL_DIM_H
 #define PICOWL_DIM_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 enum pw_dim_state {
@@ -55,6 +62,7 @@ struct pw_dim {
 	int64_t dim_ms;
 	int64_t blank_ms;
 	int64_t last_activity;
+	bool inhibited;
 };
 
 /* Starts ACTIVE with last_activity = 0 (call pw_dim_activity(now) to set). */
@@ -64,6 +72,7 @@ unsigned pw_dim_tick(struct pw_dim *d, int64_t now);
 unsigned pw_dim_set_timeouts(struct pw_dim *d, int64_t dim_ms, int64_t blank_ms, int64_t now);
 unsigned pw_dim_force_blank(struct pw_dim *d);
 unsigned pw_dim_force_unblank(struct pw_dim *d, int64_t now);
+unsigned pw_dim_set_inhibited(struct pw_dim *d, bool on, int64_t now);
 int64_t pw_dim_next_deadline(const struct pw_dim *d);
 
 #endif

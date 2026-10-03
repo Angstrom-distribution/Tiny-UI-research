@@ -37,10 +37,34 @@ dmabuf_client_c = custom_target('linux-dmabuf-client-code',
   input: dmabuf_xml, output: 'linux-dmabuf-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
+inhibit_xml = wl_proto_dir / 'unstable' / 'idle-inhibit' / 'idle-inhibit-unstable-v1.xml'
+inhibit_client_h = custom_target('idle-inhibit-client-header',
+  input: inhibit_xml, output: 'idle-inhibit-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+inhibit_client_c = custom_target('idle-inhibit-client-code',
+  input: inhibit_xml, output: 'idle-inhibit-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
+lease_xml = wl_proto_dir / 'staging' / 'drm-lease' / 'drm-lease-v1.xml'
+lease_client_h = custom_target('drm-lease-client-header',
+  input: lease_xml, output: 'drm-lease-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+lease_client_c = custom_target('drm-lease-client-code',
+  input: lease_xml, output: 'drm-lease-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 pw_test_client = executable('pw-test-client',
   'pw-test-client.c', xdg_client_h, xdg_client_c,
   pb_client_h, pb_client_c, dmabuf_client_h, dmabuf_client_c,
+  inhibit_client_h, inhibit_client_c,
   dependencies: [wayland_client])
+
+# Opt-in (PW_LEASE_VKMS=1), needs root, the vkms module and /dev/dri; skips
+# (exit 77) otherwise.
+pw_lease_client = executable('pw-lease-client',
+  'pw-lease-client.c', xdg_client_h, xdg_client_c,
+  lease_client_h, lease_client_c,
+  dependencies: [wayland_client, libdrm])
 
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client],
@@ -69,9 +93,14 @@ test('cursor-builtin', test_cursor_builtin_exe)
 
 test_inc = include_directories('../src')
 
+test('leasepolicy', executable('test-leasepolicy', 'test-leasepolicy.c',
+  '../src/leasepolicy.c', protocol_headers, dependencies: [wlroots, wayland_server],
+  include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',
+  include_directories: test_inc))
+test('zbquota', executable('test-zbquota', 'test-zbquota.c', '../src/zbquota.c',
   include_directories: test_inc))
 test('copyrel', executable('test-copyrel', 'test-copyrel.c', '../src/copyrel.c',
   include_directories: test_inc))
@@ -80,6 +109,10 @@ test('pixman-pass', executable('test-pixman-pass', 'test-pixman-pass.c',
 test('pixman-dmabuf', executable('test-pixman-dmabuf', 'test-pixman-dmabuf.c',
   dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
 
+test('bufproto', executable('test-bufproto', 'test-bufproto.c', '../src/zbproto.c',
+  protocol_headers, picowl_buffer_code, pb_client_h,
+  dependencies: [wayland_server, wayland_client, libdrm], include_directories: test_inc),
+  args: [pw_test_client], timeout: 60)
 test('rss', find_program('sh'),
   args: [files('rss.sh'), picowl_exe, pw_test_client],
   env: {'PW_RSS_CEILING_KB': get_option('rss_ceiling_kb').to_string()},
@@ -91,5 +124,10 @@ foreach t : ['backlight', 'powersupply', 'dim']
 endforeach
 
 test('power-e2e', find_program('sh'),
-  args: [files('power-e2e.sh'), picowl_exe],
-  timeout: 30)
+  args: [files('power-e2e.sh'), picowl_exe, pw_test_client],
+  timeout: 90)
+
+test('lease-vkms', find_program('sh'),
+  args: [files('lease-vkms.sh'), picowl_exe, pw_lease_client],
+  suite: 'vkms',
+  timeout: 120)

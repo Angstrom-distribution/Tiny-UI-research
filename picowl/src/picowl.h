@@ -16,6 +16,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -96,6 +97,34 @@ enum pw_hold_action {
 	PW_HOLD_NONE,              /* no hold detection, immediate left press */
 };
 
+enum pw_rule_kind {
+	PW_RULE_APP,               /* app_id (xdg_toplevel) */
+	PW_RULE_LAYER,             /* namespace (zwlr_layer_surface_v1) */
+};
+
+struct pw_hold_params {
+	enum pw_hold_action action;
+	int delay_ms, hold_ms, slop_px;
+};
+
+#define PW_HOLD_SET_ACTION (1u << 0)
+#define PW_HOLD_SET_DELAY  (1u << 1)
+#define PW_HOLD_SET_HOLD   (1u << 2)
+#define PW_HOLD_SET_SLOP   (1u << 3)
+
+struct pw_app_rule {
+	struct wl_list link;          /* pw_config.app_rules, file order */
+	enum pw_rule_kind kind;
+	char *name;                   /* app_id or layer namespace */
+	unsigned set;                 /* PW_HOLD_SET_*: keys given in the section */
+	struct pw_hold_params hold;   /* fully resolved after pw_config_load() */
+	/* [app.*] only: picowl-buffer-v1 limits (zerocopy_* keys) */
+	int zb_buffers;               /* -1 = [zerocopy] max_buffers_per_client */
+	int zb_budget_kb;             /* -1 = zb_buffers x frame of the largest output */
+	unsigned zb_pool;             /* 0 = no pool (default pool), else 1..zb_n_pools-1 */
+	char *exe;                    /* realpath the client binary must have, or NULL */
+};
+
 struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
@@ -111,6 +140,7 @@ struct pw_config {
 	int hold_ms;               /* right click fires after this, measured from
 	                            * touch-down (default 900) */
 	int slop_px;               /* movement tolerance (default 8) */
+	struct wl_list app_rules;   /* struct pw_app_rule */
 
 	/* [cursor] */
 	char *hold_animation;      /* path to PAM strip, or NULL = builtin */
@@ -122,7 +152,12 @@ struct pw_config {
 	struct wl_list rotation_modes; /* struct pw_output_rotmode */
 	struct wl_list copy_overrides; /* struct pw_output_copyover */
 	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
+	enum pw_caching_override caching_override; /* [zerocopy] caching (default auto) */
 	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
+	int zb_max_buffers;        /* buffers per client (default 3) */
+	int zb_budget_kb;          /* pool of clients without an [app.*] pool (default 2048) */
+	int zb_total_kb;           /* ceiling over all pools, 0 = none (default 0) */
+	unsigned zb_n_pools;       /* 1 (default pool) + [app.*] rules with a pool */
 	bool panel_autohide;       /* hide the panel while an app is fullscreen (default true) */
 	int arena_max;             /* M_ARENA_MAX (default 1) */
 	int trim_threshold_kb;     /* M_TRIM_THRESHOLD in kB (default 256) */
@@ -139,6 +174,10 @@ struct pw_config {
 	int poll_s;                /* fallback sysfs re-read period, 0 = off (default 300) */
 	struct pw_power_timing power[PW_PROFILE_COUNT]; /* indexed by enum pw_power_profile */
 	int low_max_brightness_pct; /* brightness cap while LOW, % of max (default 40, 1..100) */
+
+	/* [lease] */
+	bool lease_enable;         /* offer wp_drm_lease_device_v1 (default true) */
+	char *lease_allow;         /* comma-separated app_ids, "*" = any (default "mediaplayer") */
 };
 
 /*
@@ -263,10 +302,13 @@ struct pw_server {
 
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_mgr;
 	struct wlr_idle_notifier_v1 *idle_notifier;
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
+	bool idle_inhibited;       /* last visibility result pushed by idle.c */
 	struct wlr_output_power_manager_v1 *output_power_mgr;
 	struct wl_event_source *idle_timer;
 	bool blanked;
 	void *power;               /* struct pw_power state, owned by power.c */
+	void *lease;               /* struct pw_lease state, owned by lease.c; NULL: no leasing */
 
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf; /* hand-built feedback, see zerocopy.c */
 	void *buffer_mgr;          /* picowl_buffer_manager_v1 state, owned by zerocopy.c */
@@ -279,6 +321,7 @@ struct pw_server {
 	struct wl_listener new_output;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_layer_surface;
+	struct wl_listener new_idle_inhibitor;
 	struct wl_listener new_input;
 	struct wl_listener new_virtual_keyboard;
 	struct wl_listener request_set_cursor;
@@ -296,6 +339,10 @@ struct pw_server {
  * scene output, commit only on frame with damage. Called by pw_server_init()
  * after the backend/renderer/scene exist. */
 void pw_output_init(struct pw_server *server);
+
+/* Remove the session listener and forget parked outputs. Called by
+ * pw_server_finish() before the backend (and its session) is destroyed. */
+void pw_output_finish(struct pw_server *server);
 
 /* Blank (true) or unblank (false) all outputs by disabling/enabling them and
  * set server->blanked from the outputs' real state (a failed unblank leaves
@@ -387,13 +434,14 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 #include "cursor.h"
 
 #include "power.h"
+#include "lease.h"
 
 /*
  * idle.c
  */
 
-/* Create the idle notifier and the idle timer from config->idle_timeout_ms.
- * Called by pw_server_init(). */
+/* Create the idle notifier and the idle-inhibit manager. Called by
+ * pw_server_init(). */
 void pw_idle_init(struct pw_server *server);
 
 /* Report user activity: notify idle clients, rearm the timer, and unblank if
@@ -403,6 +451,12 @@ void pw_idle_activity(struct pw_server *server);
 /* Only notify ext-idle-notify clients of activity (no dim/blank handling);
  * input.c pairs it with pw_power_activity() to get the swallow result. */
 void pw_idle_notify(struct pw_server *server);
+
+/* Re-evaluate whether a visible surface holds an idle inhibitor and push the
+ * result to the idle notifier and power.c on change. Cheap; called from
+ * pw_panel_update() (every focus/stacking change) and from the inhibitor
+ * create/destroy/map/unmap handlers. NULL-safe before pw_idle_init(). */
+void pw_idle_inhibit_update(struct pw_server *server);
 
 /*
  * server.c
@@ -443,6 +497,12 @@ void pw_input_apply_rotation(struct pw_server *s, struct pw_output *o);
  * remap them to another output if one remains. Implemented in input.c. */
 void pw_input_output_removed(struct pw_server *s, struct pw_output *gone);
 
+/* While the display is leased (no outputs), map every touch device to box,
+ * given in panel-native mode pixels, and restore its default calibration
+ * matrix, so touch coordinates are in the frame the lessee renders in. NULL
+ * clears the mapping. Implemented in input.c, called by lease.c. */
+void pw_input_lease_touch(struct pw_server *s, const struct wlr_box *box);
+
 /* Recompute panel visibility (autohide). Implemented in layer.c. */
 void pw_panel_update(struct pw_server *s);
 
@@ -455,5 +515,13 @@ enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *outpu
 
 /* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
+
+/* The [app.*] rule for an app_id (exact match), or NULL. NULL-safe. config.c */
+const struct pw_app_rule *pw_config_app(const struct pw_config *c, const char *app_id);
+
+/* Effective hold parameters for a surface identity. name NULL or no
+ * matching rule -> the [touch] globals. Returns true if a rule matched. */
+bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
+	const char *name, struct pw_hold_params *out);
 
 #endif

@@ -6,28 +6,30 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include "picowl.h"
+#include "zbquota.h"
+#include "zbproto.h"
 #include "picowl-buffer-v1-protocol.h"
 
 /* ZWP_LINUX_DMABUF_FEEDBACK_V1_TRANCHE_FLAGS_SCANOUT (an enum in the
  * generated linux-dmabuf protocol header, which picowl does not generate). */
 #define PW_TRANCHE_FLAGS_SCANOUT 1u
 
-#define PW_ZB_MAX_PER_CLIENT 3
-#define PW_ZB_BUDGET (2u * 1024 * 1024)
-
 struct pw_zbuf {
 	struct wl_list link;
 	struct wl_resource *resource;
 	struct wlr_surface *surface;
 	struct wlr_buffer *buffer;
-	uint32_t bytes;
+	uint32_t bytes;                 /* charged to pool and total_bytes */
+	uint16_t pool;                  /* the pool it was charged to */
 	struct pw_copyrel rel;
 	struct pw_output *direct_out;   /* copy-type output which direct-scanned the commit */
 	struct wlr_scene_buffer *sbuf;  /* the surface's scene buffer, once found */
@@ -45,6 +47,9 @@ static struct {
 	struct wl_event_source *idle_timer;
 	struct wlr_drm_format_set fmtset;
 	uint32_t total_bytes;
+	uint32_t *pool_used;    /* per pool, 0 = clients without an [app.*] pool */
+	uint32_t page;
+	uint32_t caching;       /* enum pw_caching, sent on bind, never changes */
 	bool active;
 	bool copy_type;
 } st;
@@ -269,8 +274,8 @@ static void buffer_resource_destroy(struct wl_resource *r)
 		return;
 	zbuf_detach(z);
 	wl_list_remove(&z->link);
-	if (st.total_bytes >= z->bytes)
-		st.total_bytes -= z->bytes;
+	pw_zb_refund(&st.pool_used[z->pool], z->bytes);
+	pw_zb_refund(&st.total_bytes, z->bytes);
 	if (z->buffer)
 		wlr_buffer_drop(z->buffer);
 	free(z);
@@ -280,6 +285,41 @@ static void mgr_destroy_req(struct wl_client *c, struct wl_resource *r)
 {
 	(void)c;
 	wl_resource_destroy(r);
+}
+
+/* The [app.*] rule with a pool which the client's app_id selects, or NULL for
+ * the default pool. create_buffer has no surface, and the toplevel is usually
+ * not mapped yet, so look at the xdg-shell clients rather than the views. A
+ * client with several toplevels gets the newest one which has a rule. */
+static const struct pw_app_rule *rule_for_client(struct wl_client *client)
+{
+	struct wlr_xdg_shell *sh = st.server->xdg_shell;
+	if (!sh)
+		return NULL;
+	struct wlr_xdg_client *xc;
+	wl_list_for_each(xc, &sh->clients, link) {
+		if (xc->client != client)
+			continue;
+		struct wlr_xdg_surface *xs;
+		wl_list_for_each(xs, &xc->surfaces, link) {
+			if (xs->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL || !xs->toplevel)
+				continue;
+			const struct pw_app_rule *a =
+				pw_config_app(st.server->config, xs->toplevel->app_id);
+			if (!a || !a->zb_pool)
+				continue;
+			if (a->exe) {
+				pid_t pid;
+				wl_client_get_credentials(client, &pid, NULL, NULL);
+				if (!pw_zb_exe_match(pid, a->exe)) {
+					wlr_log(WLR_DEBUG, "zero-copy: pid %d is not %s", (int)pid, a->exe);
+					continue;
+				}
+			}
+			return a;
+		}
+	}
+	return NULL;
 }
 
 static void mgr_create_buffer(struct wl_client *client, struct wl_resource *mgr,
@@ -306,14 +346,34 @@ static void mgr_create_buffer(struct wl_client *client, struct wl_resource *mgr,
 		picowl_buffer_v1_send_failed(res, PICOWL_BUFFER_V1_REASON_TOO_LARGE);
 		return;
 	}
-	uint32_t bytes = (uint32_t)w * (uint32_t)h * 2;
-	int n = 0;
+	const struct pw_config *cfg = st.server->config;
+	const struct pw_app_rule *rule = rule_for_client(client);
+	unsigned pool = rule ? rule->zb_pool : 0;
+	struct pw_zb_req rq = {
+		.bytes = pw_zb_frame_bytes(w, h, st.page),
+		.max_count = rule && rule->zb_buffers > 0 ? (unsigned)rule->zb_buffers :
+			(unsigned)cfg->zb_max_buffers,
+		.pool_used = st.pool_used[pool],
+		.pool_cap = rule ? pw_zb_pool_cap(rule->zb_budget_kb, rule->zb_buffers,
+				pw_zb_frame_bytes(mw, mh, st.page)) :
+			pw_zb_pool_cap(cfg->zb_budget_kb, 0, 0),
+		.total_used = st.total_bytes,
+		.total_cap = (uint32_t)cfg->zb_total_kb * 1024,
+	};
 	struct pw_zbuf *it;
 	wl_list_for_each(it, &st.zbufs, link)
 		if (wl_resource_get_client(it->resource) == client)
-			n++;
-	if (n >= PW_ZB_MAX_PER_CLIENT || st.total_bytes + bytes > PW_ZB_BUDGET) {
-		wlr_log(WLR_DEBUG, "zero-copy: buffer budget exceeded");
+			rq.count++;
+	enum pw_zb_verdict v = pw_zb_check(&rq);
+	if (v != PW_ZB_OK) {
+		pid_t pid;
+		wl_client_get_credentials(client, &pid, NULL, NULL);
+		wlr_log(WLR_DEBUG, "zero-copy: pid %d app_id %s over %s: %u of %u buffers, "
+			"pool %u+%u of %u, total %u+%u of %u", (int)pid,
+			rule ? rule->name : "(none)",
+			v == PW_ZB_OVER_COUNT ? "count" : v == PW_ZB_OVER_POOL ? "pool" : "total",
+			rq.count, rq.max_count, rq.pool_used, rq.bytes, rq.pool_cap,
+			rq.total_used, rq.bytes, rq.total_cap);
 		picowl_buffer_v1_send_failed(res, PICOWL_BUFFER_V1_REASON_NO_MEMORY);
 		return;
 	}
@@ -329,6 +389,24 @@ static void mgr_create_buffer(struct wl_client *client, struct wl_resource *mgr,
 		picowl_buffer_v1_send_failed(res, PICOWL_BUFFER_V1_REASON_NO_MEMORY);
 		return;
 	}
+	/* the kernel's object size (a dmabuf fd seeks to its size) is what the
+	 * pages cost; a stride with padding can make it exceed the estimate */
+	off_t sz = lseek(attr.fd[0], 0, SEEK_END);
+	if (sz >= 0)
+		lseek(attr.fd[0], 0, SEEK_SET);
+	if (sz <= 0 || sz > (1 << 30))
+		sz = (off_t)attr.stride[0] * h;
+	uint32_t real = pw_zb_round((uint32_t)sz, st.page);
+	if (real > rq.bytes) {
+		rq.bytes = real;
+		if (!real || pw_zb_check(&rq) != PW_ZB_OK) {
+			wlr_log(WLR_DEBUG, "zero-copy: %dx%d takes %u bytes, over the limit",
+				w, h, rq.bytes);
+			wlr_buffer_drop(buf);
+			picowl_buffer_v1_send_failed(res, PICOWL_BUFFER_V1_REASON_NO_MEMORY);
+			return;
+		}
+	}
 	struct pw_zbuf *z = calloc(1, sizeof(*z));
 	if (!z) {
 		wlr_buffer_drop(buf);
@@ -337,10 +415,12 @@ static void mgr_create_buffer(struct wl_client *client, struct wl_resource *mgr,
 	}
 	z->resource = res;
 	z->buffer = buf;
-	z->bytes = bytes;
+	z->bytes = rq.bytes;
+	z->pool = pool;
 	pw_copyrel_init(&z->rel);
 	wl_list_insert(&st.zbufs, &z->link);
-	st.total_bytes += bytes;
+	st.pool_used[pool] += z->bytes;
+	st.total_bytes += z->bytes;
 	wl_resource_set_implementation(res, &buffer_impl, z, buffer_resource_destroy);
 
 	picowl_buffer_v1_send_dmabuf(res, attr.fd[0], attr.stride[0],
@@ -371,8 +451,7 @@ static void mgr_bind(struct wl_client *client, void *data, uint32_t version,
 	}
 	wl_resource_set_implementation(r, &mgr_impl, NULL, mgr_resource_destroy);
 	wl_list_insert(&st.mgrs, wl_resource_get_link(r));
-	picowl_buffer_manager_v1_send_format(r, DRM_FORMAT_RGB565);
-	send_copy_type(r);
+	pw_zbproto_send_bind(r, st.copy_type, st.caching);
 }
 
 /* ---- idle copied ---------------------------------------------------- */
@@ -446,6 +525,18 @@ bool pw_zerocopy_init(struct pw_server *s)
 	st.server = s;
 	wl_list_init(&st.zbufs);
 	wl_list_init(&st.mgrs);
+	long page = sysconf(_SC_PAGESIZE);
+	st.page = page > 0 ? (uint32_t)page : 4096;
+
+	char driver[32] = "";
+	drmVersionPtr dv = drmGetVersion(drm_fd);
+	if (dv) {
+		snprintf(driver, sizeof(driver), "%s", dv->name ? dv->name : "");
+		drmFreeVersion(dv);
+	} else {
+		wlr_log(WLR_INFO, "zero-copy: drmGetVersion failed, caching defaults to write_combined");
+	}
+	st.caching = pw_caching_resolve(driver, s->config->caching_override);
 
 	if (!wlr_drm_format_set_add(&st.fmtset, DRM_FORMAT_RGB565,
 			DRM_FORMAT_MOD_LINEAR)) {
@@ -476,23 +567,27 @@ bool pw_zerocopy_init(struct pw_server *s)
 	 * renderer has no DRM fd and no dmabuf texture formats. */
 
 	st.global = wl_global_create(s->display, &picowl_buffer_manager_v1_interface,
-		1, NULL, mgr_bind);
+		PW_ZB_MGR_VERSION, NULL, mgr_bind);
 	st.idle_timer = wl_event_loop_add_timer(s->event_loop, idle_cb, NULL);
-	if (!st.global || !st.idle_timer) {
+	st.pool_used = calloc(s->config->zb_n_pools, sizeof(*st.pool_used));
+	if (!st.global || !st.idle_timer || !st.pool_used) {
 		wlr_log(WLR_INFO, "zero-copy disabled: global or timer creation failed");
 		if (st.global)
 			wl_global_destroy(st.global);
 		if (st.idle_timer)
 			wl_event_source_remove(st.idle_timer);
+		free(st.pool_used);
 		st.global = NULL;
 		st.idle_timer = NULL;
+		st.pool_used = NULL;
 		wlr_drm_format_set_finish(&st.fmtset);
 		return true;
 	}
 	s->buffer_mgr = &st;
 	st.active = true;
 	st.copy_type = any_copy_type();
-	wlr_log(WLR_INFO, "zero-copy enabled (copy_type=%d)", st.copy_type);
+	wlr_log(WLR_INFO, "zero-copy enabled (copy_type=%d caching=%s driver '%s')",
+		st.copy_type, pw_caching_name(st.caching), driver);
 	return true;
 }
 
@@ -515,6 +610,8 @@ void pw_zerocopy_finish(struct pw_server *s)
 	if (st.idle_timer)
 		wl_event_source_remove(st.idle_timer);
 	st.idle_timer = NULL;
+	free(st.pool_used);
+	st.pool_used = NULL;
 	wlr_drm_format_set_finish(&st.fmtset);
 	s->buffer_mgr = NULL;
 }

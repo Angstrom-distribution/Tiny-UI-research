@@ -68,6 +68,22 @@ Tap-and-hold timing is configured in the `[touch]` section:
 | `hold_ms` | `900` | Milliseconds from touch-down to send the right-click |
 | `slop_px` | `8` | Movement tolerance in pixels; exceeding this cancels the hold |
 
+### Per-App Hold Overrides
+
+You can configure different tap-and-hold behaviour for specific apps and layer-shell surfaces using `[app.<app_id>]` and `[layer.<namespace>]` sections:
+
+```ini
+[app.mediaplayer]
+hold_action = none
+
+[layer.osk]
+hold_delay_ms = 500
+```
+
+All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` is kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
+
+`hold_action = none` is useful for apps that time their own long press (e.g. media players): the left press is sent at touch-down, motion is forwarded, and there is no right-click and no hold animation. `hold_delay_ms` has no effect in that mode.
+
 ## Custom Cursor Format: PAM Strips
 
 A custom cursor is a horizontal strip of square frames in PAM or PPM format.
