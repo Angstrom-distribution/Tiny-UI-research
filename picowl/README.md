@@ -137,7 +137,7 @@ exe = /usr/bin/mediaplayer-wayland
 - **Memory:** on shmem drivers (mq11xx, w100) the buffers are resident RAM in picowl's process; don't set pools above free memory. On CMA drivers an allocation the kernel refuses is also `no_memory`. See `doc/zero-copy.md`.
 - `[app.*]` rules without `zerocopy_*` keys (hold overrides only) have no pool. `zerocopy_*` and `exe` are ignored in `[layer.*]`.
 - Buffers are refunded to the pool they were charged to when destroyed. Shrinking an output never revokes buffers.
-- Log (`-d 2`): a rejected request names the limit (count, pool or total), pid, app_id and used/cap.
+- Log (`-d 3`, debug): a rejected request names the limit (count, pool or total), pid, app_id and used/cap.
 
 ### [memory] section
 
