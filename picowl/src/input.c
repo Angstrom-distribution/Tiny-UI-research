@@ -206,14 +206,17 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 
 /* ---- keyboard --------------------------------------------------------- */
 
-static bool handle_keybinding(struct pw_server *server,
+/* Binding matching a key press, or NULL. Without an xkb state (keymap failed
+ * to compile) only keycode bindings (e.g. the power key) can match. */
+static struct pw_keybinding *find_keybinding(struct pw_server *server,
 	struct wlr_keyboard *kb, uint32_t keycode)
 {
 	if (!server->config)
-		return false;
+		return NULL;
 	uint32_t mods = wlr_keyboard_get_modifiers(kb) & PW_MOD_MASK;
-	const xkb_keysym_t *syms;
-	int nsyms = xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms);
+	const xkb_keysym_t *syms = NULL;
+	int nsyms = kb->xkb_state ?
+		xkb_state_key_get_syms(kb->xkb_state, keycode + 8, &syms) : 0;
 
 	struct pw_keybinding *b;
 	wl_list_for_each(b, &server->config->keybindings, link) {
@@ -236,12 +239,10 @@ static bool handle_keybinding(struct pw_server *server,
 		} else {
 			match = b->keycode == keycode;
 		}
-		if (match) {
-			pw_input_run_action(server, b);
-			return true;
-		}
+		if (match)
+			return b;
 	}
-	return false;
+	return NULL;
 }
 
 static void keyboard_handle_modifiers(struct wl_listener *l, void *data)
@@ -260,22 +261,35 @@ static void keyboard_handle_key(struct wl_listener *l, void *data)
 	bool pressed = ev->state == WL_KEYBOARD_KEY_STATE_PRESSED;
 
 	/* Releases never wake the display. */
-	if (!pressed) {
-		if (swallow_get(ev->keycode)) {
-			swallow_set(ev->keycode, false);
-			return;
-		}
-		if (server->blanked)
-			return;
+	if (!pressed && swallow_get(ev->keycode)) {
+		swallow_set(ev->keycode, false);
+		return;
 	}
-	bool was_blanked = activity(server);
+
+	struct pw_keybinding *bind = pressed ?
+		find_keybinding(server, k->wlr_keyboard, ev->keycode) : NULL;
+	if (bind && bind->action == PW_ACTION_TOGGLE_BLANK && !server->blanked) {
+		/* Blank straight from ACTIVE/DIMMED: activity() would first undim
+		 * to full brightness, which then stays for the whole blank. */
+		pw_idle_notify(server);
+		swallow_set(ev->keycode, true);
+		pw_input_run_action(server, bind);
+		return;
+	}
+
+	/* A release whose press was delivered must reach the client even while
+	 * blanked, or the key stays down there; it is not activity. */
+	bool was_blanked = false;
+	if (pressed || !server->blanked)
+		was_blanked = activity(server);
 
 	if (pressed && was_blanked) {
 		swallow_set(ev->keycode, true);
 		return;
 	}
-	if (pressed && handle_keybinding(server, k->wlr_keyboard, ev->keycode)) {
+	if (bind) {
 		swallow_set(ev->keycode, true);
+		pw_input_run_action(server, bind);
 		return;
 	}
 
@@ -306,8 +320,8 @@ static void keyboard_add(struct pw_server *server, struct wlr_keyboard *wlr_kb,
 	k->wlr_keyboard = wlr_kb;
 
 	/* Virtual keyboards get their keymap from the client. */
-	if (!virtual && st.keymap)
-		wlr_keyboard_set_keymap(wlr_kb, st.keymap);
+	if (!virtual && st.keymap && !wlr_keyboard_set_keymap(wlr_kb, st.keymap))
+		pw_log(WLR_ERROR, "failed to set keymap on keyboard");
 	wlr_keyboard_set_repeat_info(wlr_kb, 25, 600);
 
 	k->modifiers.notify = keyboard_handle_modifiers;
@@ -360,15 +374,14 @@ static void cursor_handle_button(struct wl_listener *l, void *data)
 	struct pw_server *server = st.server;
 	uint32_t bit = ev->button >= BTN_LEFT && ev->button < BTN_LEFT + 32 ?
 		1u << (ev->button - BTN_LEFT) : 0;
-	if (ev->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-		if (st.btn_swallowed & bit) {
-			st.btn_swallowed &= ~bit;
-			return;
-		}
-		if (server->blanked)
-			return;
+	bool released = ev->state == WL_POINTER_BUTTON_STATE_RELEASED;
+	if (released && (st.btn_swallowed & bit)) {
+		st.btn_swallowed &= ~bit;
+		return;
 	}
-	if (activity(server)) {
+	/* A release must reach the client even while blanked, or its implicit
+	 * grab never ends; it is not activity and does not wake the display. */
+	if (!(released && server->blanked) && activity(server)) {
 		st.btn_swallowed |= bit;
 		return;
 	}

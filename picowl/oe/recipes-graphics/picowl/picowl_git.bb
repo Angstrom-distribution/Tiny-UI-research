@@ -39,7 +39,7 @@ DEPENDS = " \
 # libwlroots, libwayland-server, libxkbcommon, libpixman and libdrm are picked
 # up at runtime through the automatic shlibs dependencies. libinput, libseat
 # and udev are used inside wlroots only, so wlroots pulls them in.
-RDEPENDS:${PN} += "seatd"
+RDEPENDS:${PN} += "seatd xkeyboard-config"
 
 # meson.options: 'tests' (boolean) and 'systemd' (feature). The unit file is
 # installed by meson itself (into systemdsystemunitdir of systemd.pc), so no
