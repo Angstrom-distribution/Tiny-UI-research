@@ -1,18 +1,19 @@
 # picowl
 
-A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman. Designed for embedded developers working with extreme constraints: read `../docs/ipaq-ui/compositor.md` and `../docs/ipaq-ui/hardware.md` for the architecture, hardware rotation, memory optimization, and device profiles. Implementation details in `doc/buffers.md`, `doc/zero-copy.md`, and `subprojects/packagefiles/wlroots/README.md`.
+A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman. Designed for embedded developers working with extreme constraints: read `compositor.md` and `hardware.md` in the [ipaq-ui research](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui) (Tiny-UI-research, branch `docs/ipaq-ui-research`) for the architecture, hardware rotation, memory optimization, and device profiles. Implementation details in `doc/buffers.md`, `doc/zero-copy.md`, and `subprojects/packagefiles/wlroots/README.md`.
 
 ## Status
 
-- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is fullscreen, on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking, per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
+- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is focused, on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking, per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
 - **Planned**: video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths), C8 (8-bpp palettised) output on MediaQ (design and options documented in `doc/zero-copy.md`), fixing the per-commit `wlr_client_buffer` allocation in wlroots core. Hardware rotation, copy-type swapchain, and direct scanout are compiled and unit tested; the hardware paths still need the checklist in `doc/zero-copy.md` run on a device.
 - **Known constraints**: no general cursor theme (only the tap-and-hold wait animation is drawn by picowl), no window animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
 
 ## Build
 
 ```sh
-# Set up the build environment to use the hosted wlroots 0.19 prefix:
-source /tmp/claude-0/-home-user-repo/d2efe079-ffd0-5854-a788-66118881eac2/scratchpad/hostprefix/env.sh
+# wlroots 0.19 must be found via pkg-config (or is built as the subproject);
+# if it lives in a private prefix, source its environment first:
+source <hostprefix>/env.sh
 
 meson setup build
 ninja -C build
@@ -21,10 +22,10 @@ ninja -C build
 
 **Dependencies:**
 - `wlroots 0.19` (fetched as meson subproject fallback if not installed)
-- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`, `libinput`
+- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`; `libinput` is optional (see below)
 - C11 compiler, meson >= 1.3
 
-picowl carries three wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput is linked directly (touch calibration).
+picowl carries three wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput is linked directly when found (touch calibration matrix for hardware rotation); without it that code is compiled out.
 
 `wlroots 0.19` is configured minimally: DRM/libinput backends, pixman renderer only, no GLES2/Vulkan/GBM. On OpenEmbedded systems (wrynose/blacksail), see `oe/README.md` for a prebuilt wlroots recipe.
 
@@ -42,7 +43,7 @@ systemctl --user start graphical-session.target
 export WLR_DRM_DEVICE=/dev/dri/card0
 
 # Then start picowl:
-picowl [-c /etc/picowl.ini] [-d 2]  # -d N sets wlroots log level (0-7)
+picowl [-c /etc/picowl.ini] [-d 2]  # -d N sets the log level (0-3)
 ```
 
 ### Headless testing (no hardware)
@@ -59,11 +60,11 @@ export WAYLAND_DISPLAY=wayland-0          # if multiple headless instances
 picowl -d 2
 ```
 
-Log output goes to stderr; use `-d 0` for WLR_ERROR only, `-d 3` for WLR_DEBUG, etc.
+Log output goes to stderr; use `-d 0` for silent, `-d 1` for errors only, `-d 2` for info (default), `-d 3` for debug.
 
 ## Configuration
 
-Config file is INI format, read from `$XDG_CONFIG_HOME/picowl/picowl.ini` (default `~/.config/picowl/picowl.ini`), then `/etc/picowl.ini`, or a path specified via `-c`. See `data/picowl.ini.example` for a template.
+Config file is INI format, read from the first file found of `$XDG_CONFIG_HOME/picowl/picowl.ini`, `$HOME/.config/picowl/picowl.ini`, `/etc/picowl.ini`. With `-c PATH` only PATH is read (no fallback). A missing file in the default search is not an error (defaults are used, logged at info); an unreadable `-c` file logs an error and also yields defaults. See `data/picowl.ini.example` for a template.
 
 ### [render] section
 
@@ -88,11 +89,11 @@ DSI-1 = 90
 
 Per-output rotation mode: `<output-name> = <mode>` (`*` matches any output).
 
-- `auto` (default): hardware rotation when the primary plane has the `rotation` property (MediaQ mq11xx only), else software.
+- `auto` (default): hardware rotation whenever the primary plane's `rotation` property supports the requested transform (in practice the MediaQ mq11xx driver), else software.
 - `hardware`: require hardware rotation; logs an error and falls back if unsupported.
 - `software`: always rotate in the renderer.
 
-If the hardware rotation commit fails, picowl logs an error and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See `../docs/ipaq-ui/compositor.md § 5.3` for implementation details and `../docs/ipaq-ui/hardware.md § 5` for per-device rotation capabilities.
+If the hardware rotation commit fails, picowl logs an error and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See [compositor.md § 5.3](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for implementation details and [hardware.md § 5](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md) for per-device rotation capabilities.
 
 ### [copytype] section
 
@@ -100,25 +101,25 @@ Per-output override of copy-type detection: `<output-name> = auto | yes | no`. `
 - Copy-type (damage-clipped copy to VRAM): `mq11xx`, `w100`, `sa1100-lcdc`
 - Scanout (direct DMA read): `pxa-lcdc` and others
 
-Copy-type outputs use a single-buffer swapchain (kernel copies damage rectangles); scanout outputs may degrade to double-buffer if composition is needed. See `../docs/ipaq-ui/hardware.md` for device-specific details.
+Copy-type outputs use a single-buffer swapchain (kernel copies damage rectangles); scanout outputs may degrade to double-buffer if composition is needed. See [hardware.md](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md) for device-specific details.
 
 ### [zerocopy] section
 
 - `enable = true|false`: advertise picowl-buffer-v1 and custom linux-dmabuf feedback (default true). See `doc/buffers.md` for the protocol and client usage.
-- `single_buffer = true|false`: single-buffer swapchain on copy-type outputs when safe (RGB565, copy-type driver, no format change needed; default true). See `../docs/ipaq-ui/compositor.md § 5.4` for swapchain management.
-- `panel_autohide = true|false`: hide the panel while an app is focused so a single fullscreen buffer can be scanned out directly (reduces render list to 1 entry; default true). See `../docs/ipaq-ui/compositor.md § 7` for panel autohide behavior.
+- `single_buffer = true|false`: single-buffer swapchain on copy-type outputs when safe (RGB565, copy-type driver, no format change needed; default true). See [compositor.md § 5.4](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for swapchain management.
+- `panel_autohide = true|false`: hide the panel while an app is focused so a single fullscreen buffer can be scanned out directly (reduces render list to 1 entry; default true). See [compositor.md § 7](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for panel autohide behavior.
 
 ### [memory] section
 
 malloc tuning via `mallopt`, applied before and after config is read. Reduces memory fragmentation and heap padding on constrained devices:
 
-- `arena_max` (default 1): Number of malloc arenas (1 per CPU core by default; constrain to 1 on single-core to reduce fragmentation).
-- `trim_threshold_kb` (default 256): Bytes of excess before malloc_trim() on idle.
+- `arena_max` (default 1, range 1..8): `M_ARENA_MAX`, number of malloc arenas; 1 reduces fragmentation.
+- `trim_threshold_kb` (default 256, range 0..65536): `M_TRIM_THRESHOLD` in KiB, the free heap-top size above which glibc `free()` returns memory to the OS.
 - `mmap_threshold_kb` (default 128): Size threshold for mmap-allocated blocks (range 16..4096 so malloc does not mmap tiny blocks).
 - `top_pad_kb` (default 16): Extra bytes reserved at heap top (range 0..65536).
-- `trim_after_start = true|false`: Call `malloc_trim(0)` once after startup (default true).
+- `trim_after_start = true|false`: Call `malloc_trim(0)` once after startup (default true). picowl never trims on idle.
 
-Out-of-range values are rejected and the default is kept. Measured VmHWM (headless, 1280×720): 9.5 MB (baseline 9.4 MB). See `../docs/ipaq-ui/compositor.md § 5.4` for memory optimization strategy and `tests/rss.sh` for the RSS measurement test.
+Out-of-range values are rejected and the default is kept. Measured VmHWM (headless, 1280×720): 9.5 MB (baseline 9.4 MB). See [compositor.md § 5.4](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for memory optimization strategy and `tests/rss.sh` for the RSS measurement test.
 
 ### Power Management and Idle Timeouts
 
@@ -265,7 +266,7 @@ Overview of what picowl adds on top of the wlroots set below:
 Picowl advertises and implements (via wlroots 0.19):
 
 **XDG Shell & Core Composition:**
-- `xdg_wm_base` (xdg-shell v1): toplevel windows, popups, activation.
+- `xdg_wm_base` (xdg-shell, advertised at version 3): toplevel windows, popups, activation.
 - `wl_compositor`, `wl_subcompositor`: surface trees.
 - `zwlr_layer_shell_v1`: panel, overlay, background, lock surfaces with exclusive keyboard interactivity.
 - `wl_data_device_manager`: copy/paste clipboard.
@@ -273,7 +274,6 @@ Picowl advertises and implements (via wlroots 0.19):
 **Input & Interaction:**
 - `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_touch` (if available): input focus.
 - `zwp_virtual_keyboard_manager_v1`: on-screen keyboards (software input methods).
-- `zwp_virtual_pointer_manager_v1`: remote pointer input (if supported).
 - `xdg_activation_v1`: app activation requests.
 
 **Output & Rendering:**
@@ -283,12 +283,13 @@ Picowl advertises and implements (via wlroots 0.19):
 - `zwp_single_pixel_buffer_v1`: solid-color surfaces (useful for backgrounds).
 
 **Window Management:**
-- `zwlr_foreign_toplevel_manager_v1`: taskbar/panel integration (list, activate, close, minimize).
+- `zwlr_foreign_toplevel_manager_v1`: taskbar/panel integration (list, activate, close; minimize requests are ignored).
+- `ext_foreign_toplevel_list_v1` (v1): toplevel enumeration.
 - `zxdg_decoration_manager_v1`: window decoration hints (picowl always chooses server-side, i.e., no decoration).
 
 **Power & Idle:**
-- `zwlr_output_power_management_v1`: screen blanking requests (dim/off).
-- `org_kde_kwin_idle_notify` (formerly `org_kde_kwin_idle`): idle timeout notifications (used by screen locker).
+- `zwlr_output_power_management_v1`: screen blanking requests (on/off).
+- `ext_idle_notifier_v1` (ext-idle-notify-v1): idle/resume notifications for clients such as screen lockers.
 
 ## Testing
 
@@ -300,7 +301,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `smoke` (headless run, also with `--zerocopy`), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, cursor and touch-hold unit tests, and `rss`.
+Tests: `config`, `smoke` (headless run, also with `--zerocopy`), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`.
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 
