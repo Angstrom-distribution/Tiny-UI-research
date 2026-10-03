@@ -37,6 +37,12 @@ if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
 	fail "picowl log has 'Failed to upload buffer'"
 fi
 
+OUT=$("$CLIENT" --inhibit 2>&1) || fail "inhibit client failed: $OUT"
+case "$OUT" in *mapped*) ;; *) fail "inhibit client did not report mapped" ;; esac
+sleep 0.2
+grep -q 'idle inhibit on' "$DIR/picowl.log" || fail "no 'idle inhibit on' in picowl log"
+grep -q 'idle inhibit off' "$DIR/picowl.log" || fail "no 'idle inhibit off' in picowl log"
+
 kill -TERM "$PID"
 i=0
 while kill -0 "$PID" 2>/dev/null; do

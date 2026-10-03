@@ -15,6 +15,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "picowl-buffer-v1-client-protocol.h"
+#include "idle-inhibit-unstable-v1-client-protocol.h"
 
 #define FMT_RGB565 WL_SHM_FORMAT_RGB565
 
@@ -31,6 +32,7 @@ static struct zwp_linux_dmabuf_v1 *dmabuf;
 static struct picowl_buffer_manager_v1 *pbm;
 static bool pb_fmt_565;
 static int pb_copy_type = -1;
+static struct zwp_idle_inhibit_manager_v1 *inhibit_mgr;
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -70,6 +72,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
 		dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, 3);
+	else if (!strcmp(iface, zwp_idle_inhibit_manager_v1_interface.name))
+		inhibit_mgr = wl_registry_bind(r, name, &zwp_idle_inhibit_manager_v1_interface, 1);
 	else if (!strcmp(iface, picowl_buffer_manager_v1_interface.name)) {
 		pbm = wl_registry_bind(r, name, &picowl_buffer_manager_v1_interface, 1);
 		picowl_buffer_manager_v1_add_listener(pbm, &pbm_listener, NULL);
@@ -344,9 +348,16 @@ static int run_zerocopy(struct wl_display *dpy, int w, int h)
 int main(int argc, char **argv)
 {
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
-	for (int i = 1; i < argc; i++)
+	bool want_inhibit = false;
+	int linger = 0;
+	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--zerocopy"))
 			want_zc = true;
+		else if (!strcmp(argv[i], "--inhibit"))
+			want_inhibit = true;
+		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
+			linger = atoi(argv[++i]);
+	}
 
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
@@ -372,6 +383,13 @@ int main(int argc, char **argv)
 	xdg_toplevel_add_listener(tl, &tl_listener, NULL);
 	xdg_toplevel_set_title(tl, "picowl-test");
 	xdg_toplevel_set_app_id(tl, "picowl-test-client");
+	if (want_inhibit) {
+		if (!inhibit_mgr) {
+			fprintf(stderr, "picowl-test-client: no idle inhibit manager\n");
+			return 1;
+		}
+		zwp_idle_inhibit_manager_v1_create_inhibitor(inhibit_mgr, surface);
+	}
 	wl_surface_commit(surface);
 
 	while (!configured)
@@ -427,5 +445,12 @@ int main(int argc, char **argv)
 
 	printf("picowl-test-client: mapped %dx%d format %u\n", w, h, format);
 	fflush(stdout);
+	/* --linger S: stay connected (answering pings) for S s after the first frame. */
+	alarm(linger + 5);
+	for (int i = 0; i < linger * 10; i++) {
+		usleep(100000);
+		if (wl_display_roundtrip(dpy) < 0)
+			return timeout_exit();
+	}
 	return 0;
 }

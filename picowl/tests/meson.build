@@ -37,9 +37,18 @@ dmabuf_client_c = custom_target('linux-dmabuf-client-code',
   input: dmabuf_xml, output: 'linux-dmabuf-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
+inhibit_xml = wl_proto_dir / 'unstable' / 'idle-inhibit' / 'idle-inhibit-unstable-v1.xml'
+inhibit_client_h = custom_target('idle-inhibit-client-header',
+  input: inhibit_xml, output: 'idle-inhibit-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+inhibit_client_c = custom_target('idle-inhibit-client-code',
+  input: inhibit_xml, output: 'idle-inhibit-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 pw_test_client = executable('pw-test-client',
   'pw-test-client.c', xdg_client_h, xdg_client_c,
   pb_client_h, pb_client_c, dmabuf_client_h, dmabuf_client_c,
+  inhibit_client_h, inhibit_client_c,
   dependencies: [wayland_client])
 
 test('smoke', find_program('sh'),
@@ -91,5 +100,5 @@ foreach t : ['backlight', 'powersupply', 'dim']
 endforeach
 
 test('power-e2e', find_program('sh'),
-  args: [files('power-e2e.sh'), picowl_exe],
-  timeout: 30)
+  args: [files('power-e2e.sh'), picowl_exe, pw_test_client],
+  timeout: 90)
