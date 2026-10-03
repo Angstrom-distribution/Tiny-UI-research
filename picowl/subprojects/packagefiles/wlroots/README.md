@@ -124,7 +124,10 @@ picowl falls back to software rotation whenever this is unavailable.
    `current_mode`, `width`, `height` and `refresh`, so that the caller's next
    enabling commit with `wlr_output_state_set_mode()` is not stripped as
    unchanged. The caller commits enabled + mode + a NORMAL output transform
-   afterwards.
+   afterwards. `WL_OUTPUT_TRANSFORM_NORMAL` is the reset: it skips the
+   support check, records no rotation bits and unswaps the modes, so it
+   succeeds even when the enabling commit failed on a CRTC that cannot rotate
+   (that CRTC stays allocated). Other transforms fail when unsupported.
 3. Commits that enable the CRTC and update the primary plane write the
    rotation property: the recorded bits, or `ROTATE_0` if none were set (so
    the plane does not keep a value from before picowl started, which is the one
@@ -132,13 +135,14 @@ picowl falls back to software rotation whenever this is unavailable.
    framebuffer coordinates, the width and height of the CRTC destination box
    are swapped for 90/270, `FB_DAMAGE_CLIPS` stay in framebuffer coordinates.
 4. Guards:
-   - With a rotation other than plain `ROTATE_0`, direct scanout is only
+   - With a rotation set (any transform but NORMAL), direct scanout is only
      accepted for a buffer whose destination box is the whole output: a
      rotated CRTC box is not the same box with its sides swapped, so anything
      else is composited.
    - A commit that enables a CRTC whose primary plane cannot do the rotation
      fails. The CRTC allocated can differ from the ones checked while the
      output was disabled, and the swapped modes must never be sent unrotated.
+     picowl then resets to NORMAL and enables with software rotation.
    - Hardware cursors and cursor moves are refused while a rotation is set (the
      cursor plane has no rotation), so picowl uses its software cursor.
    - The rotation, swap and copy-type state is reset when the connector's

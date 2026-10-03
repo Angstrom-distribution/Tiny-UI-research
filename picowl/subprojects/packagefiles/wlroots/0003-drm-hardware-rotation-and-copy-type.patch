@@ -9,16 +9,18 @@ damage to device memory during the commit). Atomic only. A rotated
 primary plane refuses buffers whose dst box is not the whole output
 (direct scanout falls back to compositing), and a commit enabling a CRTC
 whose primary plane cannot do the rotation fails instead of sending the
-swapped modes unrotated. The rotation and copy-type state is reset when
-the connector's output is destroyed.
+swapped modes unrotated. Setting WL_OUTPUT_TRANSFORM_NORMAL always
+succeeds as a reset, so the compositor can fall back to software rotation
+on that CRTC. The rotation and copy-type state is reset when the
+connector's output is destroyed.
 
 Upstream-Status: Inappropriate [picowl specific]
 ---
  backend/drm/atomic.c      |  38 +++++++--
- backend/drm/drm.c         | 192 +++++++++++++++++++++++++++++++++++++++++++++-
+ backend/drm/drm.c         | 196 +++++++++++++++++++++++++++++++++++++++++++++-
  include/backend/drm/drm.h |  14 ++++
- include/wlr/backend/drm.h |  47 ++++++++++++
- 4 files changed, 282 insertions(+), 9 deletions(-)
+ include/wlr/backend/drm.h |  50 ++++++++++++
+ 4 files changed, 289 insertions(+), 9 deletions(-)
 
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
 index 037c3c23..2fa1b46f 100644
@@ -98,7 +100,7 @@ index 037c3c23..2fa1b46f 100644
  		if (state->primary_in_fence_fd >= 0) {
  			set_plane_in_fence_fd(atom, crtc->primary, state->primary_in_fence_fd);
 diff --git a/backend/drm/drm.c b/backend/drm/drm.c
-index e9e4c6db..08077de2 100644
+index e9e4c6db..fd8aedef 100644
 --- a/backend/drm/drm.c
 +++ b/backend/drm/drm.c
 @@ -174,6 +174,19 @@ static bool init_plane(struct wlr_drm_backend *drm,
@@ -138,7 +140,7 @@ index e9e4c6db..08077de2 100644
  	struct wlr_drm_plane *plane = crtc->primary;
  	struct wlr_buffer *source_buf = state->base->buffer;
  
-+	if (conn->hw_rotation != 0 && conn->hw_rotation != DRM_MODE_ROTATE_0) {
++	if (conn->hw_rotation != 0) {
 +		// CRTC_X/Y/W/H are the dst box rotated within the mode while the dst
 +		// box is in framebuffer coordinates, so only a box covering the
 +		// whole framebuffer maps onto the CRTC without being repositioned or
@@ -226,7 +228,7 @@ index e9e4c6db..08077de2 100644
  		return false;
  	}
  
-+	if (conn->hw_rotation != 0 && conn->hw_rotation != DRM_MODE_ROTATE_0) {
++	if (conn->hw_rotation != 0) {
 +		// The cursor plane isn't rotated with the primary plane, use a
 +		// software cursor
 +		return false;
@@ -239,7 +241,7 @@ index e9e4c6db..08077de2 100644
  	if (!plane) {
  		return false;
  	}
-+	if (conn->hw_rotation != 0 && conn->hw_rotation != DRM_MODE_ROTATE_0) {
++	if (conn->hw_rotation != 0) {
 +		return false;
 +	}
  
@@ -258,7 +260,7 @@ index e9e4c6db..08077de2 100644
  }
  
  static const struct wlr_drm_format_set *drm_connector_get_cursor_formats(
-@@ -1293,6 +1374,105 @@ uint32_t wlr_drm_connector_get_id(struct wlr_output *output) {
+@@ -1293,6 +1374,109 @@ uint32_t wlr_drm_connector_get_id(struct wlr_output *output) {
  	return conn->id;
  }
  
@@ -323,13 +325,17 @@ index e9e4c6db..08077de2 100644
 +			"Hardware rotation can only be changed while the output is disabled");
 +		return false;
 +	}
-+	if (!wlr_drm_connector_supports_hw_rotation(output, transform)) {
++	// NORMAL is the reset to software rotation and always works, also
++	// after an enabling commit failed on a CRTC which can't rotate
++	if (transform != WL_OUTPUT_TRANSFORM_NORMAL &&
++			!wlr_drm_connector_supports_hw_rotation(output, transform)) {
 +		wlr_drm_conn_log(conn, WLR_DEBUG,
 +			"Hardware rotation for transform %d not supported", (int)transform);
 +		return false;
 +	}
 +
-+	conn->hw_rotation = hw_rotation_bits[transform];
++	conn->hw_rotation = transform == WL_OUTPUT_TRANSFORM_NORMAL ?
++		0 : hw_rotation_bits[transform];
 +	conn->hw_swap = transform % 2 == 1; // 90, 270 and their flipped variants
 +
 +	struct wlr_output_mode *wlr_mode;
@@ -364,7 +370,7 @@ index e9e4c6db..08077de2 100644
  enum wl_output_transform wlr_drm_connector_get_panel_orientation(
  		struct wlr_output *output) {
  	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
-@@ -1622,6 +1802,7 @@ static bool connect_drm_connector(struct wlr_drm_connector *wlr_conn,
+@@ -1622,6 +1806,7 @@ static bool connect_drm_connector(struct wlr_drm_connector *wlr_conn,
  			wlr_output_state_finish(&state);
  			return false;
  		}
@@ -372,7 +378,7 @@ index e9e4c6db..08077de2 100644
  
  		// If this is the current mode set on the conn's crtc,
  		// then set it as the conn's output current mode.
-@@ -2000,6 +2181,11 @@ static void handle_page_flip(int fd, unsigned seq,
+@@ -2000,6 +2185,11 @@ static void handle_page_flip(int fd, unsigned seq,
  	if (plane->queued_fb) {
  		drm_fb_move(&plane->current_fb, &plane->queued_fb);
  	}
@@ -417,10 +423,10 @@ index 9409b7b1..0f1df46f 100644
  
  struct wlr_drm_backend *get_drm_backend_from_backend(
 diff --git a/include/wlr/backend/drm.h b/include/wlr/backend/drm.h
-index 3ca6390a..4748ddc0 100644
+index 3ca6390a..f845036d 100644
 --- a/include/wlr/backend/drm.h
 +++ b/include/wlr/backend/drm.h
-@@ -100,4 +100,51 @@ const drmModeModeInfo *wlr_drm_mode_get_info(struct wlr_output_mode *mode);
+@@ -100,4 +100,54 @@ const drmModeModeInfo *wlr_drm_mode_get_info(struct wlr_output_mode *mode);
  enum wl_output_transform wlr_drm_connector_get_panel_orientation(
  	struct wlr_output *output);
  
@@ -448,9 +454,12 @@ index 3ca6390a..4748ddc0 100644
 + * new mode to clients. The driver may still reject the rotation in the
 + * commit: check the output size afterwards and fall back to software
 + * rotation (WL_OUTPUT_TRANSFORM_NORMAL here) if needed. While a rotation
-+ * other than 0 is set, hardware cursors are refused.
++ * other than NORMAL is set, hardware cursors are refused.
 + *
-+ * Returns false if unsupported (see wlr_drm_connector_supports_hw_rotation).
++ * WL_OUTPUT_TRANSFORM_NORMAL resets the rotation and always succeeds while
++ * the output is disabled, even if the allocated CRTC can't rotate. Other
++ * transforms return false if unsupported (see
++ * wlr_drm_connector_supports_hw_rotation).
 + */
 +bool wlr_drm_connector_set_hw_rotation(struct wlr_output *output,
 +	enum wl_output_transform transform);
