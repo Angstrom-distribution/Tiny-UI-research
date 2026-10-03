@@ -81,6 +81,11 @@ static bool check_dmabuf(struct wlr_dmabuf_attributes *a, void *data)
 	largest_output(&mw, &mh);
 	if (a->width <= 0 || a->height <= 0)
 		return false;
+	/* rows are read as width * 2 bytes at offset + y * stride (pixman wants
+	 * 32-bit alignment): a smaller stride reads past the end of the buffer */
+	if (a->stride[0] < (uint32_t)a->width * 2 || a->stride[0] % 4 ||
+	    a->offset[0] % 4)
+		return false;
 	/* either orientation: clients may render for a rotated output */
 	int big = mw > mh ? mw : mh;
 	return a->width <= big && a->height <= big;
