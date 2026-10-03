@@ -45,11 +45,25 @@ inhibit_client_c = custom_target('idle-inhibit-client-code',
   input: inhibit_xml, output: 'idle-inhibit-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
+lease_xml = wl_proto_dir / 'staging' / 'drm-lease' / 'drm-lease-v1.xml'
+lease_client_h = custom_target('drm-lease-client-header',
+  input: lease_xml, output: 'drm-lease-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+lease_client_c = custom_target('drm-lease-client-code',
+  input: lease_xml, output: 'drm-lease-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 pw_test_client = executable('pw-test-client',
   'pw-test-client.c', xdg_client_h, xdg_client_c,
   pb_client_h, pb_client_c, dmabuf_client_h, dmabuf_client_c,
   inhibit_client_h, inhibit_client_c,
   dependencies: [wayland_client])
+
+# Needs root, the vkms module and /dev/dri; skips (exit 77) without them.
+pw_lease_client = executable('pw-lease-client',
+  'pw-lease-client.c', xdg_client_h, xdg_client_c,
+  lease_client_h, lease_client_c,
+  dependencies: [wayland_client, libdrm])
 
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client],
@@ -105,3 +119,8 @@ endforeach
 test('power-e2e', find_program('sh'),
   args: [files('power-e2e.sh'), picowl_exe, pw_test_client],
   timeout: 90)
+
+test('lease-vkms', find_program('sh'),
+  args: [files('lease-vkms.sh'), picowl_exe, pw_lease_client],
+  suite: 'vkms',
+  timeout: 120)
