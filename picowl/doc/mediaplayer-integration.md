@@ -47,12 +47,12 @@ Extend `tests/kms_state_selftest.c` with a scripted Wayland event model covering
 
 ### 2.3 Buffer count
 
-- **picowl's limits today:** 3 buffers per client and 2 MiB in total across all clients (`PW_ZB_MAX_PER_CLIENT`, `PW_ZB_BUDGET` in `src/zerocopy.c`).
+- **picowl's limits by default:** 3 buffers per client and 2 MiB shared by all clients; configurable per `app_id` (`[zerocopy]` and `[app.<app_id>]`, see the picowl README).
 - **The player's default:** `--decode-ahead 5` asks for 7 buffers. That is 1.05 MiB at QVGA, but 4.1 MiB on the hx4700, which exceeds the total budget.
 
 Plan:
 - Request `mp_core_want_bufs()` and accept what is granted: `failed(no_memory)` or `failed(too_large)` ends allocation, and `nbufs` reports the count. The core already degrades to rendering fewer frames ahead, with decoded pictures still queuing N deep.
-- **[picowl]** Make the limits configurable (`[zerocopy] max_buffers_per_client`, `budget_kb`), with an `app_id`-specific override so the player can get its 7 buffers on QVGA boards.
+- **[picowl]** Done: the limits are configurable (`[zerocopy] max_buffers_per_client`, `budget_kb`, `total_kb`), with an `app_id`-specific override (`[app.mediaplayer] zerocopy_buffers = 7`). The player must call `set_app_id` before `create_buffer`.
 - On copy-type outputs fewer buffers cost little, because `copied` frees FRONT immediately.
 
 ### 2.4 Write-combined versus cacheable

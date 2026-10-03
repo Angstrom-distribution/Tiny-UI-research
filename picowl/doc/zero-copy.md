@@ -37,8 +37,13 @@ serial logic: `src/copyrel.c` (pure integer state machine, unit tested).
    and `copy_type` (1 = the output copies damage to device memory, 0 = scanout).
 2. `create_buffer(w, h, RGB565)` allocates a compositor-owned dmabuf from the
    server allocator. The client gets `dmabuf` (fd, stride, offset, modifier)
-   and `done`, or `failed(reason)`. Limits: 3 buffers per client, 2 MiB in
-   total.
+   and `done`, or `failed(reason)`. Limits (`src/zbquota.c`, wired in
+   `mgr_create_buffer`): buffers per client, then the memory of the client's
+   pool, then an optional ceiling over all pools. Defaults: 3 buffers, one
+   2 MiB pool shared by clients without an `[app.*]` rule. A rule selected by
+   the `xdg_toplevel` app_id (see the README) has its own pool. The check runs
+   before the allocation, and sizes are page-rounded real sizes (`lseek` on the
+   dmabuf fd).
 3. The client wraps the fd in a wl_buffer with `zwp_linux_dmabuf_v1`
    (`params.add` + `create_immed`).
 4. `attach_surface(surface)` makes the compositor number the commits of that
@@ -243,7 +248,7 @@ handler, surface commit handlers or timer callbacks. Result per file
 
 | File | Result |
 |---|---|
-| `src/zerocopy.c` | one `calloc` in the `create_buffer` request handler (client-driven, bounded by 3 buffers and 2 MiB); commit, timer, present: none |
+| `src/zerocopy.c` | one `calloc` in the `create_buffer` request handler (client-driven, bounded by the buffer count and pool limits, 3 buffers and 2 MiB by default; the rule lookup walks the xdg-shell clients and allocates nothing); commit, timer, present: none |
 | `src/copyrel.c`, `src/copytype.c`, `src/rotate.c` | none (pure logic) |
 | `src/mem.c` | none |
 | `src/output.c` | one `calloc` in `output_new` (hotplug); `output_frame`, present: none. A swapchain is created only on enable, rotate and unblank, not per frame |
@@ -285,7 +290,17 @@ are compiled and unit tested only. On a device verify:
 - direct scanout on pxa-lcdc from the 1 MiB CMA pool (a full RGB565 240x320 frame
   is 150 KiB; picowl-buffer budget 2 MiB must fit CMA together with the
   framebuffer); the software cursor is the only thing that blocks it;
-- VmHWM on device against the headless numbers above.
+- VmHWM on device against the headless numbers above;
+- buffer limits (`rule_for_client` and `exe` matching need real clients and a
+  DRM allocator, so no CI): without a rule `pw-test-client --zerocopy-count 7`
+  is granted 3 and the debug log says "over count"; with
+  `[app.picowl-test-client] zerocopy_buffers = 7` it gets 7 and, on the hx4700,
+  `Shmem` in `/proc/meminfo` grows by about 4200 KiB and returns to the
+  baseline on exit; a second client with `--app-id picowl-test-client` while
+  the first holds 7 gets none (shared pool); with `exe =` set, the same
+  app_id from another binary gets the default limits; on the h3970 a rule of 7
+  is granted what CMA allows, then `no_memory`, and picowl keeps rendering
+  (check dmesg for CMA warnings; unblank and rotate still work).
 
 ## C8 / 8-bpp palettised output on MediaQ
 

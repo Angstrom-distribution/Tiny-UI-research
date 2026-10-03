@@ -108,6 +108,36 @@ Copy-type outputs use a single-buffer swapchain (kernel copies damage rectangles
 - `enable = true|false`: advertise picowl-buffer-v1 and custom linux-dmabuf feedback (default true). See `doc/buffers.md` for the protocol and client usage.
 - `single_buffer = true|false`: single-buffer swapchain on copy-type outputs when safe (RGB565, copy-type driver, no format change needed; default true). See [compositor.md § 5.4](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for swapchain management.
 - `panel_autohide = true|false`: hide the panel while an app is focused so a single fullscreen buffer can be scanned out directly (reduces render list to 1 entry; default true). See [compositor.md § 7](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for panel autohide behavior.
+- `max_buffers_per_client` (default 3, range 1..32): picowl-buffer-v1 buffers one client may hold.
+- `budget_kb` (default 2048, range 0..65536): memory shared by all clients without an `[app.*]` buffer rule (the default pool). 0 means none of them may allocate; they fall back to wl_shm.
+- `total_kb` (default 0, range 0..65536): ceiling over all pools. 0 means no extra limit; the worst case is then `budget_kb` plus every app pool.
+
+Sizes are counted as the real allocation: the buffer rounded up to whole pages. An allocation over a limit is answered with `failed(no_memory)`, before any memory is taken. The defaults give 3 buffers and 2 MiB shared, as before the keys existed. Out-of-range values are rejected and the default is kept.
+
+#### Per-app buffer limits
+
+An `[app.<app_id>]` section (the same section as the per-app hold overrides below) with `zerocopy_*` keys gives that app its own pool:
+
+```ini
+[app.mediaplayer]
+zerocopy_buffers = 7
+# zerocopy_budget_kb = 4200
+exe = /usr/bin/mediaplayer-wayland
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `zerocopy_buffers` | `max_buffers_per_client` | 1..32 buffers per client |
+| `zerocopy_budget_kb` | `zerocopy_buffers` full frames of the largest output | 0..65536 KiB for the pool |
+| `exe` | none | The client's `/proc/<pid>/exe` must be this file; symlinks are resolved when the config is read |
+
+- **One pool per rule**, shared by every client matching it, and separate from the default pool: other clients cannot starve the app, and clients claiming its app_id cannot get more than the pool. With only `zerocopy_buffers = 7` one config fits every board (7 × 152 KiB on QVGA, 7 × 600 KiB on the hx4700).
+- **Matching** is by the `app_id` of one of the client's xdg toplevels (exact, case-sensitive), checked at every `create_buffer`. The client has to call `set_app_id` before `create_buffer`; earlier buffers stay in the default pool. With several toplevels the newest one with a rule wins. Layer-shell clients always use the default pool.
+- **`exe`** guards against another program claiming the app_id: on a mismatch, an unreadable link or a replaced binary (`(deleted)`) the client gets the default limits. Without `exe` the pool size is the only protection. `exe` only works when the client connected to the socket itself, not through a `WAYLAND_SOCKET` handed over by a launcher.
+- **Memory:** on shmem drivers (mq11xx, w100) the buffers are resident RAM in picowl's process; don't set pools above free memory. On CMA drivers an allocation the kernel refuses is also `no_memory`. See `doc/zero-copy.md`.
+- `[app.*]` rules without `zerocopy_*` keys (hold overrides only) have no pool. `zerocopy_*` and `exe` are ignored in `[layer.*]`.
+- Buffers are refunded to the pool they were charged to when destroyed. Shrinking an output never revokes buffers.
+- Log (`-d 2`): a rejected request names the limit (count, pool or total), pid, app_id and used/cap.
 
 ### [memory] section
 
@@ -212,7 +242,7 @@ hold_ms = 1200
 slop_px = 16
 ```
 
-Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections:
+Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections (`[app.*]` also takes the buffer keys above):
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -333,7 +363,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `smoke` (headless run, also with `--zerocopy`), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`.
+Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy` and `--zerocopy-count`), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`.
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 

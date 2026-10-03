@@ -22,7 +22,9 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
    | `no_memory` | 2 |
    | `no_drm` | 3 (reserved, never sent: with no DRM device the manager global is simply not advertised) |
 
-   **Limits:** at most 3 buffers per client, and at most 2 MiB in total across all clients (`PW_ZB_MAX_PER_CLIENT`, `PW_ZB_BUDGET` in `src/zerocopy.c`).
+   **Limits** are compositor policy (`[zerocopy]` and `[app.<app_id>]` in `picowl.ini`, see the README). By default a client may hold 3 buffers and all clients share 2 MiB. An app with a rule can get more, for example 7 for a media player. Over a limit you get `failed(no_memory)`; destroy that object. Don't assume a count: request what you want, stop at the first `failed`, and use what was granted.
+
+   **Set the `app_id` first.** The compositor picks the limits by the `xdg_toplevel` app_id at the time of `create_buffer`, so call `xdg_toplevel.set_app_id` before it (a commit is not needed). Buffers created earlier stay under the default limits.
 3. **Wrap the buffer:**
    - `mmap` the fd for drawing.
    - Wrap it as a `wl_buffer` with `zwp_linux_dmabuf_v1`: `create_params`, `add` with the fd, offset, stride and modifier, then `create_immed` with the same size and format.
@@ -42,11 +44,12 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
 |---|---|
 | No `picowl_buffer_manager_v1` global (headless backend, no DRM, no dmabuf allocator, or `[zerocopy] enable = false`); `failed(no_drm)` is never sent | Plain wl_shm, preferring `WL_SHM_FORMAT_RGB565` (picowl advertises it) |
 | `copy_type` 0 (h3970, pxa-lcdc) | Direct scanout can still happen, but `copied` is never sent: double buffer and use `wl_buffer.release` |
+| `failed(no_memory)` | Use the buffers you have, with fewer frames in flight, or fall back to wl_shm |
 | Allocation fails mid-session | Keep using the buffers you have, or fall back to wl_shm |
 
-`tests/pw-test-client.c --zerocopy` implements this negotiation, including the wl_shm fallback that the headless smoke test exercises.
+`tests/pw-test-client.c --zerocopy` implements this negotiation, including the wl_shm fallback that the headless smoke test exercises. `--zerocopy-count N` requests N buffers, prints how many were granted, and `--app-id ID` sets the app_id.
 
 ## Status
 
-- **Built and tested here:** compile and unit tests (`copyrel`, `copytype`), plus the wl_shm fallback in the headless smoke test.
+- **Built and tested here:** compile and unit tests (`copyrel`, `copytype`, `zbquota`), plus the wl_shm fallback in the headless smoke test.
 - **Hardware-only:** everything involving a real DRM device, i.e. allocation, direct scanout, `copied`/`retained` timing and the kernel copy. This container and CI have no `/dev/dri`. The checks to run on an iPAQ are listed in [zero-copy.md](zero-copy.md), section "Hardware-only checklist".
