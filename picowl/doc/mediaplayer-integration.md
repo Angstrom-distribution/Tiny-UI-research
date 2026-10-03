@@ -114,10 +114,13 @@ The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_
   If any of these fails, it is a picowl bug to fix.
 
 ### 3.2 Step 2: DRM lease (seamless, preferred long term)
-- **[picowl]** Offer the output for lease (`wlr_drm_lease_v1_manager_create`, then `wlr_drm_lease_v1_manager_offer_output` for the internal output on request). While a lease is granted, picowl's `wlr_output` is destroyed. It is re-created when the lease ends, and picowl repaints.
-- **Player:** a `--vo drm:lease` init path. Connect to Wayland, request a lease for the connector (the lease includes the CRTC and its planes: primary, cursor and the w100 overlay), and use the leased fd instead of opening `/dev/dri/card0`. Everything after that is the existing KMS code: atomic commits, `kms_state`, the overlay planner, `hw_rotation`, C8 when implemented.
-  - There are no VT ioctls and no DRM master handling; the lease fd is already authorised.
-  - Revoke the lease (close the fd) on exit or when leaving full screen.
+- **[picowl]** Implemented: picowl offers `wp_drm_lease_device_v1` for its output (`doc/lease.md`). While a lease is granted, picowl's `wlr_output` is destroyed. It is re-created when the lease ends, and picowl repaints. picowl keeps input and power policy meanwhile: keys go to the player as `wl_keyboard`, touch arrives as pointer events in panel-native pixels, and dimming is held. The power key, the app-cycle key and the other bindings that act on the screen end the lease first.
+- **Player:** a `--vo drm:lease` init path.
+  1. Connect to Wayland, map a fullscreen toplevel with `app_id = "mediaplayer"` (one single-pixel buffer is enough) and wait for the `activated` state. picowl grants only to the owner of the focused toplevel whose `app_id` is in `[lease] allow`.
+  2. Bind `wp_drm_lease_device_v1`, close the `drm_fd` it sends, collect the one connector, send `create_lease_request`, `request_connector`, `submit`, and wait for `lease_fd`. On `finished` (it can come twice), fall back to the VT switch or Path A. The connector's `withdrawn` event can arrive before `lease_fd`: destroy that object.
+  3. The lease holds the connector, its CRTC, the primary plane, the cursor plane and **the overlay planes** that can scan out on the CRTC (the w100 overlay; wlroots patch 0004, a stock 0.19 does not lease overlay planes). The fd is a new `drm_file`: set `UNIVERSAL_PLANES` and `ATOMIC` again. The CRTC arrives disabled; the first commit is a full `ALLOW_MODESET` that sets every property the player relies on (plane `rotation`, which picowl may have left set on MediaQ, `COLOR_ENCODING`, `COLOR_RANGE`). Everything after that is the existing KMS code: atomic commits, `kms_state`, the overlay planner, `hw_rotation`, C8 when implemented.
+  4. There are no VT ioctls and no DRM master handling; the lease fd is already authorised. Do not open evdev: keys, and touch as pointer events, arrive over Wayland.
+  5. On `finished`, or EACCES/ENOENT from a commit, stop committing, close the fd and destroy the lease object. On exit or when leaving full screen, close the fd, then destroy the `wp_drm_lease_v1` object and flush: destroying the object returns the output to picowl without depending on udev.
 - **When to choose Path B automatically:** the overlay planner (`core/ovplan.c`) accepts the stream on the hx4700, or a MediaQ C8/doubling mode is requested. Otherwise use Path A. Expose it as `--vo auto` with a log line naming the reason.
 
 ## 4. Work items
@@ -132,7 +135,7 @@ The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_
 | 6 | Player holds the idle inhibitor while playing | player | 5 | As above |
 | 7 | Configurable buffer budget per `app_id`; `caching` event (buffer protocol v2) | picowl | — | Player gets 7 QVGA buffers; reports the caching mode |
 | 8 | VT-switch handoff under picowl (Path B step 1), launched from the Wayland front-end | player (+ picowl fixes found) | 1 | hx4700 overlay path plays from a picowl session and picowl restores cleanly afterwards |
-| 9 | DRM lease offer in picowl | picowl | — | `wlr_drm_lease_v1` global; output destroyed while leased and restored after |
+| 9 | DRM lease offer in picowl (implemented, `doc/lease.md`) | picowl | — | `wlr_drm_lease_v1` global; output destroyed while leased and restored after |
 | 10 | `--vo drm:lease` and `--vo auto` in the player | player | 8, 9 | Overlay and C8 paths run without a VT switch; automatic choice logged |
 | 11 | Per-`app_id` `hold_action` override | picowl | — | Optional, only if the player wants raw long-press |
 

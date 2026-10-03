@@ -106,6 +106,8 @@ Any client can keep the screen on while its surface is visible, as on other Wayl
 
 **Session inactive.** While another program owns the display on another VT (for example `mediaplayer-drm`), picowl's session is inactive: it gets no input, and its dim timer would otherwise write the sysfs backlight under the other program's video. `power.c` listens to the session `active` signal and holds the timers (reason `PW_INHIBIT_SESSION`) while the session is inactive; they restart from the moment it becomes active again. This reason ignores the `inhibit` key. There is no session on the headless backend.
 
+**DRM lease.** While the display is leased to the media player (`doc/lease.md`), picowl has no outputs and nothing it does with the timers would be visible, but the backlight is still its to write. `lease.c` holds the timers with reason `PW_INHIBIT_LEASE` from the grant to the end of the lease, so a film longer than `blank_after_s` is not dimmed. Like `PW_INHIBIT_SESSION` it ignores the `inhibit` key. A DIMMED screen is undimmed when the lease starts. A BLANKED one is unblanked first (`pw_power_set_blanked(false)` before the grant), because the player modesets the display and an inhibitor alone never unblanks. Input is not swallowed under the lease. The timers restart from the end of the lease. The power key ends the lease and then blanks.
+
 ### Legacy [idle] Section (Deprecated)
 
 For backwards compatibility:
@@ -186,7 +188,7 @@ Things to verify on each board:
 - **the config parser test**, including the `[power*]` keys, the legacy `[idle] timeout_ms` to `blank_after_s` mapping (rounded up, ignored when any `[power.*] blank_after_s` is set) and the `[core]` alias;
 - **`power-e2e`**: headless picowl against a fake sysfs tree (`PICOWL_SYSFS_ROOT`). On the AC profile it checks that the real event loop dims the backlight from 40 to 12 after 1 s. On the LOW profile it checks that the startup brightness cap is applied (40 to 25). With the test client (`--inhibit`, `--linger S`) it also checks that a visible inhibitor holds dimming and the timers restart on release, that an inhibitor behind the focused window does not count, and that `[power.low] inhibit = no` is honoured. `smoke` checks the inhibit log lines.
 
-The `dim` unit test covers `pw_dim_set_inhibited()` in every state.
+The `dim` unit test covers `pw_dim_set_inhibited()` in every state, and the unblank, hold and release sequence of a lease.
 
 The headless backend has no input devices, so restore on input isn't covered end to end; the `dim` unit test covers it. Uevent delivery isn't covered either; the parser is unit-tested on canned messages.
 
@@ -197,12 +199,13 @@ On hardware, run `picowl -d 3` and check:
 4. Idle inhibit, with the player: `idle inhibit on (app_id mediaplayer)` when playback starts and no dim or blank for longer than `blank_after_s`; `idle inhibit off` on pause, and the screen dims `dim_after_s` after the pause, not at once. The power key blanks during playback and unblanks again, and the screen then stays on. A tap while blanked is swallowed. Alt-tab to another app dims after `dim_after_s`. `kill -9` of the player releases the hold. With `[power.low] inhibit = no`, crossing `low_capacity` lets the screen dim.
 5. On the h5550 (on/off backlight) playback longer than `blank_after_s` does not blank.
 6. Switching to another VT for longer than `dim_after_s` leaves the backlight alone, and the timers restart on return.
+7. A lease (`mediaplayer --vo drm:lease`) longer than `blank_after_s` neither dims nor blanks, and the normal timeouts resume after it. Leasing a blanked screen lights it.
 
 ## Implementation Details
 
 **Modules:**
 
-- `src/power.c`: Main idle loop, timer management, profile switches, inhibit reasons (`pw_power_inhibit()`, `PW_INHIBIT_CLIENT` and `PW_INHIBIT_SESSION`).
+- `src/power.c`: Main idle loop, timer management, profile switches, inhibit reasons (`pw_power_inhibit()`, `PW_INHIBIT_CLIENT`, `PW_INHIBIT_SESSION` and `PW_INHIBIT_LEASE`).
 - `src/idle.c`: ext-idle-notify, and the idle-inhibit protocol: which inhibitors count (`pw_idle_inhibit_update()`).
 - `src/dim.c`: Pure state machine (ACTIVE/DIMMED/BLANKED, plus the `inhibited` flag), no wlroots/wayland.
 - `src/dim.h`: State and action definitions, rules documented as comments.

@@ -100,6 +100,18 @@ color = #101010
 # single_buffer = true
 # panel_autohide = true
 
+[lease]
+# DRM lease: hand the output to a KMS client (the media player's --vo drm:lease)
+# through wp_drm_lease_device_v1, without a VT switch. picowl keeps input and
+# power policy, and takes the output back when the lease ends. Only with the
+# DRM backend, and the user must be in the video group. See doc/lease.md.
+# enable: offer the lease global (default true). false: no client gets a DRM fd.
+# allow: comma-separated app_ids which may lease. The requester must own the
+#   focused toplevel and its app_id must be in the list. * = any focused client,
+#   empty = nobody. Default: mediaplayer.
+# enable = true
+# allow = mediaplayer
+
 [memory]
 # Memory allocator tuning (M_* malloc() environment variables).
 # arena_max: M_ARENA_MAX, number of malloc arenas. Range: 1..8 (default 1).
