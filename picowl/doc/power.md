@@ -98,8 +98,7 @@ Backlight device is selected once at startup from `/sys/class/backlight/<dev>/`.
 
 Devices with `max_brightness = 1` are on/off only (e.g., GPIO backlight, ASIC2 PWM configured as binary). When detected at open:
 
-- Dimming is skipped (state machine stays ACTIVE or jumps to BLANKED).
-- Backlight writes only control on/off, not brightness levels.
+- picowl does not write the backlight at all for these devices: dimming and the `[power.low]` `max_brightness_pct` cap are skipped, and blanking only disables the outputs (the state machine goes ACTIVE to BLANKED).
 - Logged as "backlight <name> is on/off only, dimming skipped".
 
 Example: h5550 with GPIO backlight. h3870 and h3970 with PWM can have > 1, allowing dimming.
@@ -128,7 +127,7 @@ Don't run picowl as root or give it `CAP_DAC_OVERRIDE` just for the backlight.
 
 ## Per-board notes
 
-Facts below are from the board references (`h2200.md`, `h3800.md`, `h39xx.md`, `h5xxx.md`, `hx4700.md`). Backlight device names depend on the DTS; `backlight = auto` picks the device by type, so you rarely need a name. None of the boards has been tested with this code yet.
+Facts below are from the kernel port's per-board hardware notes (`h2200.md`, `h3800.md`, `h39xx.md`, `h5xxx.md`, `hx4700.md`), which are not in this repo and are not verified here. Backlight device names depend on the DTS; `backlight = auto` picks the device by type, so you rarely need a name. None of the boards has been tested with this code yet.
 
 | Board | SoC / display | Power-supply data | Backlight | Dimming |
 |---|---|---|---|---|
@@ -136,7 +135,7 @@ Facts below are from the board references (`h2200.md`, `h3800.md`, `h39xx.md`, `
 | h3870 | SA-1110, `sa1100-lcdc` | AC-adapter/charge sense + DS2760 over ASIC2's 1-Wire (OWM) | `pwm-backlight` on ASIC2 PWM0, levels 0 21 27 33 39 45 51 58 64 | yes |
 | h3970 | PXA250, `pxa-lcdc` | `AC_IN_N` (ASIC3) + `adc-battery` on the ASIC2 ADC | ASIC2 PWM | yes |
 | h5550 | PXA255, MediaQ MQ1132 | SC801 charger + DS2760 on SAMCOP's 1-Wire | `gpio-backlight`, on/off only (`max_brightness` = 1); the MediaQ PWM is exposed as a `pwm_chip` but not yet wired to `pwm-backlight` | skipped (one info log); blanking still works |
-| hx4700 | PXA270, W3220 | none usable: DS1WM never completes a bus reset, so the DS2760 never attaches; the BQ24022 charger is not implemented | PXA PWM, but the DTS points the `backlight` node at the wrong PWM (candidate C3 in `hx4700.md`) | uses the BATTERY profile (no supply data); dimming depends on the C3 fix |
+| hx4700 | PXA270, W3220 | none usable: DS1WM never completes a bus reset, so the DS2760 never attaches; the BQ24022 charger is not implemented | PXA PWM, but the DTS points the `backlight` node at the wrong PWM (candidate C3 in the kernel port's `hx4700.md` notes) | uses the BATTERY profile (no supply data); dimming depends on the C3 fix |
 
 Things to verify on each board:
 - **Supply events.** Some battery drivers update sysfs without emitting a `change` uevent. If profile switches lag, set `poll_s` (for example 60) for that board.
@@ -147,7 +146,7 @@ Things to verify on each board:
 
 `meson test -C build` covers this feature with:
 - **`backlight`, `powersupply` and `dim` unit tests**, using fake sysfs trees and an injected clock;
-- **the config parser test**, including the `[power*]` keys and the legacy `[idle] timeout_ms` mapping;
+- **the config parser test**, including the `[power*]` keys, the legacy `[idle] timeout_ms` to `blank_after_s` mapping (rounded up, ignored when any `[power.*] blank_after_s` is set) and the `[core]` alias;
 - **`power-e2e`**: headless picowl against a fake sysfs tree (`PICOWL_SYSFS_ROOT`). On the AC profile it checks that the real event loop dims the backlight from 40 to 12 after 1 s. On the LOW profile it checks that the startup brightness cap is applied (40 to 25).
 
 The headless backend has no input devices, so restore on input isn't covered end to end; the `dim` unit test covers it. Uevent delivery isn't covered either; the parser is unit-tested on canned messages.
@@ -173,7 +172,7 @@ On hardware, run `picowl -d 3` and check:
 
 - No per-frame or per-event heap allocations in steady state (only uevent and timer callbacks).
 - Integer math throughout (no floats, no FPU required).
-- Polling fallback when uevent socket unavailable (fallback to `poll_s` timer).
+- The `poll_s` timer re-reads sysfs periodically (when `poll_s > 0`) in addition to uevents. If the uevent socket cannot be opened (DEBUG log only), polling is the only update path, and there is none with `poll_s = 0`.
 
 ## Configuration Examples
 

@@ -139,11 +139,11 @@ RGB565/LINEAR in the primary formats gets a picowl-owned `wlr_swapchain` with
 one slot, passed as `swapchain` in the commit options. If the allocator or the
 renderer needs a second slot picowl logs once per output, at INFO,
 "single-buffer degraded to 2 slots" and carries on with 2 slots. If the
-swapchain cannot be created at all, one INFO line "single-buffer off" names the
-reason.
+swapchain cannot be created at all, one INFO line per output, "single-buffer off, using 2 slots: <reason>",
+names the reason.
 
 Patch 0003 makes this safe: the page-flip handler releases the scanned-out fb
-(`drm_fb_clear(&plane->current_fb)` after the queued-to-current move), `drm_atomic_connector_prepare`
+(`drm_fb_clear(&plane->current_fb)` after the existing `drm_fb_move`, only when `conn->copy_type`), `drm_atomic_connector_prepare`
 (FB_DAMAGE_CLIPS) and `pick_max_bpc` guard against `primary_fb == NULL`, and the
 copy-type drop is atomic only.
 
@@ -172,7 +172,7 @@ rotated image is produced by the display controller, not by the CPU.
   hardware).
 - `set_hw_rotation` is legal only while the output is disabled. It swaps the
   mode dimensions, sets `output->current_mode = NULL` and zeroes
-  `output->width/height`. The NULL `current_mode` is essential:
+  `output->width`, `height` and `refresh`; the following enabling commit with the mode sets the real size. The NULL `current_mode` is essential:
   `output_compare_state` compares the mode pointer, and `wlr_output_commit_state`
   strips unchanged fields, so re-committing the same mode would be a no-op and
   the swap would never reach the kernel.
@@ -281,7 +281,7 @@ are compiled and unit tested only. On a device verify:
   small damage and the bus time);
 - the hardware rotation commit succeeds (no "hw rotation commit failed" log);
 - touch calibration after each rotation (corners map correctly);
-- single-buffer swapchain: no tearing, "degraded to 2 slots" not logged;
+- single-buffer swapchain: no tearing, "degraded to 2 slots" not logged (INFO, once per output; also check there is no "single-buffer off" line);
 - direct scanout on pxa-lcdc from the 1 MiB CMA pool (a full RGB565 240x320 frame
   is 150 KiB; picowl-buffer budget 2 MiB must fit CMA together with the
   framebuffer); the software cursor is the only thing that blocks it;
