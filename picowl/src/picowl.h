@@ -174,10 +174,10 @@ struct pw_output {
 	enum pw_rot_mode rot_mode;  /* resolved rotation mode (config) */
 	enum wl_output_transform rotation; /* current logical rotation */
 	bool hw_rotation;           /* rotation is done by the display hardware */
-	int native_w, native_h;     /* mode size before any hardware swap */
 	bool copy_type;             /* output copies damage to device memory */
 	char drm_driver[32];        /* DRM driver name, "" if not DRM */
 	struct wlr_swapchain *copy_swapchain; /* persistent buffer for copy-type outputs */
+	bool sb_off_logged, sb_degraded_logged; /* single-buffer diagnostics, once */
 	struct wl_listener present;
 
 	struct wl_listener frame;
@@ -298,7 +298,8 @@ struct pw_server {
 void pw_output_init(struct pw_server *server);
 
 /* Blank (true) or unblank (false) all outputs by disabling/enabling them and
- * set server->blanked. Called by idle.c, input.c (TOGGLE_BLANK) and the
+ * set server->blanked from the outputs' real state (a failed unblank leaves
+ * it true). Called by idle.c, input.c (TOGGLE_BLANK) and the
  * output-power-management handler. Idempotent. */
 void pw_output_blank(struct pw_server *server, bool blank);
 
@@ -316,8 +317,9 @@ void pw_output_update_geometry(struct pw_output *output);
  */
 
 /* Create the xdg-shell global, foreign-toplevel manager, and listeners. Apps
- * are always sized to the usable area (maximized). Called by pw_server_init(). */
-void pw_view_init(struct pw_server *server);
+ * are always sized to the usable area (maximized). Called by pw_server_init().
+ * Returns false on failure (logged). */
+bool pw_view_init(struct pw_server *server);
 
 /* Remove listeners that outlive their views (xdg popup). Called by
  * pw_server_finish() before the display is destroyed. */
@@ -368,8 +370,8 @@ bool pw_layer_has_exclusive_focus(struct pw_server *server);
 
 /* Create seat, cursor (no drawn cursor), virtual keyboard manager, and the
  * new_input listener; handle keyboards, touch and pointer. Called by
- * pw_server_init(). */
-void pw_input_init(struct pw_server *server);
+ * pw_server_init(). Returns false on failure (logged). */
+bool pw_input_init(struct pw_server *server);
 
 /* Remove the listeners installed by pw_input_init() so the cursor and seat
  * can be destroyed. Called by pw_server_finish() before wlr_cursor_destroy. */
@@ -436,6 +438,10 @@ void pw_output_rotate(struct pw_output *o, enum wl_output_transform t);
 /* Re-apply the touch calibration matrix of o after a rotation change.
  * Implemented in input.c. */
 void pw_input_apply_rotation(struct pw_server *s, struct pw_output *o);
+
+/* Unmap touch devices from output gone, which is about to be destroyed, and
+ * remap them to another output if one remains. Implemented in input.c. */
+void pw_input_output_removed(struct pw_server *s, struct pw_output *gone);
 
 /* Recompute panel visibility (autohide). Implemented in layer.c. */
 void pw_panel_update(struct pw_server *s);

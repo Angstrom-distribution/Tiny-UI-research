@@ -29,6 +29,7 @@ struct pw_zbuf {
 	struct wlr_buffer *buffer;
 	uint32_t bytes;
 	struct pw_copyrel rel;
+	struct pw_output *direct_out;   /* copy-type output which direct-scanned the commit */
 	struct wlr_scene_buffer *sbuf;  /* the surface's scene buffer, once found */
 	struct wl_listener commit;
 	struct wl_listener surface_destroy;
@@ -47,6 +48,16 @@ static struct {
 	bool active;
 	bool copy_type;
 } st;
+
+static int enabled_outputs(void)
+{
+	int n = 0;
+	struct pw_output *o;
+	wl_list_for_each(o, &st.server->outputs, link)
+		if (o->wlr_output->enabled)
+			n++;
+	return n;
+}
 
 static bool any_copy_type(void)
 {
@@ -80,6 +91,11 @@ static bool check_dmabuf(struct wlr_dmabuf_attributes *a, void *data)
 	int mw, mh;
 	largest_output(&mw, &mh);
 	if (a->width <= 0 || a->height <= 0)
+		return false;
+	/* rows are read as width * 2 bytes at offset + y * stride (pixman wants
+	 * 32-bit alignment): a smaller stride reads past the end of the buffer */
+	if (a->stride[0] < (uint32_t)a->width * 2 || a->stride[0] % 4 ||
+	    a->offset[0] % 4)
 		return false;
 	/* either orientation: clients may render for a rotated output */
 	int big = mw > mh ? mw : mh;
@@ -156,7 +172,10 @@ static struct pw_output *output_of_scene_output(struct wlr_scene_output *so)
 /* The scene sampled the surface's buffer: by direct scanout (the kernel
  * copies it during this commit on a copy-type output) or by compositing
  * (pixman reads it now and whenever the region is redrawn). Only the first
- * allows early release, everything else is "retained". */
+ * allows early release, everything else is "retained". copied is only due
+ * when the one output which scans the commit out has copied it: with several
+ * outputs enabled, or a second output sampling the same commit, it is
+ * retained. */
 static void zbuf_sample(struct wl_listener *l, void *data)
 {
 	const struct wlr_scene_output_sample_event *ev = data;
@@ -164,12 +183,18 @@ static void zbuf_sample(struct wl_listener *l, void *data)
 	struct pw_output *o = output_of_scene_output(ev->output);
 	uint32_t serial;
 
-	if (ev->direct_scanout && o && o->copy_type) {
+	if (ev->direct_scanout && o && o->copy_type &&
+	    (z->direct_out == NULL || z->direct_out == o) && enabled_outputs() == 1) {
 		pw_copyrel_on_direct(&z->rel);
+		z->direct_out = o;
 		return;
 	}
-	if (pw_copyrel_on_retain(&z->rel, false, &serial))
+	/* another output shows the commit too, a direct scanout is not enough */
+	bool force = z->direct_out && z->direct_out != o;
+	if (pw_copyrel_on_retain(&z->rel, force, &serial)) {
+		z->direct_out = NULL;
 		picowl_buffer_v1_send_retained(z->resource, serial);
+	}
 }
 
 static void zbuf_sbuf_destroy(struct wl_listener *l, void *data)
@@ -196,6 +221,7 @@ static void zbuf_commit(struct wl_listener *l, void *data)
 	(void)data;
 	struct pw_zbuf *z = wl_container_of(l, z, commit);
 	pw_copyrel_on_commit(&z->rel);
+	z->direct_out = NULL;
 	if (!z->sbuf)
 		zbuf_bind_sbuf(z);
 	if (st.idle_timer)
@@ -386,8 +412,10 @@ static int idle_cb(void *data)
 		uint32_t serial;
 		if (!z->surface)
 			continue;
-		if (pw_copyrel_on_retain(&z->rel, force, &serial))
+		if (pw_copyrel_on_retain(&z->rel, force, &serial)) {
+			z->direct_out = NULL;
 			picowl_buffer_v1_send_retained(z->resource, serial);
+		}
 	}
 	return 0;
 }
@@ -515,6 +543,16 @@ void pw_zerocopy_output_removed(struct pw_output *o)
 		wl_resource_for_each(r, &st.mgrs)
 			send_copy_type(r);
 	}
+	/* nothing presents the commits it scanned out any more */
+	struct pw_zbuf *z;
+	wl_list_for_each(z, &st.zbufs, link) {
+		uint32_t serial;
+		if (z->direct_out != o)
+			continue;
+		z->direct_out = NULL;
+		if (z->surface && pw_copyrel_on_retain(&z->rel, true, &serial))
+			picowl_buffer_v1_send_retained(z->resource, serial);
+	}
 }
 
 void pw_zerocopy_output_committed(struct pw_output *o, bool did_commit)
@@ -533,10 +571,13 @@ void pw_zerocopy_output_presented(struct pw_output *o)
 	struct pw_zbuf *z;
 	wl_list_for_each(z, &st.zbufs, link) {
 		uint32_t serial;
-		if (!z->surface)
+		/* the kernel of another output may still be reading the buffer */
+		if (!z->surface || z->direct_out != o)
 			continue;
-		if (pw_copyrel_on_present(&z->rel, &serial))
+		if (pw_copyrel_on_present(&z->rel, &serial)) {
+			z->direct_out = NULL;
 			picowl_buffer_v1_send_copied(z->resource, serial);
+		}
 	}
 }
 

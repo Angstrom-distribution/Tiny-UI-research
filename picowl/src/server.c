@@ -205,7 +205,10 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 		pw_log(WLR_ERROR, "cannot create renderer");
 		goto fail;
 	}
-	wlr_renderer_init_wl_display(server->renderer, server->display);
+	if (!wlr_renderer_init_wl_display(server->renderer, server->display)) {
+		pw_log(WLR_ERROR, "cannot initialise renderer globals");
+		goto fail;
+	}
 
 	server->allocator = wlr_allocator_autocreate(server->backend, server->renderer);
 	if (!server->allocator) {
@@ -213,7 +216,10 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 		goto fail;
 	}
 
-	wlr_compositor_create(server->display, 6, server->renderer);
+	if (!wlr_compositor_create(server->display, 6, server->renderer)) {
+		pw_log(WLR_ERROR, "cannot create compositor");
+		goto fail;
+	}
 	wlr_subcompositor_create(server->display);
 	wlr_data_device_manager_create(server->display);
 
@@ -265,9 +271,11 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 
 	/* Module inits; input creates the seat/cursor and must precede idle. */
 	pw_output_init(server);
-	pw_view_init(server);
+	if (!pw_view_init(server))
+		goto fail;
 	pw_layer_init(server);
-	pw_input_init(server);
+	if (!pw_input_init(server))
+		goto fail;
 	pw_cursor_init(server);
 	pw_idle_init(server);
 	pw_power_init(server);

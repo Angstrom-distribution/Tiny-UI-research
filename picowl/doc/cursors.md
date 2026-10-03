@@ -48,13 +48,13 @@ Picowl displays a cursor **only during the tap-and-hold animation**. No cursor i
 
 ### Configuration Keys
 
-All cursor configuration lives in the `[cursor]` section of the INI config file (default `~/.config/picowl/picowl.ini` or `/etc/picowl.ini`):
+All cursor configuration lives in the `[cursor]` section of the INI config file (first found of `$XDG_CONFIG_HOME/picowl/picowl.ini`, `~/.config/picowl/picowl.ini`, `/etc/picowl.ini`):
 
 | Key | Default | Range/Format | Meaning |
 |-----|---------|--------------|---------|
 | `hold_animation` | `builtin` | `builtin` or file path | Animation to display during hold. `builtin` = Pocket PC 2003 rotating circle of circles. File path = PAM or PPM strip of frames. |
-| `fill` | `#2050c0` | `#RRGGBB` | Colour of the animated dots in the builtin animation. Compared at 6 bits per component. |
-| `outline` | `#ffffff` | `#RRGGBB` | Outline colour of the builtin animation dots. Compared at 6 bits per component. |
+| `fill` | `#2050c0` | `#RRGGBB` | Body colour of every dot in the builtin animation. Compared at 6 bits per component. |
+| `outline` | `#ffffff` | `#RRGGBB` | 1-pixel ring around the lead dot and its two trail dots in the builtin animation. Compared at 6 bits per component. |
 | `frame_interval_ms` | `83` | `20..1000` | Frame duration in milliseconds (~12 fps at default). |
 
 ### Related Touch Configuration
@@ -77,7 +77,7 @@ A custom cursor is a horizontal strip of square frames in PAM or PPM format.
 - **PAM:** `P7` magic, `TUPLTYPE RGB_ALPHA` or `RGB`, maxval 255 (8-bit channels)
 - **PPM:** `P6` binary format, maxval 255
 - **Frame Layout:** Frames are side-by-side horizontally; frame width = strip height (square frames)
-- **Hotspot:** The centre of each frame
+- **Hotspot:** Always the centre of the (possibly cropped) frame; the PAM strip stores no hotspot and it cannot be overridden
 - **Maximum:** 64 frames per strip (width ≤ 4096 pixels for a 64×64 frame)
 
 ### Example: Creating a Strip
@@ -114,7 +114,7 @@ picowl-cursor-convert --export-builtin [--fg #rrggbb] [--bg #rrggbb] out.pam
 - `--fg #rrggbb`: Force the first colour (foreground/lead colour in a 2-colour palette) as `#RRGGBB` hex.
 - `--bg #rrggbb`: Force the second colour (background/other colour in a 2-colour palette) as `#RRGGBB` hex.
 - `--premultiplied`: Input is premultiplied alpha (divide RGB by alpha before processing).
-- `--hotspot X,Y`: Override the hotspot to (`X`, `Y`). Default = centre of each frame.
+- `--hotspot X,Y`: Accepted but currently ignored: no hotspot is stored in the PAM strip and picowl always uses the frame centre.
 
 ### Exit Codes
 
@@ -124,11 +124,7 @@ picowl-cursor-convert --export-builtin [--fg #rrggbb] [--bg #rrggbb] out.pam
 
 ### Output Report
 
-When writing `out.pam`, picowl-cursor-convert prints:
-- Whether the input was already compliant
-- Which frames were modified
-- What adjustments were made (colour reduction, cropping, alpha thresholding, etc.)
-- Warnings if frames had to be altered significantly
+When writing `out.pam`, picowl-cursor-convert prints one `frame N: WxH ...` line per frame, either `(already compliant)` or the counters `alpha_clipped`, `colours_merged`, `cropped_to_WxH`, `remapped_pixels`, `input_colours`, then `wrote <out>: N frames`. There is no separate warning output.
 
 ### Examples
 
@@ -151,7 +147,7 @@ picowl-cursor-convert --check mycursor.pam
 Ensure the animation uses specific colours:
 
 ```sh
-picowl-cursor-convert --fg #ff0000 --bg #00ff00 myanimation.pam fixed.pam
+picowl-cursor-convert --fg '#ff0000' --bg '#00ff00' myanimation.pam fixed.pam
 ```
 
 #### Export the built-in animation as a template
@@ -169,7 +165,7 @@ picowl-cursor-convert my-builtin-copy.pam my-custom-cursor.pam
 Some tools produce premultiplied alpha; convert and un-premultiply:
 
 ```sh
-picowl-cursor-convert --premultiplied --fg #2050c0 --bg #ffffff premult.pam fixed.pam
+picowl-cursor-convert --premultiplied --fg '#2050c0' --bg '#ffffff' premult.pam fixed.pam
 ```
 
 ## Converting Images: netpbm and ImageMagick
@@ -218,14 +214,15 @@ The default `hold_animation = builtin` renders a 32×32 animation inspired by th
 **Design:**
 - 8 frames
 - 8 small dots arranged on a ring
-- One dot is the "lead" (foreground colour); the rest form a short trailing arc
-- The lead rotates around the ring with each frame
+- The lead dot (radius 4) and the two dots trailing it (radius 3) are filled with `fill` and ringed with a 1-pixel `outline`
+- The other five dots are radius-2 discs in `fill` only
+- The lead advances one ring position per frame
 - Rendered with integer arithmetic only (no FPU required)
-- Colours: `fill` (lead dot) and `outline` (trailing arcs)
+- Colours: `fill` (body of every dot) and `outline` (ring on the lead and trail dots)
 
 **Configuration:**
-- `fill`: Foreground colour of the animated dot (default `#2050c0`, a medium blue)
-- `outline`: Outline colour of the trailing dots (default `#ffffff`, white)
+- `fill`: Body colour of all dots (default `#2050c0`, a medium blue)
+- `outline`: 1-pixel ring colour of the lead and trail dots (default `#ffffff`, white)
 
 **Frame Interval:**
 - Controlled by `frame_interval_ms` (default 83 ms, ~12 fps)
@@ -234,9 +231,11 @@ The animation uses a precomputed integer sine/cosine table for positioning the 8
 
 ## Troubleshooting
 
-### "Cursor frame failed validation" or frame drop
+### A custom cursor looks wrong or a warning is logged
 
-Picowl loaded a non-compliant cursor and the device's DRM cursor plane rejected it.
+Picowl checks every frame of a `hold_animation` file and auto-fits non-compliant ones at load, so a non-compliant frame never reaches the cursor plane (the builtin frames are checked too). The log line is:
+
+`cursor: warning: <path> frame N non-compliant (<why>); fixed: alpha=.. colours=.. (merged ..) remapped=.. [cropped]`
 
 **Solution:**
 1. Run `picowl-cursor-convert --check myanimation.pam` to see which frames violate the rules
@@ -249,7 +248,7 @@ Your animation uses more than 2 colours per frame.
 
 **Solution:**
 1. Redesign the animation to use at most 2 opaque colours per frame, or
-2. Run `picowl-cursor-convert --fg #colour1 --bg #colour2 input.pam output.pam` to force specific colours
+2. Run `picowl-cursor-convert --fg '#colour1' --bg '#colour2' input.pam output.pam` to force specific colours (quote the colours: an unquoted `#` starts a shell comment)
 
 ### Animation looks distorted after conversion
 
@@ -273,7 +272,7 @@ The device is CPU-constrained.
 The configured file could not be read or was unusable.
 
 **Symptoms:**
-- Log message: `unable to load custom cursor animation at <path>; using builtin`
+- Log lines: `cursor: cannot read <path>: <reason>`, or `cursor: <path>: bad strip geometry WxH ...`, or `cursor: <path>: no frames`, followed by `cursor: falling back to builtin animation`
 - Builtin animation is displayed instead
 
 **Solution:**

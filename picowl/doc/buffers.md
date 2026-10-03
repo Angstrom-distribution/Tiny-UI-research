@@ -20,7 +20,7 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
    | `unsupported_format` | 0 |
    | `too_large` | 1 |
    | `no_memory` | 2 |
-   | `no_drm` | 3 (no DRM device, e.g. the headless backend; use wl_shm) |
+   | `no_drm` | 3 (reserved, never sent: with no DRM device the manager global is simply not advertised) |
 
    **Limits:** at most 3 buffers per client, and at most 2 MiB in total across all clients (`PW_ZB_MAX_PER_CLIENT`, `PW_ZB_BUDGET` in `src/zerocopy.c`).
 3. **Wrap the buffer:**
@@ -40,7 +40,7 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
 
 | Situation | Client behaviour |
 |---|---|
-| No `picowl_buffer_manager_v1` global, or `failed(no_drm)` | Plain wl_shm, preferring `WL_SHM_FORMAT_RGB565` (picowl advertises it) |
+| No `picowl_buffer_manager_v1` global (headless backend, no DRM, no dmabuf allocator, or `[zerocopy] enable = false`); `failed(no_drm)` is never sent | Plain wl_shm, preferring `WL_SHM_FORMAT_RGB565` (picowl advertises it) |
 | `copy_type` 0 (h3970, pxa-lcdc) | Direct scanout can still happen, but `copied` is never sent: double buffer and use `wl_buffer.release` |
 | Allocation fails mid-session | Keep using the buffers you have, or fall back to wl_shm |
 

@@ -137,11 +137,13 @@ commit, so one persistent buffer is enough. With `[zerocopy] single_buffer`
 (default true), an output that is enabled, renders RGB565 and has
 RGB565/LINEAR in the primary formats gets a picowl-owned `wlr_swapchain` with
 one slot, passed as `swapchain` in the commit options. If the allocator or the
-renderer needs a second slot picowl logs once "single-buffer degraded to 2
-slots" and carries on with 2 slots.
+renderer needs a second slot picowl logs once per output, at INFO,
+"single-buffer degraded to 2 slots" and carries on with 2 slots. If the
+swapchain cannot be created at all, one INFO line per output, "single-buffer off, using 2 slots: <reason>",
+names the reason.
 
 Patch 0003 makes this safe: the page-flip handler releases the scanned-out fb
-(`drm_fb_move(&plane->current_fb, &plane->queued_fb)`), `drm_atomic_connector_prepare`
+(`drm_fb_clear(&plane->current_fb)` after the existing `drm_fb_move`, only when `conn->copy_type`), `drm_atomic_connector_prepare`
 (FB_DAMAGE_CLIPS) and `pick_max_bpc` guard against `primary_fb == NULL`, and the
 copy-type drop is atomic only.
 
@@ -169,8 +171,8 @@ rotated image is produced by the display controller, not by the CPU.
   possibly swapping the 90 and 270 rows (kernel convention to be confirmed on
   hardware).
 - `set_hw_rotation` is legal only while the output is disabled. It swaps the
-  mode dimensions, sets `output->current_mode = NULL` and assigns
-  `output->width/height`. The NULL `current_mode` is essential:
+  mode dimensions, sets `output->current_mode = NULL` and zeroes
+  `output->width`, `height` and `refresh`; the following enabling commit with the mode sets the real size. The NULL `current_mode` is essential:
   `output_compare_state` compares the mode pointer, and `wlr_output_commit_state`
   strips unchanged fields, so re-committing the same mode would be a no-op and
   the swap would never reach the kernel.
@@ -180,12 +182,12 @@ rotated image is produced by the display controller, not by the CPU.
 - Hardware cursors are refused while a rotation is set (the cursor plane has no
   rotation), so picowl's hold animation uses the software cursor path.
 - picowl: `pw_output_rotate` disables the output, sets the rotation, enables it
-  with the mode and a NORMAL transform. `check_hw_size` compares the resulting
-  `wlr_output` size with `pw_rot_logical_size`; on a mismatch it logs "hw
-  rotation size mismatch", disables the output and re-enables it with
-  software (renderer) rotation. `[rotation]` selects `auto | hardware |
-  software` per output; `hardware` logs an error when unsupported and falls
-  back.
+  with the mode and a NORMAL transform. If that commit fails it logs "hw
+  rotation commit failed" and re-enables the output with software (renderer)
+  rotation. A driver that accepts the rotation property and ignores it is not
+  detected: the output size comes from the swapped mode, not from the
+  kernel. `[rotation]` selects `auto | hardware | software` per output;
+  `hardware` logs an error when unsupported and falls back.
 - Touch calibration: `pw_input_apply_rotation` (`src/input.c`, needs libinput)
   sets the libinput calibration matrix from `pw_rot_touch_matrix` when hardware
   rotation is in effect, composed with the device's default calibration (`libinput_device_config_
@@ -277,9 +279,9 @@ are compiled and unit tested only. On a device verify:
   swapped relative to the table in patch 0003, landscape fb accepted, no -ERANGE;
 - FB_DAMAGE_CLIPS is honoured (only the clip rectangles reach VRAM; check with a
   small damage and the bus time);
-- `check_hw_size` does not trigger the software fallback;
+- the hardware rotation commit succeeds (no "hw rotation commit failed" log);
 - touch calibration after each rotation (corners map correctly);
-- single-buffer swapchain: no tearing, "degraded to 2 slots" not logged;
+- single-buffer swapchain: no tearing, "degraded to 2 slots" not logged (INFO, once per output; also check there is no "single-buffer off" line);
 - direct scanout on pxa-lcdc from the 1 MiB CMA pool (a full RGB565 240x320 frame
   is 150 KiB; picowl-buffer budget 2 MiB must fit CMA together with the
   framebuffer); the software cursor is the only thing that blocks it;
