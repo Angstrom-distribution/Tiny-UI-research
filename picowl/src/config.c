@@ -228,9 +228,9 @@ struct pw_config *pw_config_default(void)
 	c->low_capacity = 15;
 	c->dim_level = 30;
 	c->poll_s = 300;
-	c->power[PW_PROFILE_AC] = (struct pw_power_timing){ 120, 600 };
-	c->power[PW_PROFILE_BATTERY] = (struct pw_power_timing){ 20, 60 };
-	c->power[PW_PROFILE_LOW] = (struct pw_power_timing){ 10, 30 };
+	c->power[PW_PROFILE_AC] = (struct pw_power_timing){ 120, 600, true };
+	c->power[PW_PROFILE_BATTERY] = (struct pw_power_timing){ 20, 60, true };
+	c->power[PW_PROFILE_LOW] = (struct pw_power_timing){ 10, 30, true };
 	c->low_max_brightness_pct = 40;
 	add_default_keybindings(c);
 	return c;
@@ -608,6 +608,11 @@ struct pw_config *pw_config_load(const char *path)
 						pw_log(WLR_INFO, "[power.%s] blank_after_s %d out of range [0..86400], using default",
 							profile_name, val_int);
 					}
+				} else if (strcmp(key, "inhibit") == 0) {
+					/* invalid text keeps the default (yes) */
+					char name[32];
+					snprintf(name, sizeof(name), "power.%s.inhibit", profile_name);
+					parse_bool_log(val, name, &c->power[profile].inhibit);
 				} else if (strcmp(key, "max_brightness_pct") == 0 && profile == PW_PROFILE_LOW) {
 					int val_int = atoi(val);
 					if (val_int >= 1 && val_int <= 100) {

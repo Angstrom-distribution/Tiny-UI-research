@@ -310,6 +310,8 @@ static int test_power_config(void)
 	/* Check [power.battery] section parsing */
 	assert(c->power[PW_PROFILE_BATTERY].dim_after_s == 30);
 	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 120);
+	assert(!c->power[PW_PROFILE_BATTERY].inhibit);
+	assert(c->power[PW_PROFILE_AC].inhibit); /* unset keeps the default */
 
 	/* Check [power.low] section parsing */
 	assert(c->power[PW_PROFILE_LOW].dim_after_s == 15);
@@ -340,6 +342,8 @@ static int test_power_defaults(void)
 	assert(c->power[PW_PROFILE_LOW].dim_after_s == 10);
 	assert(c->power[PW_PROFILE_LOW].blank_after_s == 30);
 	assert(c->low_max_brightness_pct == 40);
+	for (int i = 0; i < PW_PROFILE_COUNT; i++)
+		assert(c->power[i].inhibit);
 
 	pw_config_free(c);
 	printf("✓ test_power_defaults\n");
@@ -363,7 +367,7 @@ static int test_power_validation(void)
 	const char *path = write_tmp_ini("picowl-test-power-bad.ini",
 		"[power]\nlow_capacity = 150\ndim_level = 0\npoll_s = 10\n"
 		"[power.ac]\nblank_after_s = -5\n"
-		"[power.low]\nmax_brightness_pct = 0\n");
+		"[power.low]\nmax_brightness_pct = 0\ninhibit = maybe\n");
 	struct pw_config *c = pw_config_load(path);
 	remove(path);
 	assert(c != NULL);
@@ -372,6 +376,7 @@ static int test_power_validation(void)
 	assert(c->poll_s == 300);
 	assert(c->power[PW_PROFILE_AC].blank_after_s == 600);
 	assert(c->low_max_brightness_pct == 40);
+	assert(c->power[PW_PROFILE_LOW].inhibit); /* typo keeps the default */
 	pw_config_free(c);
 	printf("✓ test_power_validation\n");
 	return 0;
