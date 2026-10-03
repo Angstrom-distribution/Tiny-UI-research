@@ -120,10 +120,9 @@ malloc tuning via `mallopt`, applied before and after config is read. Reduces me
 
 Out-of-range values are rejected and the default is kept. Measured VmHWM (headless, 1280×720): 9.5 MB (baseline 9.4 MB). See `../docs/ipaq-ui/compositor.md § 5.4` for memory optimization strategy and `tests/rss.sh` for the RSS measurement test.
 
-### [idle] section
+### Power Management and Idle Timeouts
 
-- `timeout_ms = <milliseconds>`
-  - Milliseconds of keyboard/pointer inactivity before the screen is blanked. 0 disables blanking. Default: 60000 (60 seconds).
+Power-aware idle timeout and backlight dimming, configured via `[power]` and `[power.ac]`, `[power.battery]`, `[power.low]` sections. Screen transitions through ACTIVE → DIMMED → BLANKED states based on inactivity and power profile (AC, BATTERY, LOW). All timings and backlight device selection are documented in **[doc/power.md](doc/power.md)**. The legacy `[idle]` section is supported for backwards compatibility; prefer the `[power.*]` sections.
 
 ### [background] section
 

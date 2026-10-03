@@ -25,6 +25,10 @@ bitbake picowl
   `REQUIRED_DISTRO_FEATURES = "wayland"`). `systemd` is needed for the unit file
   to be packaged. Example `local.conf`:
   `DISTRO_FEATURES:append = " wayland systemd"`.
+* The `video` group must exist on the target system for backlight brightness
+  control. The systemd unit runs picowl with `SupplementaryGroups=video` and the
+  udev rule (90-picowl-backlight.rules) grants group write access to the
+  backlight brightness sysfs attribute.
 * Do not build with Thumb: the render paths (pixman and picowl) are tuned for
   ARM state and the SA-1110/PXA25x have no benefit from Thumb. picowl sets
   `ARM_INSTRUCTION_SET:arm = "arm"`; for the machine/distro also set
