@@ -139,16 +139,21 @@ color = #101010
 # dim_after_s: inactivity before backlight dims (default 120).
 # blank_after_s: inactivity before screen blanks (default 600).
 # Range: 0..86400. Blank happens after dim (blank_after_s >= dim_after_s recommended).
+# inhibit: yes|no (default yes). While a visible surface holds an idle inhibitor
+#   (video playback), do not dim or blank. The power key still blanks.
 # dim_after_s = 120
 # blank_after_s = 600
+# inhibit = yes
 
 [power.battery]
 # Battery power profile idle timings. All values in seconds; 0 disables the step.
 # dim_after_s: inactivity before backlight dims (default 20).
 # blank_after_s: inactivity before screen blanks (default 60).
 # Range: 0..86400.
+# inhibit: yes|no (default yes), see [power.ac].
 # dim_after_s = 20
 # blank_after_s = 60
+# inhibit = yes
 
 [power.low]
 # Low battery profile idle timings. All values in seconds; 0 disables the step.
@@ -158,9 +163,13 @@ color = #101010
 # max_brightness_pct: cap backlight to this % of max_brightness while LOW.
 #   Range: 1..100 (default 40).
 # Range for dim/blank: 0..86400.
+# inhibit: yes|no (default yes), see [power.ac]. Set no to let the screen dim and
+#   blank during playback when the battery is low (the brightness cap above
+#   applies either way).
 # dim_after_s = 10
 # blank_after_s = 30
 # max_brightness_pct = 40
+# inhibit = yes
 
 [core]
 # Legacy [core] section (deprecated; alias of [idle] timeout_ms).

@@ -1,6 +1,8 @@
 # Idle-inhibit
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** implemented.
+
+The code is in `src/idle.c` (inhibitors, visibility rule), `src/dim.c` (`pw_dim_set_inhibited`) and `src/power.c` (`pw_power_inhibit`); the user documentation is the "Idle inhibit" section of `doc/power.md`. Deviations from this plan are listed under [Implementation notes](#implementation-notes).
 
 picowl offers `zwp_idle_inhibit_manager_v1`. An inhibitor counts only while its surface is visible: the focused toplevel, or a layer surface whose scene node is enabled. While at least one inhibitor counts, `power.c` stops its dim and blank timers. The power key and the output-power protocol can still blank the screen. A per-profile key, `[power.<profile>] inhibit`, lets the user disable inhibitors per profile (for example on LOW).
 
@@ -281,3 +283,15 @@ Boards: h3870 (`pwm-backlight`), h5550 (on/off backlight: the blank-only path), 
 | Optional `PW_INHIBIT_SESSION` | 0.1 day plus hardware VT test [est] |
 | Hardware checklist on 3 boards | 0.5 day [est] |
 | **Total** | **about 2-2.5 days [est]**, about 200 lines of C plus about 150 lines of tests [est] |
+
+## Implementation notes
+
+Deviations from the plan above. Line references in the plan are against the old commit; everything was re-located in the current code.
+
+- **Strict bool parsing.** The current `src/config.c` already has `parse_bool_log()`, which returns false and keeps the old value on unknown text (the plan's `parse_bool` problem no longer exists). The `inhibit` key uses it, so no `parse_bool_strict` was added. It logs at WLR_ERROR, like the other boolean keys, not at WLR_INFO.
+- **`pw_idle_inhibit_update()` runs at the end of `pw_panel_update()`**, not as its first statement. Called first, it would see the panel state from before the change, so a panel that autohide has just hidden would still count. It now runs after the panel node is enabled or disabled, on every call (also when the hidden state did not change).
+- **No `pw_idle_finish()`.** The `new_idle_inhibitor` listener is dropped with `listener_drop()` in `pw_server_finish()` next to `new_layer_surface`, as the existing listeners are. Nothing else needed teardown.
+- **No `dying` flag.** `struct pw_inhibitor` keeps a pointer to the wlroots inhibitor, and its destroy handler sets `wlr->data = NULL` before running the update. The walk skips entries with NULL `data`, which has the same effect as `dying` and also covers the calloc-failure case.
+- **`PW_INHIBIT_SESSION` is included** (open question 5): `power.c` adds the listener on `server->session->events.active` when a session exists, and takes the initial state from `session->active`. It ignores the `inhibit` key. It cannot be tested headless; the hardware checklist item 9 covers it.
+- **Open questions as chosen in the plan:** an inhibitor undims a DIMMED screen; LOW honours inhibitors by default (`yes|no` only, no `dim` value); no maximum inhibit duration; the dead `server->idle_timer` is left alone (it is not part of this feature).
+- **Tests.** The `power-e2e` cases are numbered 4 to 6 (cases 1 to 3 were already there). They use `dim_after_s = 2`, not 1, so that a slow start cannot dim before the client has mapped. Case 5 starts client B after 3 s and first checks that the screen is still at the user level with A visible, so it fails if A's inhibitor is not counted at all. The test needs the test client, so `tests/meson.build` passes it to `power-e2e.sh`, and the test timeout is 90 s. `smoke.sh` also runs `--inhibit` and checks the two log lines.

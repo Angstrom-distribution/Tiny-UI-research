@@ -97,7 +97,7 @@ Expected cost: identical bus bytes to `--vo drm`, plus one compositor wakeup and
 ### 2.8 Idle, dimming and blanking
 
 - picowl dims and blanks on idle (`doc/power.md`). During playback the player must hold `zwp_idle_inhibit_manager_v1` on its surface, and drop it when paused or stopped.
-- **[picowl]** Idle-inhibit is not implemented yet. picowl must add `idle-inhibit-unstable-v1` and honour inhibitors from a visible surface in `power.c` (no dim, no blank). Until then, playback longer than `dim_after_s` dims the screen.
+- picowl implements it (`doc/power.md`, "Idle inhibit"): no dim and no blank while the player's surface is visible (the focused toplevel), and normal timeouts from the moment the inhibitor is destroyed. The power key still blanks. With an older picowl, playback longer than `dim_after_s` dims the screen.
 
 ### 2.9 What stays the same
 The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_DIR` exists under picowl), direct ALSA, telemetry, the transform pass and the file browser (optional under Path A, because picowl's panel launcher or a file manager can open files).
