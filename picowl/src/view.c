@@ -108,6 +108,8 @@ void pw_view_focus(struct pw_view *view)
 	if (!view || !view->mapped)
 		return;
 	server = view->server;
+	if (pw_lease_blocks_focus(server, view))
+		return; /* a pop-up must not end the lessee's playback */
 	prev = server->focused_view;
 
 	if (prev && prev != view)
@@ -236,7 +238,13 @@ static void view_map(struct wl_listener *l, void *data)
 	(void)data;
 
 	view->mapped = true;
-	wl_list_insert(&view->server->views, &view->link);
+	if (pw_lease_active(view->server)) {
+		/* behind the lessee, which keeps the focus */
+		wl_list_insert(view->server->views.prev, &view->link);
+		wlr_scene_node_lower_to_bottom(&view->scene_tree->node);
+	} else {
+		wl_list_insert(&view->server->views, &view->link);
+	}
 	view_create_handles(view);
 	view_arrange(view);
 	pw_view_focus(view);
@@ -254,6 +262,7 @@ static void view_unmap(struct wl_listener *l, void *data)
 	wl_list_remove(&view->link);
 	wl_list_init(&view->link);
 	view_destroy_handles(view);
+	pw_lease_view_gone(server, view);
 
 	if (server->focused_view == view) {
 		server->focused_view = NULL;

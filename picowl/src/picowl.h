@@ -274,6 +274,7 @@ struct pw_server {
 	struct wl_event_source *idle_timer;
 	bool blanked;
 	void *power;               /* struct pw_power state, owned by power.c */
+	void *lease;               /* struct pw_lease state, owned by lease.c; NULL: no leasing */
 
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf; /* hand-built feedback, see zerocopy.c */
 	void *buffer_mgr;          /* picowl_buffer_manager_v1 state, owned by zerocopy.c */
@@ -304,6 +305,10 @@ struct pw_server {
  * scene output, commit only on frame with damage. Called by pw_server_init()
  * after the backend/renderer/scene exist. */
 void pw_output_init(struct pw_server *server);
+
+/* Remove the session listener and forget parked outputs. Called by
+ * pw_server_finish() before the backend (and its session) is destroyed. */
+void pw_output_finish(struct pw_server *server);
 
 /* Blank (true) or unblank (false) all outputs by disabling/enabling them and
  * set server->blanked from the outputs' real state (a failed unblank leaves
@@ -395,6 +400,7 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 #include "cursor.h"
 
 #include "power.h"
+#include "lease.h"
 
 /*
  * idle.c
@@ -456,6 +462,12 @@ void pw_input_apply_rotation(struct pw_server *s, struct pw_output *o);
 /* Unmap touch devices from output gone, which is about to be destroyed, and
  * remap them to another output if one remains. Implemented in input.c. */
 void pw_input_output_removed(struct pw_server *s, struct pw_output *gone);
+
+/* While the display is leased (no outputs), map every touch device to box,
+ * given in panel-native mode pixels, and restore its default calibration
+ * matrix, so touch coordinates are in the frame the lessee renders in. NULL
+ * clears the mapping. Implemented in input.c, called by lease.c. */
+void pw_input_lease_touch(struct pw_server *s, const struct wlr_box *box);
 
 /* Recompute panel visibility (autohide). Implemented in layer.c. */
 void pw_panel_update(struct pw_server *s);

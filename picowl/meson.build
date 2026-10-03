@@ -97,6 +97,7 @@ sources = files(
   'src/powersupply.c',
   'src/dim.c',
   'src/power.c',
+  'src/lease.c',
   'src/leasepolicy.c',
 )
 

@@ -33,6 +33,8 @@ static struct picowl_buffer_manager_v1 *pbm;
 static bool pb_fmt_565;
 static int pb_copy_type = -1;
 static struct zwp_idle_inhibit_manager_v1 *inhibit_mgr;
+static const char *no_global;      /* --expect-no-global NAME */
+static bool saw_no_global;         /* ... and the registry advertised it */
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -68,6 +70,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	const char *iface, uint32_t ver)
 {
 	(void)d;
+	if (no_global && !strcmp(iface, no_global))
+		saw_no_global = true;
 	if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
@@ -357,6 +361,8 @@ int main(int argc, char **argv)
 			want_inhibit = true;
 		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
 			linger = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
+			no_global = argv[++i];
 	}
 
 	alarm(5);
@@ -369,6 +375,14 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (no_global) {
+		if (saw_no_global) {
+			fprintf(stderr, "picowl-test-client: unexpected global %s\n", no_global);
+			return 1;
+		}
+		printf("picowl-test-client: no global %s\n", no_global);
+		return 0;
+	}
 	if (!compositor || !shm || !wm_base) {
 		fprintf(stderr, "picowl-test-client: missing globals\n");
 		return 1;

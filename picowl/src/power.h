@@ -32,6 +32,7 @@ void pw_power_sync_blanked(struct pw_server *server);
 enum {
 	PW_INHIBIT_CLIENT  = 1 << 0, /* idle-inhibit from a visible surface (idle.c) */
 	PW_INHIBIT_SESSION = 1 << 1, /* session inactive: another VT owns the display */
+	PW_INHIBIT_LEASE   = 1 << 2, /* the display is leased to a KMS client (lease.c) */
 };
 
 /* Set or clear one inhibit reason. While any reason holds (CLIENT only if

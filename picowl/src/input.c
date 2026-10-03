@@ -28,6 +28,7 @@
 #include "power.h"
 #include "touchhold.h"
 #include "rotate.h"
+#include "leasepolicy.h"
 
 #define PW_MOD_MASK (WLR_MODIFIER_SHIFT | WLR_MODIFIER_CTRL | \
                      WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)
@@ -47,6 +48,7 @@ struct pw_input_state {
 	struct pw_touchhold th;        /* tap-and-hold state machine */
 	struct wl_event_source *th_timer;
 	int down_x, down_y;            /* layout coords of the touch-down point */
+	struct wlr_box lease_box;      /* touch region while leased, empty if not */
 
 	struct wl_listener cursor_motion;
 	struct wl_listener cursor_motion_abs;
@@ -183,6 +185,19 @@ static void rotate_first_output(struct pw_server *server)
 
 void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *binding)
 {
+	/* The lessee owns scanout: some actions end the lease, one is dropped. */
+	if (pw_lease_active(server)) {
+		switch (pw_lease_key_policy(binding->action)) {
+		case PW_LEASE_KEY_DROP:
+			pw_log(WLR_INFO, "lease: key action dropped while leased");
+			return;
+		case PW_LEASE_KEY_REVOKE_FIRST:
+			pw_lease_revoke(server, "key action");
+			break;
+		case PW_LEASE_KEY_PASS:
+			break;
+		}
+	}
 	switch (binding->action) {
 	case PW_ACTION_SPAWN:
 		if (binding->command && pw_spawn(binding->command) < 0)
@@ -485,6 +500,34 @@ void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
 #endif
 }
 
+/* Map one touch device to the lease region (or clear it). A device's region
+ * wins over its output, so the output mapping can stay as it is. */
+static void touch_lease_apply(struct pw_touch_dev *t)
+{
+	wlr_cursor_map_input_to_region(st.server->cursor, t->dev,
+		wlr_box_empty(&st.lease_box) ? NULL : &st.lease_box);
+#ifdef PW_HAVE_LIBINPUT
+	/* The lessee renders in the panel's native frame: no rotation matrix. */
+	if (t->have_default && !wlr_box_empty(&st.lease_box)) {
+		struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
+		if (h)
+			libinput_device_config_calibration_set_matrix(h, t->def_matrix);
+	}
+#endif
+}
+
+void pw_input_lease_touch(struct pw_server *server, const struct wlr_box *box)
+{
+	st.lease_box = box ? *box : (struct wlr_box){ 0 };
+	/* a gesture in progress began in layout coordinates */
+	st.grab_ox = st.grab_oy = 0;
+	if (!server->cursor)
+		return;
+	struct pw_touch_dev *t;
+	wl_list_for_each(t, &touch_devs, link)
+		touch_lease_apply(t);
+}
+
 /* wlr_cursor keeps a raw pointer to the output a touch device is mapped to:
  * unmap it before the output is freed and follow a surviving output. */
 void pw_input_output_removed(struct pw_server *server, struct pw_output *gone)
@@ -597,10 +640,18 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 	st.down_x = (int)server->cursor->x;
 	st.down_y = (int)server->cursor->y;
 	double sx, sy;
-	struct wlr_surface *s = surface_at(server, server->cursor->x,
-		server->cursor->y, &sx, &sy);
+	/* Leased: the scene no longer matches the screen. The lessee gets the
+	 * touch, in the coordinates of the lease region. */
+	struct wlr_surface *s = pw_lease_touch_target(server);
 	if (s) {
-		focus_surface(server, s);
+		sx = server->cursor->x;
+		sy = server->cursor->y;
+	} else {
+		s = surface_at(server, server->cursor->x, server->cursor->y, &sx, &sy);
+		if (s)
+			focus_surface(server, s);
+	}
+	if (s) {
 		st.grab_ox = server->cursor->x - sx;
 		st.grab_oy = server->cursor->y - sy;
 		st.frame_pending = true;
@@ -724,6 +775,8 @@ static void handle_new_input(struct wl_listener *l, void *data)
 		wlr_cursor_attach_input_device(server->cursor, dev);
 		st.n_touch++;
 		update_capabilities(server);
+		if (pw_lease_active(server))
+			touch_lease_apply(t);
 		if (!wl_list_empty(&server->outputs)) {
 			struct pw_output *o = wl_container_of(server->outputs.next, o, link);
 			pw_input_apply_rotation(server, o);
