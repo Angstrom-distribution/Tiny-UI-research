@@ -8,8 +8,10 @@ Source: `src/lease.c` (protocol glue, state), `src/leasepolicy.c` (pure grant an
 
 ```ini
 [lease]
-enable = true          ; create the wp_drm_lease_device_v1 global
-allow = mediaplayer    ; comma-separated app_ids allowed to lease; * = any
+# create the wp_drm_lease_device_v1 global
+enable = true
+# comma-separated app_ids allowed to lease; * = any
+allow = mediaplayer
 ```
 
 `enable = false` creates no global, so no client gets a DRM fd. `allow` is a comma-separated list; blanks around entries are ignored, `*` accepts any focused client, an empty value rejects every request. The global exists only with the DRM backend (not headless or nested) and when the user can open the card as a non-master (the `video` group, `data/picowl.service`); picowl logs `lease: no DRM backend, disabled` otherwise.

@@ -64,8 +64,10 @@ New section, parsed like `[zerocopy]` (`src/config.c:438-446`, `parse_bool` at :
 
 ```ini
 [lease]
-enable = true          ; create the wp_drm_lease_device_v1 global
-allow = mediaplayer    ; comma-separated app_ids allowed to lease; * = any
+# create the wp_drm_lease_device_v1 global
+enable = true
+# comma-separated app_ids allowed to lease; * = any
+allow = mediaplayer
 ```
 
 | Key | Default | Meaning |
@@ -311,3 +313,4 @@ Deviations from the plan above. The line references in the plan are against the 
 - **Patch 0004 (c).** The lease keeps `connectors = NULL`, `n_connectors = 0`. Whether upstream fixed the use-after-free after 0.19.0 was not checked: the build container has no network access. `objects[]` has `3 * n_outputs + drm->num_planes + 1` entries as planned, and an overlay plane that is possible on several leased CRTCs is added once, because the kernel rejects a duplicate object.
 - **Tests that could not run here.** There is no `/dev/dri`, no vkms and no kernel module support in the build container, so `tests/lease-vkms.sh` (with `tests/pw-lease-client.c`, suite `vkms`, exit 77 without root, `/dev/dri` and the module) was compiled but never run. The grant path, the parking path, the touch mapping and the key policy at run time were reviewed but not exercised; the ASan confirmation of the grant fix is open. The `meson test` run under `-Db_sanitize=address,undefined` passes (except `rss`, whose ceiling the sanitizer exceeds). The `lease-vkms` script treats a picowl that cannot start (no seat) as a skip, not a failure. Its close-fd-only case runs only when `/run/udev` exists.
 - **Open questions** are answered as proposed: power key and cycle key revoke (question 3), touch in native pixels (4), nothing for udev (5), layer surfaces are closed with the output as in the VT-switch path (6, 7). Questions 1, 2 and 8 are open: they need upstream, the boards and a CI runner.
+- **No inline comments in the `[lease]` snippet.** The parser (`src/config.c`) takes only whole-line `#`/`;` comments, so a `; ...` after a value would become part of it. §2.2 and `doc/lease.md` put the comments on their own lines.
