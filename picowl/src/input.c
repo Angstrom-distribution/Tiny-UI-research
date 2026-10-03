@@ -25,6 +25,7 @@
 #include <libinput.h>
 #endif
 
+#include "power.h"
 #include "touchhold.h"
 #include "rotate.h"
 
@@ -93,9 +94,9 @@ static bool swallow_get(uint32_t code)
  * must be dropped. */
 static bool activity(struct pw_server *server)
 {
-	bool was_blanked = server->blanked;
-	pw_idle_activity(server);
-	return was_blanked;
+	pw_idle_notify(server);
+	/* Blanked: swallow the waking event. Dimmed: undim, deliver it. */
+	return pw_power_activity(server);
 }
 
 static void update_capabilities(struct pw_server *server)
@@ -189,7 +190,7 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 		pw_view_close_focused(server);
 		break;
 	case PW_ACTION_TOGGLE_BLANK:
-		pw_output_blank(server, !server->blanked);
+		pw_power_set_blanked(server, !server->blanked);
 		break;
 	case PW_ACTION_ROTATE:
 		rotate_first_output(server);

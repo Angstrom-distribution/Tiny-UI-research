@@ -34,6 +34,7 @@
 #include "copyrel.h"
 #include "zerocopy.h"
 #include "mem.h"
+#include "powerprofile.h"
 
 #define pw_log(level, ...) wlr_log(level, __VA_ARGS__)
 
@@ -128,6 +129,16 @@ struct pw_config {
 	int mmap_threshold_kb;     /* M_MMAP_THRESHOLD in kB (default 128) */
 	int top_pad_kb;            /* M_TOP_PAD in kB (default 16) */
 	bool trim_after_start;     /* malloc_trim() once after startup (default true) */
+
+	/* [power]. idle_timeout_ms above is kept for backwards compatibility:
+	 * if set and no [power.*] blank_after_s is configured it becomes the
+	 * blank timeout of every profile (resolved by the config parser). */
+	char *backlight;           /* NULL or "auto" = auto-select, else device name */
+	int low_capacity;          /* LOW at battery capacity <= this % (default 15, 0..100) */
+	int dim_level;             /* dimmed brightness, % of user level (default 30, 1..100) */
+	int poll_s;                /* fallback sysfs re-read period, 0 = off (default 300) */
+	struct pw_power_timing power[PW_PROFILE_COUNT]; /* indexed by enum pw_power_profile */
+	int low_max_brightness_pct; /* brightness cap while LOW, % of max (default 40, 1..100) */
 };
 
 /*
@@ -255,6 +266,7 @@ struct pw_server {
 	struct wlr_output_power_manager_v1 *output_power_mgr;
 	struct wl_event_source *idle_timer;
 	bool blanked;
+	void *power;               /* struct pw_power state, owned by power.c */
 
 	struct wlr_linux_dmabuf_v1 *linux_dmabuf; /* hand-built feedback, see zerocopy.c */
 	void *buffer_mgr;          /* picowl_buffer_manager_v1 state, owned by zerocopy.c */
@@ -372,6 +384,8 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
  */
 #include "cursor.h"
 
+#include "power.h"
+
 /*
  * idle.c
  */
@@ -383,6 +397,10 @@ void pw_idle_init(struct pw_server *server);
 /* Report user activity: notify idle clients, rearm the timer, and unblank if
  * blanked. Called by input.c on every input event. */
 void pw_idle_activity(struct pw_server *server);
+
+/* Only notify ext-idle-notify clients of activity (no dim/blank handling);
+ * input.c pairs it with pw_power_activity() to get the swallow result. */
+void pw_idle_notify(struct pw_server *server);
 
 /*
  * server.c

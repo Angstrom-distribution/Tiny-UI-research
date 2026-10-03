@@ -270,6 +270,7 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	pw_input_init(server);
 	pw_cursor_init(server);
 	pw_idle_init(server);
+	pw_power_init(server);
 	return true;
 
 fail:
@@ -348,6 +349,7 @@ void pw_server_finish(struct pw_server *server)
 		wl_event_source_remove(S.sigint);
 		S.sigint = NULL;
 	}
+	pw_power_finish(server);
 	if (server->idle_timer) {
 		wl_event_source_remove(server->idle_timer);
 		server->idle_timer = NULL;

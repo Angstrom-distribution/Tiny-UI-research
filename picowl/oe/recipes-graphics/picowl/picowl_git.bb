@@ -44,7 +44,7 @@ RDEPENDS:${PN} += "seatd"
 # meson.options: 'tests' (boolean) and 'systemd' (feature). The unit file is
 # installed by meson itself (into systemdsystemunitdir of systemd.pc), so no
 # manual install is done for it below.
-EXTRA_OEMESON += "-Dtests=false"
+EXTRA_OEMESON += "-Dtests=false -Dudev=disabled -Dudevrulesdir=${nonarch_base_libdir}/udev/rules.d"
 PACKAGECONFIG ??= "${@bb.utils.filter('DISTRO_FEATURES', 'systemd', d)}"
 PACKAGECONFIG[systemd] = "-Dsystemd=enabled,-Dsystemd=disabled,systemd"
 
@@ -55,6 +55,9 @@ do_install:append() {
     install -d ${D}${sysconfdir}
     install -m 0644 ${S}/data/picowl.ini.example ${D}${sysconfdir}/picowl.ini
 }
+
+# Backlight udev rule (installed by meson into the udev rules dir).
+FILES:${PN} += "${nonarch_base_libdir}/udev/rules.d/90-picowl-backlight.rules"
 
 CONFFILES:${PN} += "${sysconfdir}/picowl.ini"
 

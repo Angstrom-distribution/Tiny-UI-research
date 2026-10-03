@@ -14,7 +14,9 @@ format = RGB565
 # * = normal
 
 [idle]
-# Milliseconds of inactivity before the screen is blanked; 0 disables.
+# Legacy: milliseconds of inactivity before the screen is blanked; 0 disables.
+# Used as blank_after_s (rounded up to seconds) for all power profiles unless
+# a [power.*] blank_after_s is set. Prefer the [power.*] sections below.
 timeout_ms = 60000
 
 [background]
@@ -110,3 +112,53 @@ color = #101010
 # mmap_threshold_kb = 128
 # top_pad_kb = 16
 # trim_after_start = true
+
+[power]
+# Power supply aware backlight dimming configuration.
+# backlight: auto (prefer type firmware > platform > raw, first by name),
+#   or an explicit backlight device name in /sys/class/backlight/. Default: auto.
+# low_capacity: battery capacity threshold (%) below which LOW profile is used.
+#   Range: 0..100 (default 15). 0 disables LOW profile detection.
+# dim_level: dimmed brightness as % of user brightness. Range: 1..100 (default 30).
+#   To disable dimming set dim_after_s = 0 in the [power.*] profiles.
+# poll_s: sysfs re-read period for drivers that don't emit change events.
+#   0 disables polling, values < 30 are rejected. Range: 0 or 30..86400 (default 300).
+# backlight = auto
+# low_capacity = 15
+# dim_level = 30
+# poll_s = 300
+
+[power.ac]
+# AC power profile idle timings. All values in seconds; 0 disables the step.
+# dim_after_s: inactivity before backlight dims (default 120).
+# blank_after_s: inactivity before screen blanks (default 600).
+# Range: 0..86400. Blank happens after dim (blank_after_s >= dim_after_s recommended).
+# dim_after_s = 120
+# blank_after_s = 600
+
+[power.battery]
+# Battery power profile idle timings. All values in seconds; 0 disables the step.
+# dim_after_s: inactivity before backlight dims (default 20).
+# blank_after_s: inactivity before screen blanks (default 60).
+# Range: 0..86400.
+# dim_after_s = 20
+# blank_after_s = 60
+
+[power.low]
+# Low battery profile idle timings. All values in seconds; 0 disables the step.
+# Applies when battery capacity <= [power] low_capacity (%).
+# dim_after_s: inactivity before backlight dims (default 10).
+# blank_after_s: inactivity before screen blanks (default 30).
+# max_brightness_pct: cap backlight to this % of max_brightness while LOW.
+#   Range: 1..100 (default 40).
+# Range for dim/blank: 0..86400.
+# dim_after_s = 10
+# blank_after_s = 30
+# max_brightness_pct = 40
+
+[core]
+# Legacy [core] section (deprecated; alias of [idle] timeout_ms).
+# idle_timeout_ms: if set and no [power.*] blank_after_s is configured,
+#   it becomes the blank timeout for all profiles (converted to seconds).
+#   This section exists for backwards compatibility with older configs.
+# idle_timeout_ms = 60000

@@ -84,3 +84,12 @@ test('rss', find_program('sh'),
   args: [files('rss.sh'), picowl_exe, pw_test_client],
   env: {'PW_RSS_CEILING_KB': get_option('rss_ceiling_kb').to_string()},
   timeout: 30)
+
+foreach t : ['backlight', 'powersupply', 'dim']
+  test(t, executable('test-' + t, 'test-' + t + '.c', '../src/' + t + '.c',
+    dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
+endforeach
+
+test('power-e2e', find_program('sh'),
+  args: [files('power-e2e.sh'), picowl_exe],
+  timeout: 30)

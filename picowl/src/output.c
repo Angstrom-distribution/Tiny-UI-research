@@ -11,6 +11,7 @@
 #include <wlr/render/swapchain.h>
 #include <wlr/types/wlr_output_layout.h>
 #include "picowl.h"
+#include "power.h"
 
 #ifndef DRM_IOCTL_MODE_CLOSEFB
 struct drm_mode_closefb { uint32_t fb_id; uint32_t pad; };
@@ -556,6 +557,7 @@ static void output_power_set_mode(struct wl_listener *listener, void *data)
 		if (o->wlr_output->enabled)
 			all_off = false;
 	server->blanked = all_off && !wl_list_empty(&server->outputs);
+	pw_power_sync_blanked(server);
 }
 
 void pw_output_init(struct pw_server *server)

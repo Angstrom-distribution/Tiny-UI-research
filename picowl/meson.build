@@ -76,6 +76,10 @@ sources = files(
   'src/copyrel.c',
   'src/zerocopy.c',
   'src/mem.c',
+  'src/backlight.c',
+  'src/powersupply.c',
+  'src/dim.c',
+  'src/power.c',
 )
 
 pwcursorfit = static_library(
@@ -99,6 +103,21 @@ systemd = dependency('systemd', required: get_option('systemd'))
 if systemd.found()
   unitdir = systemd.get_variable(pkgconfig: 'systemdsystemunitdir', default_value: get_option('prefix') / 'lib/systemd/system')
   install_data('data/picowl.service', install_dir: unitdir)
+endif
+
+udev = dependency('udev', required: get_option('udev'))
+udevrulesdir = get_option('udevrulesdir')
+if udevrulesdir == ''
+  udevrulesdir = '/usr/lib/udev/rules.d'
+  if udev.found()
+    udevdir = udev.get_variable(pkgconfig: 'udevdir', default_value: '')
+    if udevdir != ''
+      udevrulesdir = udevdir / 'rules.d'
+    endif
+  endif
+endif
+if udev.found() or get_option('udevrulesdir') != ''
+  install_data('data/90-picowl-backlight.rules', install_dir: udevrulesdir)
 endif
 
 if get_option('tools')

@@ -1,0 +1,2 @@
+# Give group video write access to the backlight brightness so picowl can dim.
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

@@ -293,6 +293,124 @@ static int test_panel_action(void)
 	return 0;
 }
 
+static int test_power_config(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Check [power] section parsing */
+	assert(c->low_capacity == 20);
+	assert(c->dim_level == 40);
+	assert(c->poll_s == 600);
+
+	/* Check [power.ac] section parsing */
+	assert(c->power[PW_PROFILE_AC].dim_after_s == 180);
+	assert(c->power[PW_PROFILE_AC].blank_after_s == 900);
+
+	/* Check [power.battery] section parsing */
+	assert(c->power[PW_PROFILE_BATTERY].dim_after_s == 30);
+	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 120);
+
+	/* Check [power.low] section parsing */
+	assert(c->power[PW_PROFILE_LOW].dim_after_s == 15);
+	assert(c->power[PW_PROFILE_LOW].blank_after_s == 45);
+	assert(c->low_max_brightness_pct == 50);
+
+	pw_config_free(c);
+	printf("✓ test_power_config\n");
+	return 0;
+}
+
+static int test_power_defaults(void)
+{
+	struct pw_config *c = pw_config_default();
+	assert(c != NULL);
+
+	/* Check power defaults */
+	assert(c->backlight == NULL); /* auto */
+	assert(c->low_capacity == 15);
+	assert(c->dim_level == 30);
+	assert(c->poll_s == 300);
+
+	/* Check default power timings */
+	assert(c->power[PW_PROFILE_AC].dim_after_s == 120);
+	assert(c->power[PW_PROFILE_AC].blank_after_s == 600);
+	assert(c->power[PW_PROFILE_BATTERY].dim_after_s == 20);
+	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 60);
+	assert(c->power[PW_PROFILE_LOW].dim_after_s == 10);
+	assert(c->power[PW_PROFILE_LOW].blank_after_s == 30);
+	assert(c->low_max_brightness_pct == 40);
+
+	pw_config_free(c);
+	printf("✓ test_power_defaults\n");
+	return 0;
+}
+
+static const char *write_tmp_ini(const char *name, const char *text)
+{
+	static char path[256];
+	const char *dir = getenv("TMPDIR");
+	snprintf(path, sizeof(path), "%s/%s", dir ? dir : "/tmp", name);
+	FILE *f = fopen(path, "w");
+	assert(f != NULL);
+	fputs(text, f);
+	fclose(f);
+	return path;
+}
+
+static int test_power_validation(void)
+{
+	const char *path = write_tmp_ini("picowl-test-power-bad.ini",
+		"[power]\nlow_capacity = 150\ndim_level = 0\npoll_s = 10\n"
+		"[power.ac]\nblank_after_s = -5\n"
+		"[power.low]\nmax_brightness_pct = 0\n");
+	struct pw_config *c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->low_capacity == 15);
+	assert(c->dim_level == 30);
+	assert(c->poll_s == 300);
+	assert(c->power[PW_PROFILE_AC].blank_after_s == 600);
+	assert(c->low_max_brightness_pct == 40);
+	pw_config_free(c);
+	printf("✓ test_power_validation\n");
+	return 0;
+}
+
+static int test_legacy_idle_timeout(void)
+{
+	const char *path = write_tmp_ini("picowl-test-legacy.ini",
+		"[idle]\ntimeout_ms = 45000\n");
+	struct pw_config *c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	for (int i = 0; i < PW_PROFILE_COUNT; i++)
+		assert(c->power[i].blank_after_s == 45);
+	pw_config_free(c);
+
+	/* Explicit [power.*] blank_after_s wins; legacy unused. */
+	path = write_tmp_ini("picowl-test-legacy2.ini",
+		"[idle]\ntimeout_ms = 45000\n[power.ac]\nblank_after_s = 300\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->power[PW_PROFILE_AC].blank_after_s == 300);
+	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 60);
+	assert(c->power[PW_PROFILE_LOW].blank_after_s == 30);
+	pw_config_free(c);
+
+	/* [core] alias and round-up of sub-second values. */
+	path = write_tmp_ini("picowl-test-legacy3.ini",
+		"[core]\nidle_timeout_ms = 500\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 1);
+	pw_config_free(c);
+	printf("✓ test_legacy_idle_timeout\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -313,6 +431,10 @@ int main(int argc, char *argv[])
 	failed += test_zerocopy_config();
 	failed += test_memory_config();
 	failed += test_panel_action();
+	failed += test_power_config();
+	failed += test_power_defaults();
+	failed += test_power_validation();
+	failed += test_legacy_idle_timeout();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

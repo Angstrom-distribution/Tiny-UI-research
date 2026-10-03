@@ -200,6 +200,15 @@ struct pw_config *pw_config_default(void)
 	c->mmap_threshold_kb = 128;
 	c->top_pad_kb = 16;
 	c->trim_after_start = true;
+	/* Power */
+	c->backlight = NULL; /* auto */
+	c->low_capacity = 15;
+	c->dim_level = 30;
+	c->poll_s = 300;
+	c->power[PW_PROFILE_AC] = (struct pw_power_timing){ 120, 600 };
+	c->power[PW_PROFILE_BATTERY] = (struct pw_power_timing){ 20, 60 };
+	c->power[PW_PROFILE_LOW] = (struct pw_power_timing){ 10, 30 };
+	c->low_max_brightness_pct = 40;
 	add_default_keybindings(c);
 	return c;
 }
@@ -231,6 +240,8 @@ struct pw_config *pw_config_load(const char *path)
 
 	char line[1024];
 	const char *section = NULL;
+	int idle_timeout_ms_legacy = -1; /* Legacy: [idle] timeout_ms, alias [core] idle_timeout_ms */
+	bool has_any_blank_after_s = false; /* Track if any [power.*] blank_after_s was set */
 
 	while (fgets(line, sizeof(line), f)) {
 		char *p = trim(line);
@@ -280,6 +291,8 @@ struct pw_config *pw_config_load(const char *path)
 		} else if (strcmp(section, "idle") == 0) {
 			if (strcmp(key, "timeout_ms") == 0) {
 				c->idle_timeout_ms = atoi(val);
+				/* Legacy key: feeds the [power.*] blank timeout. */
+				idle_timeout_ms_legacy = c->idle_timeout_ms;
 			}
 		} else if (strcmp(section, "background") == 0) {
 			if (strcmp(key, "color") == 0) {
@@ -464,6 +477,86 @@ struct pw_config *pw_config_load(const char *path)
 			} else if (strcmp(key, "trim_after_start") == 0) {
 				c->trim_after_start = parse_bool(val);
 			}
+		} else if (strcmp(section, "core") == 0) {
+			/* [core] section for backwards compatibility */
+			if (strcmp(key, "idle_timeout_ms") == 0) {
+				idle_timeout_ms_legacy = atoi(val);
+			}
+		} else if (strcmp(section, "power") == 0) {
+			/* [power] section: power supply configuration */
+			if (strcmp(key, "backlight") == 0) {
+				free(c->backlight);
+				if (strcmp(val, "auto") == 0) {
+					c->backlight = NULL;
+				} else {
+					c->backlight = strdup(val);
+				}
+			} else if (strcmp(key, "low_capacity") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 0 && val_int <= 100) {
+					c->low_capacity = val_int;
+				} else {
+					pw_log(WLR_INFO, "low_capacity %d out of range [0..100], using default 15", val_int);
+				}
+			} else if (strcmp(key, "dim_level") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 1 && val_int <= 100) {
+					c->dim_level = val_int;
+				} else {
+					pw_log(WLR_INFO, "dim_level %d out of range [1..100], using default 30", val_int);
+				}
+			} else if (strcmp(key, "poll_s") == 0) {
+				int val_int = atoi(val);
+				if (val_int == 0 || (val_int >= 30 && val_int <= 86400)) {
+					c->poll_s = val_int;
+				} else {
+					pw_log(WLR_INFO, "poll_s %d out of range (0 or 30..86400), using default 300", val_int);
+				}
+			}
+		} else if (strncmp(section, "power.", 6) == 0) {
+			/* [power.ac], [power.battery], [power.low] sections */
+			const char *profile_name = section + 6;
+			enum pw_power_profile profile;
+			bool profile_matched = false;
+
+			if (strcmp(profile_name, "ac") == 0) {
+				profile = PW_PROFILE_AC;
+				profile_matched = true;
+			} else if (strcmp(profile_name, "battery") == 0) {
+				profile = PW_PROFILE_BATTERY;
+				profile_matched = true;
+			} else if (strcmp(profile_name, "low") == 0) {
+				profile = PW_PROFILE_LOW;
+				profile_matched = true;
+			}
+
+			if (profile_matched) {
+				if (strcmp(key, "dim_after_s") == 0) {
+					int val_int = atoi(val);
+					if (val_int >= 0 && val_int <= 86400) {
+						c->power[profile].dim_after_s = val_int;
+					} else {
+						pw_log(WLR_INFO, "[power.%s] dim_after_s %d out of range [0..86400], using default",
+							profile_name, val_int);
+					}
+				} else if (strcmp(key, "blank_after_s") == 0) {
+					int val_int = atoi(val);
+					if (val_int >= 0 && val_int <= 86400) {
+						c->power[profile].blank_after_s = val_int;
+						has_any_blank_after_s = true;
+					} else {
+						pw_log(WLR_INFO, "[power.%s] blank_after_s %d out of range [0..86400], using default",
+							profile_name, val_int);
+					}
+				} else if (strcmp(key, "max_brightness_pct") == 0 && profile == PW_PROFILE_LOW) {
+					int val_int = atoi(val);
+					if (val_int >= 1 && val_int <= 100) {
+						c->low_max_brightness_pct = val_int;
+					} else {
+						pw_log(WLR_INFO, "[power.low] max_brightness_pct %d out of range [1..100], using default 40", val_int);
+					}
+				}
+			}
 		} else {
 			pw_log(WLR_INFO, "Unknown config section: [%s]", section);
 		}
@@ -471,6 +564,21 @@ struct pw_config *pw_config_load(const char *path)
 
 	fclose(f);
 	free((void*)section);
+
+	/* Backwards compatibility: if legacy [idle] timeout_ms (or [core] idle_timeout_ms) was set and no
+	 * [power.*] blank_after_s was configured, apply it to all profiles. */
+	if (idle_timeout_ms_legacy >= 0 && !has_any_blank_after_s) {
+		int blank_after_s = (idle_timeout_ms_legacy + 999) / 1000; /* round up; 0 stays 0 */
+		if (blank_after_s < 0)
+			blank_after_s = 0;
+		if (blank_after_s > 86400)
+			blank_after_s = 86400;
+		c->power[PW_PROFILE_AC].blank_after_s = blank_after_s;
+		c->power[PW_PROFILE_BATTERY].blank_after_s = blank_after_s;
+		c->power[PW_PROFILE_LOW].blank_after_s = blank_after_s;
+		pw_log(WLR_INFO, "Applying legacy idle timeout %d ms as blank_after_s=%d for all profiles",
+			idle_timeout_ms_legacy, blank_after_s);
+	}
 
 	/* Validate touch and cursor configuration ranges */
 	if (c->hold_ms <= c->hold_delay_ms) {
@@ -490,6 +598,51 @@ struct pw_config *pw_config_load(const char *path)
 		c->cursor_frame_ms = 83;
 	}
 
+	/* Validate power configuration ranges (final safety check after parsing) */
+	if (c->low_capacity < 0 || c->low_capacity > 100) {
+		pw_log(WLR_INFO, "low_capacity (%d) out of range [0..100]; using default 15", c->low_capacity);
+		c->low_capacity = 15;
+	}
+
+	if (c->dim_level < 1 || c->dim_level > 100) {
+		pw_log(WLR_INFO, "dim_level (%d) out of range [1..100]; using default 30", c->dim_level);
+		c->dim_level = 30;
+	}
+
+	if (c->poll_s != 0 && (c->poll_s < 30 || c->poll_s > 86400)) {
+		pw_log(WLR_INFO, "poll_s (%d) out of range (0 or 30..86400); using default 300", c->poll_s);
+		c->poll_s = 300;
+	}
+
+	if (c->low_max_brightness_pct < 1 || c->low_max_brightness_pct > 100) {
+		pw_log(WLR_INFO, "low_max_brightness_pct (%d) out of range [1..100]; using default 40", c->low_max_brightness_pct);
+		c->low_max_brightness_pct = 40;
+	}
+
+	/* Validate power timing ranges for all profiles */
+	for (int i = 0; i < PW_PROFILE_COUNT; i++) {
+		if (c->power[i].dim_after_s < 0 || c->power[i].dim_after_s > 86400) {
+			pw_log(WLR_INFO, "power[%d].dim_after_s (%d) out of range [0..86400]; using default",
+				i, c->power[i].dim_after_s);
+			if (i == PW_PROFILE_AC)
+				c->power[i].dim_after_s = 120;
+			else if (i == PW_PROFILE_BATTERY)
+				c->power[i].dim_after_s = 20;
+			else
+				c->power[i].dim_after_s = 10;
+		}
+		if (c->power[i].blank_after_s < 0 || c->power[i].blank_after_s > 86400) {
+			pw_log(WLR_INFO, "power[%d].blank_after_s (%d) out of range [0..86400]; using default",
+				i, c->power[i].blank_after_s);
+			if (i == PW_PROFILE_AC)
+				c->power[i].blank_after_s = 600;
+			else if (i == PW_PROFILE_BATTERY)
+				c->power[i].blank_after_s = 60;
+			else
+				c->power[i].blank_after_s = 30;
+		}
+	}
+
 	return c;
 }
 
@@ -497,6 +650,8 @@ void pw_config_free(struct pw_config *config)
 {
 	if (!config)
 		return;
+
+	free(config->backlight);
 
 	struct pw_output_transform *t, *t_tmp;
 	wl_list_for_each_safe(t, t_tmp, &config->transforms, link) {
