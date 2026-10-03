@@ -51,10 +51,12 @@ color = #101010
 # hold_ms = 900
 # slop_px = 8
 
-# Per-app tap-and-hold overrides: [app.<app_id>]
-# Per-layer overrides: [layer.<namespace>]
-# Keys and defaults are the same as [touch]. Unset keys are inherited.
-# Example: media player that needs immediate input (no hold delay).
+# Per-app tap-and-hold overrides: [app.<app_id>] (xdg toplevels, exact match)
+# and per-layer overrides: [layer.<namespace>] (layer-shell surfaces).
+# Keys are the same as [touch]; unset keys are inherited from [touch], wherever
+# [touch] appears in the file. Bad timings revert to the [touch] values.
+# Example: a media player that times its own long press. hold_action = none
+# sends the left press at touch-down, with no right-click and no animation.
 # [app.mediaplayer]
 # hold_action = none
 

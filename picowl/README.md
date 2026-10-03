@@ -199,7 +199,7 @@ The behaviour is controlled by the `[touch]` section (see `data/picowl.ini.examp
 
 ### Per-App and Per-Layer Overrides
 
-Per-app and per-layer-shell surface overrides allow fine-grained control over tap-and-hold behaviour without changing the global default. This is useful for applications like media players that need immediate input (`hold_action = none`):
+Per-app and per-layer-shell surface overrides allow fine-grained control over tap-and-hold behaviour without changing the global default. This is useful for applications like media players that time their own long press (`hold_action = none` sends the left press at touch-down, with no right-click and no animation):
 
 ```ini
 [app.mediaplayer]
@@ -222,10 +222,12 @@ Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections:
 | `slop_px` | from `[touch]` | Movement tolerance in pixels |
 
 Rules:
-- **Inheritance**: Unset keys use the value from `[touch]`.
+- **Inheritance**: Unset keys use the value from `[touch]`, whatever the order of sections in the file.
+- **Bad timings**: If `hold_ms` is not greater than `hold_delay_ms` or `slop_px` is outside 0..64, the rule's three timing keys revert to `[touch]`; its `hold_action` is kept. A bad `hold_action` value is ignored (inherited).
 - **Matching**: Names match exactly and case-sensitively. No wildcards.
 - **Merging**: A section appearing twice merges into one rule; later keys win.
-- **Scope**: `[app.panel]` and `[layer.panel]` are separate namespaces.
+- **Scope**: `[app.panel]` and `[layer.panel]` are separate namespaces. An empty `[app.]` or `[layer.]` is logged and ignored.
+- **Binding**: The surface under the finger at touch-down decides (popups and subsurfaces follow their parent). The setting stays fixed until lift.
 
 ### Cursor Configuration
 

@@ -75,13 +75,14 @@ You can configure different tap-and-hold behaviour for specific apps and layer-s
 ```ini
 [app.mediaplayer]
 hold_action = none
-hold_delay_ms = 0
 
 [layer.osk]
 hold_delay_ms = 500
 ```
 
-All keys from the table above are available. Unset keys inherit from the global `[touch]` configuration. This is useful for apps that need immediate input without the hold delay animation (e.g., media players that handle their own long-press logic).
+All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` is kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
+
+`hold_action = none` is useful for apps that time their own long press (e.g. media players): the left press is sent at touch-down, motion is forwarded, and there is no right-click and no hold animation. `hold_delay_ms` has no effect in that mode.
 
 ## Custom Cursor Format: PAM Strips
 

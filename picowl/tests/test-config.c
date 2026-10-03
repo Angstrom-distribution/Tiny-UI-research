@@ -22,6 +22,7 @@ static int test_default_config(void)
 
 	/* Check default keybindings exist */
 	assert(!wl_list_empty(&c->keybindings));
+	assert(wl_list_empty(&c->app_rules));
 
 	struct pw_keybinding *kb;
 	int kb_count = 0;
@@ -207,13 +208,30 @@ static int test_app_rules(void)
 	assert(hp.hold_ms == 900);
 	assert(hp.slop_px == 4);
 
-	/* bad: invalid hold_action and hold_ms <= delay_ms, should revert to globals */
+	/* bad: invalid hold_action is inherited; hold_ms <= delay reverts timings */
 	hit = pw_config_hold(c, PW_RULE_APP, "bad", &hp);
 	assert(hit == true);
-	assert(hp.action == PW_HOLD_RIGHT_CLICK);  /* reverted to global */
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
 	assert(hp.delay_ms == 300);
-	assert(hp.hold_ms == 900);  /* clamped to >= delay_ms */
+	assert(hp.hold_ms == 900);
 	assert(hp.slop_px == 8);
+
+	/* nonebad: bad slop reverts the timings but keeps the explicit action */
+	hit = pw_config_hold(c, PW_RULE_APP, "nonebad", &hp);
+	assert(hit == true);
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 300);
+	assert(hp.hold_ms == 900);
+	assert(hp.slop_px == 8);
+
+	/* empty [app.] and [layer.] are ignored: five rules, none unnamed */
+	int n = 0;
+	struct pw_app_rule *rule;
+	wl_list_for_each(rule, &c->app_rules, link) {
+		assert(rule->name && rule->name[0]);
+		n++;
+	}
+	assert(n == 5);
 
 	/* panel as app (no rule): returns globals with false */
 	hit = pw_config_hold(c, PW_RULE_APP, "panel", &hp);
@@ -239,6 +257,46 @@ static int test_app_rules(void)
 
 	pw_config_free(c);
 	printf("✓ test_app_rules\n");
+	return 0;
+}
+
+static int test_app_rules_inherit(void)
+{
+	/* [touch] is non-default and comes after (and before) the rules */
+	struct pw_config *c = pw_config_load("tests/test-config-hold.ini");
+	assert(c != NULL);
+
+	struct pw_hold_params hp;
+
+	assert(pw_config_hold(c, PW_RULE_APP, "early", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 200 && hp.hold_ms == 1200 && hp.slop_px == 10);
+
+	assert(pw_config_hold(c, PW_RULE_APP, "late", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 200 && hp.hold_ms == 700 && hp.slop_px == 20);
+
+	assert(pw_config_hold(c, PW_RULE_LAYER, "osk", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 100 && hp.hold_ms == 700 && hp.slop_px == 10);
+
+	/* unset hold_ms inherits; a bad one (<= delay) reverts to [touch] */
+	assert(pw_config_hold(c, PW_RULE_APP, "unset", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 200 && hp.hold_ms == 700 && hp.slop_px == 10);
+
+	/* bad timings keep the rule's own action (differs from [touch]) */
+	assert(pw_config_hold(c, PW_RULE_APP, "explicit", &hp));
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	assert(hp.delay_ms == 200 && hp.hold_ms == 700 && hp.slop_px == 10);
+
+	/* hold_ms == hold_delay_ms is rejected like in [touch] */
+	assert(pw_config_hold(c, PW_RULE_APP, "equal", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 200 && hp.hold_ms == 700);
+
+	pw_config_free(c);
+	printf("✓ test_app_rules_inherit\n");
 	return 0;
 }
 
@@ -494,6 +552,7 @@ int main(int argc, char *argv[])
 	failed += test_keybinding_parsing();
 	failed += test_touch_cursor_parsing();
 	failed += test_app_rules();
+	failed += test_app_rules_inherit();
 	failed += test_validation_ranges();
 	failed += test_rotation_config();
 	failed += test_copytype_config();

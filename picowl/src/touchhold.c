@@ -4,9 +4,8 @@
 void pw_touchhold_init(struct pw_touchhold *th, enum pw_th_hold_action action,
 	int delay_ms, int hold_ms, int slop_px)
 {
-	unsigned _ = pw_touchhold_set_params(th, action, delay_ms, hold_ms, slop_px);
-	(void)_;
 	th->state = PW_TH_IDLE;
+	pw_touchhold_set_params(th, action, delay_ms, hold_ms, slop_px);
 	th->down_x = th->down_y = 0;
 	th->down_ms = 0;
 }
