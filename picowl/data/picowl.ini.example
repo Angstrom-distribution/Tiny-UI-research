@@ -51,6 +51,13 @@ color = #101010
 # hold_ms = 900
 # slop_px = 8
 
+# Per-app tap-and-hold overrides: [app.<app_id>]
+# Per-layer overrides: [layer.<namespace>]
+# Keys and defaults are the same as [touch]. Unset keys are inherited.
+# Example: media player that needs immediate input (no hold delay).
+# [app.mediaplayer]
+# hold_action = none
+
 [cursor]
 # Cursor appearance during hold animation (only visible during the hold animation).
 # hold_animation: builtin (default, Pocket PC 2003 rotating circle of circles) or

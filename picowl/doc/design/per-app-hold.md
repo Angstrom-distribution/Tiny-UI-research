@@ -1,6 +1,8 @@
 # Per-app tap-and-hold setting
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** implemented.
+
+Implementation: `src/picowl.h` (enums and structures), `src/config.c` (parser and lookup), `src/touchhold.h/.c` (pw_touchhold_set_params), `src/input.c` (hold_identity and per-app binding).
 
 Adds per-`app_id` (xdg toplevels) and per-namespace (layer-shell) overrides of the `[touch]` tap-and-hold keys. The effective setting is chosen at touch-down from the surface under the finger and stays fixed until lift. It needs no protocol, no new source file and no change to `view.c`.
 
@@ -308,3 +310,11 @@ Run `picowl -d 2` with `[app.mediaplayer] hold_action = none`, and the player wi
 | Docs (README, `cursors.md`, `picowl.ini.example`) | 1 h |
 | Hardware checklist on one copy-type board and the h3900 | 2 h |
 | **Total** | **about 1.5 days** |
+
+## 10. Implementation notes
+
+- `pw_touchhold_init()` refactored to call `pw_touchhold_set_params()` to avoid code duplication.
+- All tests pass: `test-touchhold.c` covers `set_params()` in all states and clamping; `test-config.c` tests merging, inheritance, and rule matching.
+- Per-app/layer configuration successfully parsed and resolved; app_rules list initialized in `pw_config_default()` and freed in `pw_config_free()`.
+- Section header parsing reuses existing trim/parse logic; unknown keys in app/layer sections logged at `WLR_INFO` (lenient).
+- `hold_identity()` follows subsurfaces and popup parents correctly; wlroots 0.19 APIs used as documented.

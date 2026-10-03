@@ -197,6 +197,36 @@ The behaviour is controlled by the `[touch]` section (see `data/picowl.ini.examp
 | `hold_ms` | 900 | > `hold_delay_ms` | Milliseconds from touch-down to right-click |
 | `slop_px` | 8 | 0..64 | Movement tolerance in pixels; exceeding this cancels hold and triggers drag |
 
+### Per-App and Per-Layer Overrides
+
+Per-app and per-layer-shell surface overrides allow fine-grained control over tap-and-hold behaviour without changing the global default. This is useful for applications like media players that need immediate input (`hold_action = none`):
+
+```ini
+[app.mediaplayer]
+hold_action = none
+
+[app.org.example.Viewer]
+hold_ms = 1200
+
+[layer.osk]
+slop_px = 16
+```
+
+Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `hold_action` | from `[touch]` | `right-click` or `none` |
+| `hold_delay_ms` | from `[touch]` | Milliseconds before animation starts |
+| `hold_ms` | from `[touch]` | Milliseconds to right-click |
+| `slop_px` | from `[touch]` | Movement tolerance in pixels |
+
+Rules:
+- **Inheritance**: Unset keys use the value from `[touch]`.
+- **Matching**: Names match exactly and case-sensitively. No wildcards.
+- **Merging**: A section appearing twice merges into one rule; later keys win.
+- **Scope**: `[app.panel]` and `[layer.panel]` are separate namespaces.
+
 ### Cursor Configuration
 
 Picowl draws a cursor **only during the tap-and-hold animation**. The animation is configured in the `[cursor]` section:

@@ -96,6 +96,29 @@ enum pw_hold_action {
 	PW_HOLD_NONE,              /* no hold detection, immediate left press */
 };
 
+enum pw_rule_kind {
+	PW_RULE_APP,               /* app_id (xdg_toplevel) */
+	PW_RULE_LAYER,             /* namespace (zwlr_layer_surface_v1) */
+};
+
+struct pw_hold_params {
+	enum pw_hold_action action;
+	int delay_ms, hold_ms, slop_px;
+};
+
+#define PW_HOLD_SET_ACTION (1u << 0)
+#define PW_HOLD_SET_DELAY  (1u << 1)
+#define PW_HOLD_SET_HOLD   (1u << 2)
+#define PW_HOLD_SET_SLOP   (1u << 3)
+
+struct pw_app_rule {
+	struct wl_list link;          /* pw_config.app_rules, file order */
+	enum pw_rule_kind kind;
+	char *name;                   /* app_id or layer namespace */
+	unsigned set;                 /* PW_HOLD_SET_*: keys given in the section */
+	struct pw_hold_params hold;   /* fully resolved after pw_config_load() */
+};
+
 struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
@@ -111,6 +134,7 @@ struct pw_config {
 	int hold_ms;               /* right click fires after this, measured from
 	                            * touch-down (default 900) */
 	int slop_px;               /* movement tolerance (default 8) */
+	struct wl_list app_rules;   /* struct pw_app_rule */
 
 	/* [cursor] */
 	char *hold_animation;      /* path to PAM strip, or NULL = builtin */
@@ -455,5 +479,10 @@ enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *outpu
 
 /* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
+
+/* Effective hold parameters for a surface identity. name NULL or no
+ * matching rule -> the [touch] globals. Returns true if a rule matched. */
+bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
+	const char *name, struct pw_hold_params *out);
 
 #endif

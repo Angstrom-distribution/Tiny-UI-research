@@ -174,6 +174,74 @@ static int test_touch_cursor_parsing(void)
 	return 0;
 }
 
+static int test_app_rules(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	struct pw_hold_params hp;
+	bool hit;
+
+	/* mediaplayer: hold_action = none, slop_px = 12 (merged from two sections)
+	 * order independence test: [app.mediaplayer] appears before [touch] */
+	hit = pw_config_hold(c, PW_RULE_APP, "mediaplayer", &hp);
+	assert(hit == true);
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 300);  /* inherited from [touch] */
+	assert(hp.hold_ms == 900);   /* inherited from [touch] */
+	assert(hp.slop_px == 12);
+
+	/* org.example.Viewer: hold_ms = 1200 */
+	hit = pw_config_hold(c, PW_RULE_APP, "org.example.Viewer", &hp);
+	assert(hit == true);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);  /* inherited from [touch] */
+	assert(hp.delay_ms == 300);
+	assert(hp.hold_ms == 1200);
+	assert(hp.slop_px == 8);
+
+	/* layer.panel: slop_px = 4 */
+	hit = pw_config_hold(c, PW_RULE_LAYER, "panel", &hp);
+	assert(hit == true);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	assert(hp.delay_ms == 300);
+	assert(hp.hold_ms == 900);
+	assert(hp.slop_px == 4);
+
+	/* bad: invalid hold_action and hold_ms <= delay_ms, should revert to globals */
+	hit = pw_config_hold(c, PW_RULE_APP, "bad", &hp);
+	assert(hit == true);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);  /* reverted to global */
+	assert(hp.delay_ms == 300);
+	assert(hp.hold_ms == 900);  /* clamped to >= delay_ms */
+	assert(hp.slop_px == 8);
+
+	/* panel as app (no rule): returns globals with false */
+	hit = pw_config_hold(c, PW_RULE_APP, "panel", &hp);
+	assert(hit == false);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	assert(hp.delay_ms == 300);
+	assert(hp.hold_ms == 900);
+	assert(hp.slop_px == 8);
+
+	/* Nonexistent app: returns globals with false */
+	hit = pw_config_hold(c, PW_RULE_APP, "nonexistent", &hp);
+	assert(hit == false);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+
+	/* NULL name: returns globals with false */
+	hit = pw_config_hold(c, PW_RULE_APP, NULL, &hp);
+	assert(hit == false);
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+
+	/* Case sensitivity: MediaPlayer != mediaplayer */
+	hit = pw_config_hold(c, PW_RULE_APP, "MediaPlayer", &hp);
+	assert(hit == false);
+
+	pw_config_free(c);
+	printf("✓ test_app_rules\n");
+	return 0;
+}
+
 static int test_validation_ranges(void)
 {
 	/* Test that out-of-range values are corrected during validation */
@@ -425,6 +493,7 @@ int main(int argc, char *argv[])
 	failed += test_config_free_null();
 	failed += test_keybinding_parsing();
 	failed += test_touch_cursor_parsing();
+	failed += test_app_rules();
 	failed += test_validation_ranges();
 	failed += test_rotation_config();
 	failed += test_copytype_config();

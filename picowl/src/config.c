@@ -159,6 +159,34 @@ static bool parse_hex_color(const char *str, uint32_t *out)
 	return true;
 }
 
+/* Find or add a rule (for [app.*] and [layer.*] sections, merging repeated ones). */
+static struct pw_app_rule *find_or_add_rule(struct pw_config *c, enum pw_rule_kind kind, const char *name)
+{
+	if (!name || !name[0])
+		return NULL; /* Ignore empty names */
+
+	/* Look for existing rule */
+	struct pw_app_rule *rule;
+	wl_list_for_each(rule, &c->app_rules, link) {
+		if (rule->kind == kind && rule->name && strcmp(rule->name, name) == 0)
+			return rule;
+	}
+
+	/* Create new rule */
+	rule = calloc(1, sizeof(*rule));
+	if (!rule)
+		return NULL;
+	rule->name = strdup(name);
+	if (!rule->name) {
+		free(rule);
+		return NULL;
+	}
+	rule->kind = kind;
+	rule->set = 0;
+	wl_list_insert(c->app_rules.prev, &rule->link);
+	return rule;
+}
+
 static void add_default_keybindings(struct pw_config *c)
 {
 	struct pw_keybinding *kb;
@@ -208,6 +236,7 @@ struct pw_config *pw_config_default(void)
 	c->hold_delay_ms = 300;
 	c->hold_ms = 900;
 	c->slop_px = 8;
+	wl_list_init(&c->app_rules);
 	c->hold_animation = NULL;
 	c->cursor_fill = 0x2050c0;
 	c->cursor_outline = 0xffffff;
@@ -621,6 +650,58 @@ struct pw_config *pw_config_load(const char *path)
 			} else {
 				pw_log(WLR_ERROR, "Unknown power profile: [power.%s]", profile_name);
 			}
+		} else if (strncmp(section, "app.", 4) == 0) {
+			/* [app.<app_id>] per-app hold configuration */
+			const char *app_id = section + 4;
+			struct pw_app_rule *rule = find_or_add_rule(c, PW_RULE_APP, app_id);
+			if (rule) {
+				if (strcmp(key, "hold_action") == 0) {
+					enum pw_hold_action action;
+					if (parse_hold_action(val, &action)) {
+						rule->hold.action = action;
+						rule->set |= PW_HOLD_SET_ACTION;
+					} else {
+						pw_log(WLR_ERROR, "Unknown hold_action in [app.%s]: %s (valid: right-click, none)", app_id, val);
+					}
+				} else if (strcmp(key, "hold_delay_ms") == 0) {
+					rule->hold.delay_ms = atoi(val);
+					rule->set |= PW_HOLD_SET_DELAY;
+				} else if (strcmp(key, "hold_ms") == 0) {
+					rule->hold.hold_ms = atoi(val);
+					rule->set |= PW_HOLD_SET_HOLD;
+				} else if (strcmp(key, "slop_px") == 0) {
+					rule->hold.slop_px = atoi(val);
+					rule->set |= PW_HOLD_SET_SLOP;
+				} else {
+					pw_log(WLR_INFO, "Unknown key in [app.%s]: %s", app_id, key);
+				}
+			}
+		} else if (strncmp(section, "layer.", 6) == 0) {
+			/* [layer.<namespace>] per-layer hold configuration */
+			const char *namespace = section + 6;
+			struct pw_app_rule *rule = find_or_add_rule(c, PW_RULE_LAYER, namespace);
+			if (rule) {
+				if (strcmp(key, "hold_action") == 0) {
+					enum pw_hold_action action;
+					if (parse_hold_action(val, &action)) {
+						rule->hold.action = action;
+						rule->set |= PW_HOLD_SET_ACTION;
+					} else {
+						pw_log(WLR_ERROR, "Unknown hold_action in [layer.%s]: %s (valid: right-click, none)", namespace, val);
+					}
+				} else if (strcmp(key, "hold_delay_ms") == 0) {
+					rule->hold.delay_ms = atoi(val);
+					rule->set |= PW_HOLD_SET_DELAY;
+				} else if (strcmp(key, "hold_ms") == 0) {
+					rule->hold.hold_ms = atoi(val);
+					rule->set |= PW_HOLD_SET_HOLD;
+				} else if (strcmp(key, "slop_px") == 0) {
+					rule->hold.slop_px = atoi(val);
+					rule->set |= PW_HOLD_SET_SLOP;
+				} else {
+					pw_log(WLR_INFO, "Unknown key in [layer.%s]: %s", namespace, key);
+				}
+			}
 		} else {
 			pw_log(WLR_INFO, "Unknown config section: [%s]", section);
 		}
@@ -711,6 +792,42 @@ struct pw_config *pw_config_load(const char *path)
 		}
 	}
 
+	/* Fill in app_rules: inherit unset fields from globals and validate */
+	struct pw_app_rule *rule;
+	wl_list_for_each(rule, &c->app_rules, link) {
+		if (!(rule->set & PW_HOLD_SET_ACTION))
+			rule->hold.action = c->hold_action;
+		if (!(rule->set & PW_HOLD_SET_DELAY))
+			rule->hold.delay_ms = c->hold_delay_ms;
+		if (!(rule->set & PW_HOLD_SET_HOLD))
+			rule->hold.hold_ms = c->hold_ms;
+		if (!(rule->set & PW_HOLD_SET_SLOP))
+			rule->hold.slop_px = c->slop_px;
+
+		/* Validate the rule: clamp and check constraints */
+		bool invalid = false;
+		if (rule->hold.delay_ms < 0) {
+			rule->hold.delay_ms = 0;
+		}
+		if (rule->hold.hold_ms < rule->hold.delay_ms) {
+			invalid = true;
+		}
+		if (rule->hold.slop_px < 0) {
+			rule->hold.slop_px = 0;
+		}
+		if (rule->hold.slop_px > 64) {
+			invalid = true;
+		}
+		if (invalid) {
+			pw_log(WLR_ERROR, "Bad timings in [%s.%s]; reverting to global defaults",
+				rule->kind == PW_RULE_APP ? "app" : "layer", rule->name);
+			rule->hold.action = c->hold_action;
+			rule->hold.delay_ms = c->hold_delay_ms;
+			rule->hold.hold_ms = c->hold_ms;
+			rule->hold.slop_px = c->slop_px;
+		}
+	}
+
 	return c;
 }
 
@@ -750,6 +867,12 @@ void pw_config_free(struct pw_config *config)
 	wl_list_for_each_safe(co, co_tmp, &config->copy_overrides, link) {
 		free(co->name);
 		free(co);
+	}
+
+	struct pw_app_rule *rule, *rule_tmp;
+	wl_list_for_each_safe(rule, rule_tmp, &config->app_rules, link) {
+		free(rule->name);
+		free(rule);
 	}
 
 	free(config->render_format_pref);
@@ -805,4 +928,29 @@ enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const c
 
 	/* Default to AUTO */
 	return PW_COPY_AUTO;
+}
+
+bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
+	const char *name, struct pw_hold_params *out)
+{
+	if (!c || !out)
+		return false;
+
+	/* Try exact name match */
+	if (name) {
+		struct pw_app_rule *rule;
+		wl_list_for_each(rule, &c->app_rules, link) {
+			if (rule->kind == kind && rule->name && strcmp(rule->name, name) == 0) {
+				*out = rule->hold;
+				return true;
+			}
+		}
+	}
+
+	/* No match; use global [touch] settings */
+	out->action = c->hold_action;
+	out->delay_ms = c->hold_delay_ms;
+	out->hold_ms = c->hold_ms;
+	out->slop_px = c->slop_px;
+	return false;
 }
