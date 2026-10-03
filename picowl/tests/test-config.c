@@ -382,6 +382,12 @@ static int test_zerocopy_config(void)
 	assert(c->single_buffer == true);
 	assert(c->panel_autohide == false);
 
+	/* limits default to the former compile-time constants */
+	assert(c->zb_max_buffers == 3);
+	assert(c->zb_budget_kb == 2048);
+	assert(c->zb_total_kb == 0);
+	assert(c->zb_n_pools == 1);
+
 	pw_config_free(c);
 	printf("✓ test_zerocopy_config\n");
 	return 0;
@@ -537,6 +543,91 @@ static int test_legacy_idle_timeout(void)
 	return 0;
 }
 
+static int test_zerocopy_limits(void)
+{
+	struct pw_config *d = pw_config_default();
+	assert(d != NULL);
+	assert(d->zb_max_buffers == 3 && d->zb_budget_kb == 2048);
+	assert(d->zb_total_kb == 0 && d->zb_n_pools == 1);
+	assert(pw_config_app(d, "mediaplayer") == NULL);
+	pw_config_free(d);
+
+	struct pw_config *c = pw_config_load("tests/test-config-zb.ini");
+	assert(c != NULL);
+	assert(c->zb_max_buffers == 5);
+	assert(c->zb_budget_kb == 1024);
+	assert(c->zb_total_kb == 3072);
+
+	/* two [app.mediaplayer] sections merge into one rule */
+	int n = 0;
+	struct pw_app_rule *r;
+	wl_list_for_each(r, &c->app_rules, link)
+		if (r->kind == PW_RULE_APP && strcmp(r->name, "mediaplayer") == 0)
+			n++;
+	assert(n == 1);
+	const struct pw_app_rule *a = pw_config_app(c, "mediaplayer");
+	assert(a && a->zb_buffers == 7 && a->zb_budget_kb == 4200 && a->zb_pool == 1);
+	/* exe is resolved: no "..", and it names the same file */
+	assert(a->exe && a->exe[0] == '/' && !strstr(a->exe, "..") &&
+		strcmp(a->exe, "/bin/../bin/sh") != 0);
+
+	/* dotted app_id; a budget of 0 is a pool which holds nothing */
+	a = pw_config_app(c, "org.example.Player");
+	assert(a && a->zb_buffers == 2 && a->zb_budget_kb == 0 && a->zb_pool == 2);
+	assert(a->exe == NULL);
+
+	/* only budget given: count inherits; exe which cannot be resolved stays literal */
+	a = pw_config_app(c, "noexe");
+	assert(a && a->zb_buffers == -1 && a->zb_budget_kb == 500 && a->zb_pool == 3);
+	assert(a->exe && strcmp(a->exe, "/nonexistent/dir/player") == 0);
+
+	/* no zerocopy keys: inherits everything, no pool */
+	a = pw_config_app(c, "holdonly");
+	assert(a && a->zb_buffers == -1 && a->zb_budget_kb == -1 && a->zb_pool == 0);
+
+	/* out of range values are dropped, which leaves no pool */
+	a = pw_config_app(c, "bad");
+	assert(a && a->zb_buffers == -1 && a->zb_budget_kb == -1 && a->zb_pool == 0);
+
+	/* [layer.*] has no buffer pool */
+	wl_list_for_each(r, &c->app_rules, link)
+		if (r->kind == PW_RULE_LAYER) {
+			assert(strcmp(r->name, "osk") == 0);
+			assert(r->zb_buffers == -1 && r->zb_pool == 0);
+		}
+	assert(pw_config_app(c, "osk") == NULL);
+
+	/* default pool + mediaplayer, Player, noexe */
+	assert(c->zb_n_pools == 4);
+
+	/* exact, case-sensitive, NULL-safe */
+	assert(pw_config_app(c, "MediaPlayer") == NULL);
+	assert(pw_config_app(c, "nope") == NULL);
+	assert(pw_config_app(c, NULL) == NULL);
+	assert(pw_config_app(NULL, "mediaplayer") == NULL);
+	pw_config_free(c);
+
+	/* bad globals keep the defaults */
+	const char *path = write_tmp_ini("picowl-test-zblim.ini",
+		"[zerocopy]\nmax_buffers_per_client = 0\nbudget_kb = 70000\ntotal_kb = -1\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->zb_max_buffers == 3 && c->zb_budget_kb == 2048 && c->zb_total_kb == 0);
+	pw_config_free(c);
+
+	path = write_tmp_ini("picowl-test-zblim2.ini",
+		"[zerocopy]\nmax_buffers_per_client = 33\nbudget_kb = 0\ntotal_kb = 65536\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->zb_max_buffers == 3 && c->zb_budget_kb == 0 && c->zb_total_kb == 65536);
+	pw_config_free(c);
+
+	printf("✓ test_zerocopy_limits\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -557,6 +648,7 @@ int main(int argc, char *argv[])
 	failed += test_rotation_config();
 	failed += test_copytype_config();
 	failed += test_zerocopy_config();
+	failed += test_zerocopy_limits();
 	failed += test_memory_config();
 	failed += test_panel_action();
 	failed += test_power_config();

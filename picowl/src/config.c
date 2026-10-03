@@ -1,9 +1,11 @@
 /* config.c - INI configuration parser. */
+#define _XOPEN_SOURCE 700 /* realpath() */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <wayland-util.h>
 #include <drm_fourcc.h>
 #include "picowl.h"
@@ -113,6 +115,19 @@ static bool parse_hold_action(const char *str, enum pw_hold_action *action)
 	return false;
 }
 
+/* Parse an integer in [lo, hi]. On a bad or out-of-range value, log and keep *out. */
+static bool parse_int_log(const char *str, const char *key, int lo, int hi, int *out)
+{
+	char *end;
+	long v = strtol(str, &end, 10);
+	if (end == str || *end || v < lo || v > hi) {
+		pw_log(WLR_ERROR, "%s out of range [%d..%d], using default", key, lo, hi);
+		return false;
+	}
+	*out = (int)v;
+	return true;
+}
+
 /* Parse boolean value and return success. On invalid value, return false and keep the previous value.
  * This version logs errors. For use in config parsing where we want to report problems. */
 static bool parse_bool_log(const char *str, const char *key, bool *out)
@@ -180,6 +195,8 @@ static struct pw_app_rule *find_or_add_rule(struct pw_config *c, enum pw_rule_ki
 		return NULL;
 	}
 	rule->kind = kind;
+	rule->zb_buffers = -1;
+	rule->zb_budget_kb = -1;
 	wl_list_insert(c->app_rules.prev, &rule->link);
 	return rule;
 }
@@ -243,6 +260,9 @@ struct pw_config *pw_config_default(void)
 	wl_list_init(&c->copy_overrides);
 	c->zerocopy = true;
 	c->single_buffer = true;
+	c->zb_max_buffers = 3;
+	c->zb_budget_kb = 2048;
+	c->zb_n_pools = 1;
 	c->panel_autohide = true;
 	c->arena_max = 1;
 	c->trim_threshold_kb = 256;
@@ -529,6 +549,12 @@ struct pw_config *pw_config_load(const char *path)
 				parse_bool_log(val, "zerocopy.single_buffer", &c->single_buffer);
 			} else if (strcmp(key, "panel_autohide") == 0) {
 				parse_bool_log(val, "zerocopy.panel_autohide", &c->panel_autohide);
+			} else if (strcmp(key, "max_buffers_per_client") == 0) {
+				parse_int_log(val, "max_buffers_per_client", 1, 32, &c->zb_max_buffers);
+			} else if (strcmp(key, "budget_kb") == 0) {
+				parse_int_log(val, "budget_kb", 0, 65536, &c->zb_budget_kb);
+			} else if (strcmp(key, "total_kb") == 0) {
+				parse_int_log(val, "total_kb", 0, 65536, &c->zb_total_kb);
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [zerocopy]: %s", key);
 			}
@@ -674,6 +700,19 @@ struct pw_config *pw_config_load(const char *path)
 			} else if (strcmp(key, "slop_px") == 0) {
 				cur_rule->hold.slop_px = atoi(val);
 				cur_rule->set |= PW_HOLD_SET_SLOP;
+			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "zerocopy_buffers") == 0) {
+				parse_int_log(val, "zerocopy_buffers", 1, 32, &cur_rule->zb_buffers);
+			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "zerocopy_budget_kb") == 0) {
+				parse_int_log(val, "zerocopy_budget_kb", 0, 65536, &cur_rule->zb_budget_kb);
+			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "exe") == 0) {
+				/* resolve symlinks: it is compared to /proc/<pid>/exe */
+				char path[PATH_MAX];
+				if (!realpath(val, path)) {
+					pw_log(WLR_INFO, "exe %s in [%s]: %s; keeping it as is", val, section, strerror(errno));
+					snprintf(path, sizeof(path), "%s", val);
+				}
+				free(cur_rule->exe);
+				cur_rule->exe = strdup(path);
 			} else {
 				pw_log(WLR_INFO, "Unknown key in [%s]: %s", section, key);
 			}
@@ -767,6 +806,21 @@ struct pw_config *pw_config_load(const char *path)
 		}
 	}
 
+	/* [app.*] rules with zerocopy keys get their own buffer pool (0 is the
+	 * default pool); the total can be below the sum of the pools. */
+	int fixed_kb = c->zb_budget_kb;
+	struct pw_app_rule *zr;
+	wl_list_for_each(zr, &c->app_rules, link) {
+		if (zr->kind != PW_RULE_APP || (zr->zb_buffers < 0 && zr->zb_budget_kb < 0))
+			continue;
+		zr->zb_pool = c->zb_n_pools++;
+		if (zr->zb_budget_kb >= 0)
+			fixed_kb += zr->zb_budget_kb;
+	}
+	if (c->zb_total_kb && c->zb_n_pools > 1 && c->zb_total_kb < fixed_kb)
+		pw_log(WLR_INFO, "[zerocopy] total_kb %d is below the pools' sum, pools can overcommit",
+			c->zb_total_kb);
+
 	/* Resolve [app.*]/[layer.*] rules: unset keys come from [touch]; bad
 	 * timings revert to [touch] (the action stays as configured). */
 	struct pw_app_rule *rule;
@@ -833,6 +887,7 @@ void pw_config_free(struct pw_config *config)
 	struct pw_app_rule *rule, *rule_tmp;
 	wl_list_for_each_safe(rule, rule_tmp, &config->app_rules, link) {
 		free(rule->name);
+		free(rule->exe);
 		free(rule);
 	}
 
@@ -889,6 +944,17 @@ enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const c
 
 	/* Default to AUTO */
 	return PW_COPY_AUTO;
+}
+
+const struct pw_app_rule *pw_config_app(const struct pw_config *c, const char *app_id)
+{
+	if (!c || !app_id)
+		return NULL;
+	struct pw_app_rule *rule;
+	wl_list_for_each(rule, &c->app_rules, link)
+		if (rule->kind == PW_RULE_APP && rule->name && strcmp(rule->name, app_id) == 0)
+			return rule;
+	return NULL;
 }
 
 bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,

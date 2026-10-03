@@ -73,6 +73,8 @@ test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',
   include_directories: test_inc))
+test('zbquota', executable('test-zbquota', 'test-zbquota.c', '../src/zbquota.c',
+  include_directories: test_inc))
 test('copyrel', executable('test-copyrel', 'test-copyrel.c', '../src/copyrel.c',
   include_directories: test_inc))
 test('pixman-pass', executable('test-pixman-pass', 'test-pixman-pass.c',

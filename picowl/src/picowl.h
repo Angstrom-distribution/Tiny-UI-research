@@ -117,6 +117,11 @@ struct pw_app_rule {
 	char *name;                   /* app_id or layer namespace */
 	unsigned set;                 /* PW_HOLD_SET_*: keys given in the section */
 	struct pw_hold_params hold;   /* fully resolved after pw_config_load() */
+	/* [app.*] only: picowl-buffer-v1 limits (zerocopy_* keys) */
+	int zb_buffers;               /* -1 = [zerocopy] max_buffers_per_client */
+	int zb_budget_kb;             /* -1 = zb_buffers x frame of the largest output */
+	unsigned zb_pool;             /* 0 = no pool (default pool), else 1..zb_n_pools-1 */
+	char *exe;                    /* realpath the client binary must have, or NULL */
 };
 
 struct pw_config {
@@ -147,6 +152,10 @@ struct pw_config {
 	struct wl_list copy_overrides; /* struct pw_output_copyover */
 	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
 	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
+	int zb_max_buffers;        /* buffers per client (default 3) */
+	int zb_budget_kb;          /* pool of clients without an [app.*] pool (default 2048) */
+	int zb_total_kb;           /* ceiling over all pools, 0 = none (default 0) */
+	unsigned zb_n_pools;       /* 1 (default pool) + [app.*] rules with a pool */
 	bool panel_autohide;       /* hide the panel while an app is fullscreen (default true) */
 	int arena_max;             /* M_ARENA_MAX (default 1) */
 	int trim_threshold_kb;     /* M_TRIM_THRESHOLD in kB (default 256) */
@@ -479,6 +488,9 @@ enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *outpu
 
 /* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
+
+/* The [app.*] rule for an app_id (exact match), or NULL. NULL-safe. config.c */
+const struct pw_app_rule *pw_config_app(const struct pw_config *c, const char *app_id);
 
 /* Effective hold parameters for a surface identity. name NULL or no
  * matching rule -> the [touch] globals. Returns true if a rule matched. */
