@@ -92,7 +92,7 @@ Per-output rotation mode: `<output-name> = <mode>` (`*` matches any output).
 - `hardware`: require hardware rotation; logs an error and falls back if unsupported.
 - `software`: always rotate in the renderer.
 
-If the hardware result has the wrong size, picowl logs "hw rotation size mismatch" and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See `../docs/ipaq-ui/compositor.md § 5.3` for implementation details and `../docs/ipaq-ui/hardware.md § 5` for per-device rotation capabilities.
+If the hardware rotation commit fails, picowl logs an error and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See `../docs/ipaq-ui/compositor.md § 5.3` for implementation details and `../docs/ipaq-ui/hardware.md § 5` for per-device rotation capabilities.
 
 ### [copytype] section
 
@@ -308,7 +308,7 @@ Tests: `config`, `smoke` (headless run, also with `--zerocopy`), `rotate`, `copy
 
 DRM paths (rotation, copy-type, swapchain, direct scanout) cannot run in the build container (no /dev/dri, no vkms); they are compiled and unit-tested only. On a real device, verify:
 
-- Hardware rotation: `check_hw_size` succeeds, touch calibration correct, no "hw rotation size mismatch" log
+- Hardware rotation: the hardware rotation commit succeeds, touch calibration correct, no "hw rotation commit failed" log
 - Copy-type single-buffer: swapchain stays at 1 slot, no "degraded to 2 slots" log
 - Direct scanout: scene logs it, render list is 1 entry, no composition
 - Damage clipping: only changed regions copied to VRAM

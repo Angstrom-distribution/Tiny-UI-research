@@ -174,10 +174,10 @@ struct pw_output {
 	enum pw_rot_mode rot_mode;  /* resolved rotation mode (config) */
 	enum wl_output_transform rotation; /* current logical rotation */
 	bool hw_rotation;           /* rotation is done by the display hardware */
-	int native_w, native_h;     /* mode size before any hardware swap */
 	bool copy_type;             /* output copies damage to device memory */
 	char drm_driver[32];        /* DRM driver name, "" if not DRM */
 	struct wlr_swapchain *copy_swapchain; /* persistent buffer for copy-type outputs */
+	bool sb_off_logged, sb_degraded_logged; /* single-buffer diagnostics, once */
 	struct wl_listener present;
 
 	struct wl_listener frame;
@@ -298,7 +298,8 @@ struct pw_server {
 void pw_output_init(struct pw_server *server);
 
 /* Blank (true) or unblank (false) all outputs by disabling/enabling them and
- * set server->blanked. Called by idle.c, input.c (TOGGLE_BLANK) and the
+ * set server->blanked from the outputs' real state (a failed unblank leaves
+ * it true). Called by idle.c, input.c (TOGGLE_BLANK) and the
  * output-power-management handler. Idempotent. */
 void pw_output_blank(struct pw_server *server, bool blank);
 

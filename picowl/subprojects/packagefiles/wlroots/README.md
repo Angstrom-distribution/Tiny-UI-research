@@ -86,8 +86,7 @@ The host prefix (`/tmp/.../hostprefix`) must be rebuilt with these patches for p
 
 4. **Picowl usage:**
    - `pw_output_rotate`: disable → set_hw_rotation → enable with mode
-   - `check_hw_size`: compare result wlr_output size with expected logical size
-   - On mismatch, disable and re-enable with software rotation
+   - If the enabling commit fails, re-enable with software rotation
    - Touch calibration matrix set from hardware rotation angle
 
 ### Copy-Type Detection and Handling
@@ -175,7 +174,7 @@ If wlroots 0.19 upstream changes or a new target is added:
 
 The patches expose new public API but do not change behavior on devices without the hardware features (rotation property, copy-type drivers). On a device with these features:
 
-- **Rotation:** `check_hw_size`, touch calibration, no flickering during rotate
+- **Rotation:** hardware rotation commit, touch calibration, no flickering during rotate
 - **Copy-type:** Single-buffer swapchain stays at 1 slot, output not disabled during fb drop
 - **Kernel CLOSEFB:** Swapchain replacement and rotation don't flicker
 
