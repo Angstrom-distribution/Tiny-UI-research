@@ -5,10 +5,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <linux/dma-buf.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "picowl-buffer-v1-client-protocol.h"
 
 #define FMT_RGB565 WL_SHM_FORMAT_RGB565
 
@@ -21,6 +27,10 @@ static struct wl_callback *frame_cb;
 static bool have_565, configured, done;
 static uint32_t format = WL_SHM_FORMAT_XRGB8888;
 static int32_t cfg_w, cfg_h;
+static struct zwp_linux_dmabuf_v1 *dmabuf;
+static struct picowl_buffer_manager_v1 *pbm;
+static bool pb_fmt_565;
+static int pb_copy_type = -1;
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -37,13 +47,33 @@ static void wm_ping(void *d, struct xdg_wm_base *b, uint32_t serial)
 }
 static const struct xdg_wm_base_listener wm_listener = { wm_ping };
 
+static void pbm_format(void *d, struct picowl_buffer_manager_v1 *m, uint32_t f)
+{
+	(void)d; (void)m;
+	if (f == 0x36314752) /* DRM_FORMAT_RGB565 */
+		pb_fmt_565 = true;
+}
+static void pbm_copy_type(void *d, struct picowl_buffer_manager_v1 *m, uint32_t t)
+{
+	(void)d; (void)m;
+	pb_copy_type = (int)t;
+}
+static const struct picowl_buffer_manager_v1_listener pbm_listener = {
+	pbm_format, pbm_copy_type
+};
+
 static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	const char *iface, uint32_t ver)
 {
 	(void)d;
 	if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
-	else if (!strcmp(iface, wl_shm_interface.name)) {
+	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
+		dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, 3);
+	else if (!strcmp(iface, picowl_buffer_manager_v1_interface.name)) {
+		pbm = wl_registry_bind(r, name, &picowl_buffer_manager_v1_interface, 1);
+		picowl_buffer_manager_v1_add_listener(pbm, &pbm_listener, NULL);
+	} else if (!strcmp(iface, wl_shm_interface.name)) {
 		shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
 		wl_shm_add_listener(shm, &shm_listener, NULL);
 	} else if (!strcmp(iface, xdg_wm_base_interface.name)) {
@@ -94,8 +124,230 @@ static int timeout_exit(void)
 	return 1;
 }
 
-int main(void)
+/* ---- zero-copy mode ---- */
+#define ZC_FRAMES 5
+#define ZC_DRM_RGB565 0x36314752u
+
+struct zbuf {
+	struct picowl_buffer_v1 *pb;
+	struct wl_buffer *wl;
+	void *map;
+	size_t size;
+	uint32_t stride, offset, mod_hi, mod_lo;
+	int fd;
+	bool have_dmabuf, failed, busy;
+};
+
+static uint32_t zc_serial_copied;
+static uint32_t zc_commits;
+static uint32_t zc_serial_retained;
+static bool zc_got_copied, zc_got_retained;
+
+static void zb_dmabuf(void *d, struct picowl_buffer_v1 *pb, int32_t fd, uint32_t stride,
+	uint32_t offset, uint32_t hi, uint32_t lo)
 {
+	(void)pb;
+	struct zbuf *z = d;
+	z->fd = fd;
+	z->stride = stride;
+	z->offset = offset;
+	z->mod_hi = hi;
+	z->mod_lo = lo;
+	z->have_dmabuf = true;
+}
+static void zb_done(void *d, struct picowl_buffer_v1 *pb) { (void)d; (void)pb; }
+static void zb_failed(void *d, struct picowl_buffer_v1 *pb, uint32_t r)
+{
+	(void)pb; (void)r;
+	((struct zbuf *)d)->failed = true;
+}
+static void zb_copied(void *d, struct picowl_buffer_v1 *pb, uint32_t serial)
+{
+	(void)d; (void)pb;
+	zc_serial_copied = serial;
+	zc_got_copied = true;
+}
+static void zb_retained(void *d, struct picowl_buffer_v1 *pb, uint32_t serial)
+{
+	(void)d; (void)pb;
+	zc_serial_retained = serial;
+	zc_got_retained = true;
+}
+static const struct picowl_buffer_v1_listener zb_listener = {
+	zb_dmabuf, zb_done, zb_failed, zb_copied, zb_retained
+};
+
+static void zb_release(void *d, struct wl_buffer *b)
+{
+	(void)b;
+	((struct zbuf *)d)->busy = false;
+}
+static const struct wl_buffer_listener zb_wl_listener = { zb_release };
+
+static void zc_alarm(int sig)
+{
+	(void)sig;
+	static const char m[] = "picowl-test-client: zerocopy timeout\n";
+	if (write(2, m, sizeof(m) - 1)) {}
+	_exit(1);
+}
+
+static void dmabuf_sync(int fd, uint64_t flags)
+{
+	struct dma_buf_sync s = { .flags = flags };
+	int r;
+	do
+		r = ioctl(fd, DMA_BUF_IOCTL_SYNC, &s);
+	while (r < 0 && errno == EINTR);
+	/* ENOTTY and friends: not a real dmabuf (or no sync support), ignore. */
+}
+
+static void zc_draw(struct zbuf *z, int w, int h, int frame)
+{
+	dmabuf_sync(z->fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+	for (int y = 0; y < h; y++) {
+		uint16_t *row = (uint16_t *)((char *)z->map + z->offset + (size_t)y * z->stride);
+		for (int x = 0; x < w; x++) {
+			unsigned r = (unsigned)((x * 31) / (w > 1 ? w - 1 : 1));
+			unsigned g = (unsigned)((y * 63) / (h > 1 ? h - 1 : 1));
+			unsigned b = (unsigned)((frame * 6) & 31);
+			row[x] = (uint16_t)((r << 11) | (g << 5) | b);
+		}
+	}
+	dmabuf_sync(z->fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+}
+
+static void zc_destroy(struct zbuf *z)
+{
+	if (z->wl)
+		wl_buffer_destroy(z->wl);
+	if (z->map && z->map != MAP_FAILED)
+		munmap(z->map, z->size);
+	if (z->fd >= 0)
+		close(z->fd);
+	if (z->pb)
+		picowl_buffer_v1_destroy(z->pb);
+	memset(z, 0, sizeof(*z));
+	z->fd = -1;
+}
+
+/* Allocate and wrap one buffer. Returns false if unavailable. */
+static bool zc_create(struct wl_display *dpy, struct zbuf *z, int w, int h)
+{
+	memset(z, 0, sizeof(*z));
+	z->fd = -1;
+	z->pb = picowl_buffer_manager_v1_create_buffer(pbm, w, h, ZC_DRM_RGB565);
+	picowl_buffer_v1_add_listener(z->pb, &zb_listener, z);
+	for (int i = 0; i < 2 && !z->have_dmabuf && !z->failed; i++)
+		wl_display_roundtrip(dpy);
+	if (!z->have_dmabuf || z->failed)
+		return false;
+	z->size = (size_t)z->stride * h;
+	z->map = mmap(NULL, z->offset + z->size, PROT_READ | PROT_WRITE, MAP_SHARED, z->fd, 0);
+	if (z->map == MAP_FAILED)
+		return false;
+	z->size += z->offset;
+	struct zwp_linux_buffer_params_v1 *p = zwp_linux_dmabuf_v1_create_params(dmabuf);
+	zwp_linux_buffer_params_v1_add(p, z->fd, 0, z->offset, z->stride, z->mod_hi, z->mod_lo);
+	z->wl = zwp_linux_buffer_params_v1_create_immed(p, w, h, ZC_DRM_RGB565, 0);
+	zwp_linux_buffer_params_v1_destroy(p);
+	wl_buffer_add_listener(z->wl, &zb_wl_listener, z);
+	return true;
+}
+
+static void zc_commit(struct zbuf *z, int w, int h)
+{
+	wl_surface_attach(surface, z->wl, 0, 0);
+	wl_surface_damage_buffer(surface, 0, 0, w, h);
+	wl_surface_commit(surface);
+	zc_commits++;
+}
+
+/* Returns 0 on success, -1 when zero-copy is unavailable (nothing committed). */
+static int run_zerocopy(struct wl_display *dpy, int w, int h)
+{
+	struct zbuf zb[2];
+	int nbuf;
+
+	if (!dmabuf || !pbm || !pb_fmt_565 || pb_copy_type < 0)
+		return -1;
+	nbuf = pb_copy_type == 1 ? 1 : 2;
+	memset(zb, 0, sizeof(zb));
+	zb[0].fd = zb[1].fd = -1;
+	for (int i = 0; i < nbuf; i++) {
+		if (!zc_create(dpy, &zb[i], w, h)) {
+			for (int j = 0; j <= i; j++)
+				zc_destroy(&zb[j]);
+			return -1;
+		}
+	}
+
+	signal(SIGALRM, zc_alarm);
+	alarm(3);
+	int frames = 0;
+	if (pb_copy_type == 1) {
+		/* One buffer until the compositor answers a commit with
+		 * "retained" (composited, not direct scanout): then a second
+		 * buffer is allocated and wl_buffer.release is used. */
+		int cur = 0;
+		picowl_buffer_v1_attach_surface(zb[0].pb, surface);
+		zc_draw(&zb[0], w, h, 0);
+		zb[0].busy = true;
+		zc_commit(&zb[0], w, h);
+		while (frames < ZC_FRAMES) {
+			zc_got_copied = zc_got_retained = false;
+			while (!(zc_got_copied && zc_serial_copied == zc_commits) &&
+			       !(zc_got_retained && zc_serial_retained == zc_commits)) {
+				if (wl_display_dispatch(dpy) < 0)
+					return 1;
+				if (zc_got_copied && zc_serial_copied != zc_commits)
+					zc_got_copied = false;
+				if (zc_got_retained && zc_serial_retained != zc_commits)
+					zc_got_retained = false;
+			}
+			frames++;
+			if (frames >= ZC_FRAMES)
+				break;
+			if (!(zc_got_copied && zc_serial_copied == zc_commits)) {
+				int other = cur ^ 1;
+				if (!zb[other].wl && !zc_create(dpy, &zb[other], w, h))
+					return 1;
+				while (zb[other].busy)
+					if (wl_display_dispatch(dpy) < 0)
+						return 1;
+				cur = other;
+			}
+			zc_draw(&zb[cur], w, h, frames);
+			zb[cur].busy = true;
+			zc_commit(&zb[cur], w, h);
+		}
+	} else {
+		for (int f = 0; f < ZC_FRAMES; f++) {
+			int i = f & 1;
+			while (zb[i].busy)
+				if (wl_display_dispatch(dpy) < 0)
+					return 1;
+			zc_draw(&zb[i], w, h, f);
+			zb[i].busy = true;
+			zc_commit(&zb[i], w, h);
+			wl_display_flush(dpy);
+			frames++;
+		}
+		wl_display_roundtrip(dpy);
+	}
+	alarm(0);
+	printf("picowl-test-client: zerocopy %d frames copy_type=%d\n", frames, pb_copy_type);
+	fflush(stdout);
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--zerocopy"))
+			want_zc = true;
+
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
 	if (!dpy) {
@@ -127,6 +379,15 @@ int main(void)
 			return timeout_exit();
 
 	int w = cfg_w > 0 ? cfg_w : 64, h = cfg_h > 0 ? cfg_h : 64;
+	if (want_zc) {
+		int rc = run_zerocopy(dpy, w, h);
+		if (rc > 0)
+			return 1;
+		if (rc == 0)
+			return 0;
+		printf("picowl-test-client: zerocopy unavailable, using wl_shm\n");
+		fflush(stdout);
+	}
 	int bpp = format == FMT_RGB565 ? 2 : 4;
 	int stride = w * bpp;
 	size_t size = (size_t)stride * h;

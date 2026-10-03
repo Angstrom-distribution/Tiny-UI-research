@@ -97,7 +97,7 @@ static void restore_focus(struct pw_layer_surface *ls)
 }
 
 static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
-		struct wlr_box *usable, bool exclusive)
+		struct wlr_box *usable, bool exclusive, bool hide_top)
 {
 	for (int i = 0; i < 4; i++) {
 		struct pw_layer_surface *ls;
@@ -107,6 +107,13 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 				continue;
 			}
 			if (exclusive != (s->current.exclusive_zone > 0)) {
+				continue;
+			}
+			if (hide_top && layer_order[i] == ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+				/* Panel hidden: configure it, but its exclusive zone
+				 * must not shrink the usable area. */
+				struct wlr_box scratch = *usable;
+				wlr_scene_layer_surface_v1_configure(ls->scene_layer, full, &scratch);
 				continue;
 			}
 			wlr_scene_layer_surface_v1_configure(ls->scene_layer, full, usable);
@@ -121,8 +128,8 @@ void pw_layer_arrange(struct pw_output *output)
 	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &full);
 
 	struct wlr_box usable = full;
-	arrange_layers(output, &full, &usable, true);
-	arrange_layers(output, &full, &usable, false);
+	arrange_layers(output, &full, &usable, true, output->server->panel_hidden);
+	arrange_layers(output, &full, &usable, false, output->server->panel_hidden);
 
 	bool changed = full.x != output->full_area.x
 		|| full.y != output->full_area.y
@@ -142,6 +149,27 @@ void pw_layer_arrange(struct pw_output *output)
 	}
 }
 
+void pw_panel_update(struct pw_server *s)
+{
+	struct pw_view *fv = s->focused_view;
+	bool hidden = s->config && s->config->panel_autohide
+		&& fv && fv->mapped && !s->panel_forced_visible;
+
+	if (hidden == s->panel_hidden)
+		return;
+	s->panel_hidden = hidden;
+	wlr_scene_node_set_enabled(&s->layer_panel->node, !hidden);
+	struct pw_output *o;
+	wl_list_for_each(o, &s->outputs, link)
+		pw_layer_arrange(o);
+}
+
+void pw_panel_toggle(struct pw_server *s)
+{
+	s->panel_forced_visible = !s->panel_forced_visible;
+	pw_panel_update(s);
+}
+
 static void handle_map(struct wl_listener *listener, void *data)
 {
 	(void)data;
@@ -158,6 +186,7 @@ static void handle_map(struct wl_listener *listener, void *data)
 	if (ls->output) {
 		pw_layer_arrange(ls->output);
 	}
+	pw_panel_update(ls->server);
 }
 
 static void handle_unmap(struct wl_listener *listener, void *data)
@@ -169,6 +198,7 @@ static void handle_unmap(struct wl_listener *listener, void *data)
 	if (ls->output) {
 		pw_layer_arrange(ls->output);
 	}
+	pw_panel_update(ls->server);
 }
 
 static void handle_commit(struct wl_listener *listener, void *data)

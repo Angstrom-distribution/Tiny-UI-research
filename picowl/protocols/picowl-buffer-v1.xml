@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="picowl_buffer_v1">
+  <copyright>MIT</copyright>
+
+  <interface name="picowl_buffer_manager_v1" version="1">
+    <description summary="allocate compositor-owned RGB565 buffers">
+      Lets a client obtain a buffer allocated by the compositor (a dmabuf
+      fd). The client wraps the fd into a wl_buffer with zwp_linux_dmabuf_v1
+      (create_params, params.add with the fd, stride, offset and modifier
+      from the dmabuf event, then params.create_immed with the same size and
+      format). The compositor advertises whether an output copies damage to
+      device memory. Clients then start with one buffer and may draw into it
+      again after a copied event; when a retained event answers a commit
+      instead, they switch to a second buffer and use wl_buffer.release.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager"/>
+    </request>
+
+    <request name="create_buffer">
+      <description summary="allocate a buffer">
+        Only DRM_FORMAT_RGB565 (0x36314752) is accepted. The result is
+        reported with dmabuf and done, or failed.
+      </description>
+      <arg name="id" type="new_id" interface="picowl_buffer_v1"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint"/>
+    </request>
+
+    <event name="format">
+      <description summary="supported format">
+        Sent once per supported format when the manager is bound.
+      </description>
+      <arg name="format" type="uint"/>
+    </event>
+
+    <event name="copy_type">
+      <description summary="output copy type">
+        Sent on bind and whenever it changes. 1 means an output copies
+        damage to device memory: copied events may follow direct-scanout
+        commits and the client may redraw into the same buffer after one.
+        0 means scanout: copied is never sent, keep double buffering and use
+        wl_buffer.release.
+      </description>
+      <arg name="copy_type" type="uint"/>
+    </event>
+  </interface>
+
+  <interface name="picowl_buffer_v1" version="1">
+    <description summary="a compositor-allocated buffer">
+      Describes a dmabuf allocated by the compositor. Wrap the fd with
+      zwp_linux_dmabuf_v1 (params.add + create_immed).
+    </description>
+
+    <enum name="reason">
+      <entry name="unsupported_format" value="0"/>
+      <entry name="too_large" value="1"/>
+      <entry name="no_memory" value="2"/>
+      <entry name="no_drm" value="3"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the buffer object"/>
+    </request>
+
+    <request name="attach_surface">
+      <description summary="track commits of a surface">
+        Commits of that surface are numbered from 1, with uint32 wrap
+        (0 is skipped).
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <event name="dmabuf">
+      <description summary="dmabuf parameters"/>
+      <arg name="fd" type="fd"/>
+      <arg name="stride" type="uint"/>
+      <arg name="offset" type="uint"/>
+      <arg name="modifier_hi" type="uint"/>
+      <arg name="modifier_lo" type="uint"/>
+    </event>
+
+    <event name="done">
+      <description summary="all parameters sent"/>
+    </event>
+
+    <event name="failed">
+      <description summary="allocation failed"/>
+      <arg name="reason" type="uint" enum="reason"/>
+    </event>
+
+    <event name="copied">
+      <description summary="commits up to serial were copied out">
+        Only sent when copy_type is 1 and the output that showed the commit
+        copied it straight from this buffer (direct scanout on a copy-type
+        driver): all surface commits up to and including serial have been
+        copied to device memory, and the buffer may be drawn into again
+        without waiting for wl_buffer.release.
+
+        The compositor takes no snapshot. If the surface later has to be
+        composited (a software cursor, popup or overlay appears over it, or
+        the output is redrawn) before the client's next commit, the
+        compositor re-reads the last committed buffer for the affected
+        region. The client's next commit replaces that content; clients
+        should therefore commit the complete frame, not partial updates.
+
+        Exactly one of copied and retained answers a commit, unless a newer
+        commit supersedes it first.
+      </description>
+      <arg name="serial" type="uint"/>
+    </event>
+
+    <event name="retained">
+      <description summary="the compositor keeps reading the buffer">
+        The commit with this serial was not (or will not be) consumed by a
+        copy-type direct scanout: it is composited, occluded, off-output,
+        on a scanout-type output, or the output is disabled or blanked. The
+        compositor keeps the buffer as the surface's current content and may
+        read it at any time until a newer commit replaces it. The client
+        must not draw into it, and has to use a second buffer for its next
+        frame (allocated on demand) and wait for wl_buffer.release on this
+        one, as with any buffer. Never sent for commits answered by copied.
+        Sent also on outputs which are not copy-type, regardless of the
+        copy_type value announced by the manager.
+      </description>
+      <arg name="serial" type="uint"/>
+    </event>
+  </interface>
+</protocol>

@@ -20,8 +20,13 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <xkbcommon/xkbcommon.h>
+#ifdef PW_HAVE_LIBINPUT
+#include <wlr/backend/libinput.h>
+#include <libinput.h>
+#endif
 
 #include "touchhold.h"
+#include "rotate.h"
 
 #define PW_MOD_MASK (WLR_MODIFIER_SHIFT | WLR_MODIFIER_CTRL | \
                      WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)
@@ -57,7 +62,15 @@ struct pw_input_state {
 static struct pw_input_state st;
 
 struct pw_pointer_dev { struct wl_listener destroy; };
-struct pw_touch_dev { struct wl_listener destroy; };
+struct pw_touch_dev {
+	struct wl_list link;           /* touch_devs */
+	struct wlr_input_device *dev;
+	struct wl_listener destroy;
+	float def_matrix[6];           /* device default calibration (udev) */
+	bool have_default;
+};
+
+static struct wl_list touch_devs; /* initialised in pw_input_init */
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -156,18 +169,10 @@ static void rotate_first_output(struct pw_server *server)
 	if (wl_list_empty(&server->outputs))
 		return;
 	struct pw_output *out = wl_container_of(server->outputs.next, out, link);
-	enum wl_output_transform t = out->wlr_output->transform;
-	enum wl_output_transform next = t < WL_OUTPUT_TRANSFORM_270 ?
-		t + 1 : WL_OUTPUT_TRANSFORM_NORMAL;
-
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_transform(&state, next);
-	if (!wlr_output_commit_state(out->wlr_output, &state))
-		pw_log(WLR_ERROR, "rotate: commit failed");
-	else
-		pw_output_update_geometry(out);
-	wlr_output_state_finish(&state);
+	/* wlr_output->transform stays NORMAL under hardware rotation. */
+	enum wl_output_transform next = (out->rotation & 4) |
+		((out->rotation + 1) & 3);
+	pw_output_rotate(out, next);
 }
 
 void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *binding)
@@ -188,6 +193,9 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 		break;
 	case PW_ACTION_ROTATE:
 		rotate_first_output(server);
+		break;
+	case PW_ACTION_TOGGLE_PANEL:
+		pw_panel_toggle(server);
 		break;
 	case PW_ACTION_QUIT:
 		wl_display_terminate(server->display);
@@ -402,6 +410,62 @@ static void pointer_dev_destroy(struct wl_listener *l, void *data)
 
 /* ---- touch ------------------------------------------------------------ */
 
+#ifdef PW_HAVE_LIBINPUT
+/* Remember the device's default calibration (e.g. LIBINPUT_CALIBRATION_MATRIX
+ * from udev on resistive panels); rotation is composed with it. */
+static void touch_read_default(struct pw_touch_dev *t)
+{
+	t->have_default = false;
+	if (!wlr_input_device_is_libinput(t->dev))
+		return;
+	struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
+	if (!h || !libinput_device_config_calibration_has_matrix(h))
+		return;
+	libinput_device_config_calibration_get_default_matrix(h, t->def_matrix);
+	t->have_default = true;
+}
+
+static void apply_touch_matrix(struct pw_touch_dev *t, struct pw_output *o)
+{
+	if (!t->have_default)
+		return;
+	struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
+	if (!h)
+		return;
+	float m[6];
+	if (o->hw_rotation) {
+		float r[6];
+		pw_rot_touch_matrix(o->rotation, r);
+		pw_rot_matrix_mul(r, t->def_matrix, m);
+	} else {
+		/* software rotation is done by wlroots (device mapped to the
+		 * output); restore the default exactly */
+		memcpy(m, t->def_matrix, sizeof(m));
+	}
+	libinput_device_config_calibration_set_matrix(h, m);
+}
+#endif
+
+void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
+{
+	struct pw_touch_dev *t;
+	wl_list_for_each(t, &touch_devs, link) {
+		/* wlr_cursor applies the output transform to touch coordinates
+		 * of devices mapped to an output (software rotation) */
+		wlr_cursor_map_input_to_output(server->cursor, t->dev, o->wlr_output);
+#ifdef PW_HAVE_LIBINPUT
+		apply_touch_matrix(t, o);
+#endif
+	}
+#ifndef PW_HAVE_LIBINPUT
+	static bool logged;
+	if (!logged) {
+		logged = true;
+		pw_log(WLR_INFO, "built without libinput: no touch calibration");
+	}
+#endif
+}
+
 static int64_t now_ms(void)
 {
 	struct timespec ts;
@@ -573,6 +637,7 @@ static void touch_dev_destroy(struct wl_listener *l, void *data)
 	(void)data;
 	struct pw_touch_dev *t = wl_container_of(l, t, destroy);
 	wl_list_remove(&t->destroy.link);
+	wl_list_remove(&t->link);
 	free(t);
 	if (--st.n_touch == 0) {
 		if (st.touch_id != PW_NO_TOUCH && !st.touch_swallowed)
@@ -611,11 +676,20 @@ static void handle_new_input(struct wl_listener *l, void *data)
 		struct pw_touch_dev *t = calloc(1, sizeof(*t));
 		if (!t)
 			break;
+		t->dev = dev;
+#ifdef PW_HAVE_LIBINPUT
+		touch_read_default(t);
+#endif
+		wl_list_insert(&touch_devs, &t->link);
 		t->destroy.notify = touch_dev_destroy;
 		wl_signal_add(&dev->events.destroy, &t->destroy);
 		wlr_cursor_attach_input_device(server->cursor, dev);
 		st.n_touch++;
 		update_capabilities(server);
+		if (!wl_list_empty(&server->outputs)) {
+			struct pw_output *o = wl_container_of(server->outputs.next, o, link);
+			pw_input_apply_rotation(server, o);
+		}
 		break;
 	}
 	default:
@@ -639,6 +713,7 @@ static void handle_request_set_cursor(struct wl_listener *l, void *data)
 void pw_input_init(struct pw_server *server)
 {
 	memset(&st, 0, sizeof(st));
+	wl_list_init(&touch_devs);
 	st.server = server;
 	st.touch_id = PW_NO_TOUCH;
 

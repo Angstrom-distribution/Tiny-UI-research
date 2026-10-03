@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include "picowl.h"
+#include "mem.h"
 
 static void print_help(const char *prog)
 {
@@ -24,6 +25,8 @@ static void print_version(void)
 
 int main(int argc, char **argv)
 {
+	pw_mem_init(NULL);
+
 	const char *config_path = NULL;
 	const char *startup_cmd = NULL;
 	int debug_level = WLR_INFO;
@@ -69,6 +72,8 @@ int main(int argc, char **argv)
 	struct pw_config *config = pw_config_load(config_path);
 	if (!config)
 		return 1;
+
+	pw_mem_init(config);
 
 	/* Append startup command to autostart list if provided */
 	if (startup_cmd) {

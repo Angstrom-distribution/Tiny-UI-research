@@ -18,7 +18,11 @@ wayland_server = dependency('wayland-server')
 wayland_protos = dependency('wayland-protocols', version: '>=1.32')
 xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
-libdrm = dependency('libdrm').partial_dependency(compile_args: true, includes: true)
+libdrm = dependency('libdrm')
+libinput = dependency('libinput', required: false)
+if libinput.found()
+  add_project_arguments('-DPW_HAVE_LIBINPUT', language: 'c')
+endif
 wayland_scanner_dep = dependency('wayland-scanner', native: true)
 
 wayland_scanner = find_program(
@@ -36,6 +40,7 @@ protocol_xmls = {
   'xdg-shell': wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml',
   'wlr-layer-shell-unstable-v1': files('protocols/wlr-layer-shell-unstable-v1.xml'),
   'wlr-output-power-management-unstable-v1': files('protocols/wlr-output-power-management-unstable-v1.xml'),
+  'picowl-buffer-v1': files('protocols/picowl-buffer-v1.xml'),
 }
 
 protocol_headers = []
@@ -48,6 +53,13 @@ foreach name, xml : protocol_xmls
   )
 endforeach
 
+picowl_buffer_code = custom_target(
+  'picowl-buffer-v1-server-code',
+  input: files('protocols/picowl-buffer-v1.xml'),
+  output: 'picowl-buffer-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 sources = files(
   'src/main.c',
   'src/server.c',
@@ -59,6 +71,11 @@ sources = files(
   'src/idle.c',
   'src/touchhold.c',
   'src/cursor.c',
+  'src/rotate.c',
+  'src/copytype.c',
+  'src/copyrel.c',
+  'src/zerocopy.c',
+  'src/mem.c',
 )
 
 pwcursorfit = static_library(
@@ -69,9 +86,9 @@ pwcursorfit = static_library(
 
 picowl_exe = executable(
   'picowl',
-  sources, protocol_headers,
+  sources, protocol_headers, picowl_buffer_code,
   link_with: pwcursorfit,
-  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm],
+  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput],
   include_directories: include_directories('src'),
   install: true,
 )

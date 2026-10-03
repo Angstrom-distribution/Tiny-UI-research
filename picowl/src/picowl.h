@@ -29,10 +29,18 @@
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
 
+#include "rotate.h"
+#include "copytype.h"
+#include "copyrel.h"
+#include "zerocopy.h"
+#include "mem.h"
+
 #define pw_log(level, ...) wlr_log(level, __VA_ARGS__)
 
 struct pw_server;
 struct pw_cursor;
+struct wlr_linux_dmabuf_v1;
+struct wlr_swapchain;
 
 /* ---- configuration ---------------------------------------------------- */
 
@@ -42,6 +50,7 @@ enum pw_action {
 	PW_ACTION_CLOSE_VIEW,
 	PW_ACTION_TOGGLE_BLANK,
 	PW_ACTION_ROTATE,
+	PW_ACTION_TOGGLE_PANEL,     /* config name "panel" */
 	PW_ACTION_QUIT,
 };
 
@@ -60,6 +69,20 @@ struct pw_output_transform {
 	struct wl_list link;       /* pw_config.transforms */
 	char *name;                /* output name, e.g. "DSI-1" or "*" */
 	enum wl_output_transform transform;
+};
+
+/* Per-output rotation mode override ([output NAME] rotation_mode). */
+struct pw_output_rotmode {
+	struct wl_list link;       /* pw_config.rotation_modes */
+	char *name;                /* output name or "*" */
+	enum pw_rot_mode mode;
+};
+
+/* Per-output copy-type override ([output NAME] copy_type). */
+struct pw_output_copyover {
+	struct wl_list link;       /* pw_config.copy_overrides */
+	char *name;                /* output name or "*" */
+	enum pw_copy_override ov;
 };
 
 struct pw_autostart {
@@ -93,6 +116,18 @@ struct pw_config {
 	uint32_t cursor_fill;      /* builtin dot colour 0xRRGGBB (default 0x2050c0) */
 	uint32_t cursor_outline;   /* builtin outline colour 0xRRGGBB (default 0xffffff) */
 	int cursor_frame_ms;       /* animation frame interval (default 83, ~12 fps) */
+
+	/* Rotation / zero-copy / memory (added by the contract item). */
+	struct wl_list rotation_modes; /* struct pw_output_rotmode */
+	struct wl_list copy_overrides; /* struct pw_output_copyover */
+	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
+	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
+	bool panel_autohide;       /* hide the panel while an app is fullscreen (default true) */
+	int arena_max;             /* M_ARENA_MAX (default 1) */
+	int trim_threshold_kb;     /* M_TRIM_THRESHOLD in kB (default 256) */
+	int mmap_threshold_kb;     /* M_MMAP_THRESHOLD in kB (default 128) */
+	int top_pad_kb;            /* M_TOP_PAD in kB (default 16) */
+	bool trim_after_start;     /* malloc_trim() once after startup (default true) */
 };
 
 /*
@@ -124,6 +159,15 @@ struct pw_output {
 	struct wlr_box full_area;   /* layout coords, whole output */
 	struct wlr_box usable_area; /* layout coords, excluding exclusive zones */
 	struct wl_list layers[4];   /* struct pw_layer_surface, per zwlr_layer_shell layer */
+
+	enum pw_rot_mode rot_mode;  /* resolved rotation mode (config) */
+	enum wl_output_transform rotation; /* current logical rotation */
+	bool hw_rotation;           /* rotation is done by the display hardware */
+	int native_w, native_h;     /* mode size before any hardware swap */
+	bool copy_type;             /* output copies damage to device memory */
+	char drm_driver[32];        /* DRM driver name, "" if not DRM */
+	struct wlr_swapchain *copy_swapchain; /* persistent buffer for copy-type outputs */
+	struct wl_listener present;
 
 	struct wl_listener frame;
 	struct wl_listener request_state;
@@ -211,6 +255,11 @@ struct pw_server {
 	struct wlr_output_power_manager_v1 *output_power_mgr;
 	struct wl_event_source *idle_timer;
 	bool blanked;
+
+	struct wlr_linux_dmabuf_v1 *linux_dmabuf; /* hand-built feedback, see zerocopy.c */
+	void *buffer_mgr;          /* picowl_buffer_manager_v1 state, owned by zerocopy.c */
+	bool panel_hidden;         /* panel currently hidden (autohide) */
+	bool panel_forced_visible; /* user toggled the panel visible */
 
 	struct pw_view *focused_view;
 	struct pw_config *config;  /* not owned */
@@ -357,5 +406,30 @@ void pw_server_finish(struct pw_server *server);
 /* Fork and exec "/bin/sh -c cmd" detached (double fork, no zombies). Returns
  * 0 on success, -1 on failure. Called by server.c (autostart) and input.c. */
 int pw_spawn(const char *cmd);
+
+/*
+ * Rotation, panel and config lookups (contract additions).
+ */
+
+/* Rotate output o to logical transform t (hardware if possible, else
+ * software). Implemented in output.c. */
+void pw_output_rotate(struct pw_output *o, enum wl_output_transform t);
+
+/* Re-apply the touch calibration matrix of o after a rotation change.
+ * Implemented in input.c. */
+void pw_input_apply_rotation(struct pw_server *s, struct pw_output *o);
+
+/* Recompute panel visibility (autohide). Implemented in layer.c. */
+void pw_panel_update(struct pw_server *s);
+
+/* Toggle forced panel visibility (PW_ACTION_TOGGLE_PANEL). layer.c. */
+void pw_panel_toggle(struct pw_server *s);
+
+/* Rotation mode for the named output (specific entry, then "*", else
+ * PW_ROT_AUTO). Implemented in config.c. */
+enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *output_name);
+
+/* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
+enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
 
 #endif

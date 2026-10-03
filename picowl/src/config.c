@@ -88,6 +88,10 @@ static bool parse_action(const char *str, enum pw_action *action)
 		*action = PW_ACTION_ROTATE;
 		return true;
 	}
+	if (strcmp(str, "panel") == 0) {
+		*action = PW_ACTION_TOGGLE_PANEL;
+		return true;
+	}
 	if (strcmp(str, "quit") == 0) {
 		*action = PW_ACTION_QUIT;
 		return true;
@@ -106,6 +110,18 @@ static bool parse_hold_action(const char *str, enum pw_hold_action *action)
 		return true;
 	}
 	return false;
+}
+
+static bool parse_bool(const char *str)
+{
+	/* Accept yes/no/true/false/1/0/on/off */
+	if (strcmp(str, "yes") == 0 || strcmp(str, "true") == 0 ||
+	    strcmp(str, "1") == 0 || strcmp(str, "on") == 0)
+		return true;
+	if (strcmp(str, "no") == 0 || strcmp(str, "false") == 0 ||
+	    strcmp(str, "0") == 0 || strcmp(str, "off") == 0)
+		return false;
+	return false; /* Invalid, use default */
 }
 
 static bool parse_hex_color(const char *str, uint32_t *out)
@@ -173,6 +189,17 @@ struct pw_config *pw_config_default(void)
 	c->cursor_fill = 0x2050c0;
 	c->cursor_outline = 0xffffff;
 	c->cursor_frame_ms = 83;
+	/* Rotation, zero-copy, and memory settings */
+	wl_list_init(&c->rotation_modes);
+	wl_list_init(&c->copy_overrides);
+	c->zerocopy = true;
+	c->single_buffer = true;
+	c->panel_autohide = true;
+	c->arena_max = 1;
+	c->trim_threshold_kb = 256;
+	c->mmap_threshold_kb = 128;
+	c->top_pad_kb = 16;
+	c->trim_after_start = true;
 	add_default_keybindings(c);
 	return c;
 }
@@ -369,6 +396,74 @@ struct pw_config *pw_config_load(const char *path)
 			} else if (strcmp(key, "frame_interval_ms") == 0) {
 				c->cursor_frame_ms = atoi(val);
 			}
+		} else if (strcmp(section, "rotation") == 0) {
+			/* Per-output rotation mode override */
+			enum pw_rot_mode mode;
+			if (pw_rot_mode_parse(val, &mode)) {
+				struct pw_output_rotmode *rm = calloc(1, sizeof(*rm));
+				if (rm) {
+					rm->name = strdup(key);
+					rm->mode = mode;
+					wl_list_insert(c->rotation_modes.prev, &rm->link);
+				}
+			} else {
+				pw_log(WLR_ERROR, "Invalid rotation mode: %s (valid: auto, hardware, software)", val);
+			}
+		} else if (strcmp(section, "copytype") == 0) {
+			/* Per-output copy-type override */
+			enum pw_copy_override ov;
+			if (pw_copytype_parse(val, &ov)) {
+				struct pw_output_copyover *co = calloc(1, sizeof(*co));
+				if (co) {
+					co->name = strdup(key);
+					co->ov = ov;
+					wl_list_insert(c->copy_overrides.prev, &co->link);
+				}
+			} else {
+				pw_log(WLR_ERROR, "Invalid copy-type: %s (valid: auto, yes, no)", val);
+			}
+		} else if (strcmp(section, "zerocopy") == 0) {
+			/* Zero-copy and memory settings */
+			if (strcmp(key, "enable") == 0) {
+				c->zerocopy = parse_bool(val);
+			} else if (strcmp(key, "single_buffer") == 0) {
+				c->single_buffer = parse_bool(val);
+			} else if (strcmp(key, "panel_autohide") == 0) {
+				c->panel_autohide = parse_bool(val);
+			}
+		} else if (strcmp(section, "memory") == 0) {
+			/* Memory configuration */
+			if (strcmp(key, "arena_max") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 1 && val_int <= 8) {
+					c->arena_max = val_int;
+				} else {
+					pw_log(WLR_ERROR, "arena_max out of range [1..8], using default");
+				}
+			} else if (strcmp(key, "trim_threshold_kb") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 0 && val_int <= 65536) {
+					c->trim_threshold_kb = val_int;
+				} else {
+					pw_log(WLR_ERROR, "trim_threshold_kb out of range [0..65536], using default");
+				}
+			} else if (strcmp(key, "mmap_threshold_kb") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 16 && val_int <= 4096) {
+					c->mmap_threshold_kb = val_int;
+				} else {
+					pw_log(WLR_ERROR, "mmap_threshold_kb out of range [16..4096], using default");
+				}
+			} else if (strcmp(key, "top_pad_kb") == 0) {
+				int val_int = atoi(val);
+				if (val_int >= 0 && val_int <= 65536) {
+					c->top_pad_kb = val_int;
+				} else {
+					pw_log(WLR_ERROR, "top_pad_kb out of range [0..65536], using default");
+				}
+			} else if (strcmp(key, "trim_after_start") == 0) {
+				c->trim_after_start = parse_bool(val);
+			}
 		} else {
 			pw_log(WLR_INFO, "Unknown config section: [%s]", section);
 		}
@@ -422,7 +517,69 @@ void pw_config_free(struct pw_config *config)
 		free(kb);
 	}
 
+	struct pw_output_rotmode *rm, *rm_tmp;
+	wl_list_for_each_safe(rm, rm_tmp, &config->rotation_modes, link) {
+		free(rm->name);
+		free(rm);
+	}
+
+	struct pw_output_copyover *co, *co_tmp;
+	wl_list_for_each_safe(co, co_tmp, &config->copy_overrides, link) {
+		free(co->name);
+		free(co);
+	}
+
 	free(config->render_format_pref);
 	free(config->hold_animation);
 	free(config);
+}
+
+enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *output_name)
+{
+	if (!c)
+		return PW_ROT_AUTO;
+
+	/* Try exact name first */
+	if (output_name) {
+		struct pw_output_rotmode *rm;
+		wl_list_for_each(rm, &c->rotation_modes, link) {
+			if (rm->name && strcmp(rm->name, output_name) == 0)
+				return rm->mode;
+		}
+	}
+
+	/* Try wildcard "*" */
+	struct pw_output_rotmode *rm;
+	wl_list_for_each(rm, &c->rotation_modes, link) {
+		if (rm->name && strcmp(rm->name, "*") == 0)
+			return rm->mode;
+	}
+
+	/* Default to AUTO */
+	return PW_ROT_AUTO;
+}
+
+enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name)
+{
+	if (!c)
+		return PW_COPY_AUTO;
+
+	/* Try exact name first */
+	if (output_name) {
+		struct pw_output_copyover *co;
+		wl_list_for_each(co, &c->copy_overrides, link) {
+			if (co->name && strcmp(co->name, output_name) == 0)
+				return co->ov;
+		}
+	}
+
+	/* Try wildcard "*" */
+	struct pw_output_copyover *co;
+	wl_list_for_each(co, &c->copy_overrides, link) {
+		if (co->name && strcmp(co->name, "*") == 0)
+			return co->ov;
+	}
+
+	/* Default to AUTO */
+	return PW_COPY_AUTO;
 }

@@ -117,9 +117,12 @@ void pw_view_focus(struct pw_view *view)
 	wl_list_remove(&view->link);
 	wl_list_insert(&server->views, &view->link);
 	server->focused_view = view;
+	if (prev != view)
+		server->panel_forced_visible = false;
 
 	view_set_activated(view, true);
 	focus_keyboard(server, view);
+	pw_panel_update(server);
 }
 
 void pw_view_cycle(struct pw_server *server)
@@ -260,6 +263,7 @@ static void view_unmap(struct wl_listener *l, void *data)
 		} else if (server->seat) {
 			wlr_seat_keyboard_notify_clear_focus(server->seat);
 		}
+		pw_panel_update(server);
 	}
 }
 
@@ -279,6 +283,7 @@ static void view_commit(struct wl_listener *l, void *data)
 static void view_destroy(struct wl_listener *l, void *data)
 {
 	struct pw_view *view = wl_container_of(l, view, destroy);
+	struct pw_server *server = view->server;
 	(void)data;
 
 	if (view->mapped)
@@ -295,6 +300,7 @@ static void view_destroy(struct wl_listener *l, void *data)
 	wl_list_remove(&view->set_app_id.link);
 	view_destroy_handles(view);
 	free(impl_of(view));
+	pw_panel_update(server);
 }
 
 /* Requests: keep our policy, but always answer with a configure. */

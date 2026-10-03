@@ -34,6 +34,7 @@ DEPENDS = " \
     libxkbcommon \
     pixman \
     libdrm \
+    libinput \
 "
 # libwlroots, libwayland-server, libxkbcommon, libpixman and libdrm are picked
 # up at runtime through the automatic shlibs dependencies. libinput, libseat

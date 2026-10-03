@@ -20,6 +20,8 @@
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 
 #include "picowl.h"
+#include "mem.h"
+#include "zerocopy.h"
 
 /* File-local state; the header has no room for these and there is only ever
  * one server per process. */
@@ -127,6 +129,13 @@ static int handle_signal(int signo, void *data)
 	return 0;
 }
 
+static void idle_trim_callback(void *data)
+{
+	(void)data;
+	pw_mem_trim();
+	pw_mem_log_status("startup");
+}
+
 int pw_spawn(const char *cmd)
 {
 	if (!cmd || !*cmd)
@@ -230,6 +239,11 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	/* Per-output background rects are created by output.c (pw_output.background)
 	 * inside layer_background. */
 
+	/* Note: wlr_scene_set_linux_dmabuf_v1 is never called here. The pixman
+	 * renderer has no DRM fd, so the scene feedback would fail per frame. The
+	 * scene's direct_scanout stays at its default (enabled unless
+	 * WLR_SCENE_DISABLE_DIRECT_SCANOUT is set): zero-copy relies on it. */
+
 	wlr_presentation_create(server->display, server->backend, 2);
 	wlr_viewporter_create(server->display);
 	wlr_single_pixel_buffer_manager_v1_create(server->display);
@@ -245,6 +259,9 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	S.new_decoration.notify = handle_new_decoration;
 	wl_signal_add(&S.decoration_mgr->events.new_toplevel_decoration, &S.new_decoration);
 	S.listeners_added = true;
+
+	if (!pw_zerocopy_init(server))
+		goto fail;
 
 	/* Module inits; input creates the seat/cursor and must precede idle. */
 	pw_output_init(server);
@@ -285,7 +302,14 @@ int pw_server_run(struct pw_server *server)
 		}
 	}
 
+	if (server->config && server->config->trim_after_start) {
+		wl_event_loop_add_idle(server->event_loop, idle_trim_callback, NULL);
+	}
+
 	wl_display_run(server->display);
+
+	pw_mem_log_status("exit");
+
 	return 0;
 }
 
@@ -306,6 +330,8 @@ void pw_server_finish(struct pw_server *server)
 	listener_drop(&server->new_xdg_toplevel);
 	listener_drop(&server->new_layer_surface);
 	listener_drop(&server->output_power_set_mode);
+
+	pw_zerocopy_finish(server);
 
 	wl_display_destroy_clients(server->display);
 

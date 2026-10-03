@@ -29,6 +29,14 @@ OUT=$("$CLIENT" 2>&1) || fail "client failed: $OUT"
 echo "$OUT"
 case "$OUT" in *mapped*) ;; *) fail "client did not report mapped" ;; esac
 
+OUT=$("$CLIENT" --zerocopy 2>&1) || fail "zerocopy client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy degradation message" ;; esac
+case "$OUT" in *mapped*) ;; *) fail "zerocopy client did not report mapped" ;; esac
+if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
+	fail "picowl log has 'Failed to upload buffer'"
+fi
+
 kill -TERM "$PID"
 i=0
 while kill -0 "$PID" 2>/dev/null; do

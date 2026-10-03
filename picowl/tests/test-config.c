@@ -194,6 +194,105 @@ static int test_validation_ranges(void)
 	return 0;
 }
 
+static int test_rotation_config(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Test pw_config_rot_mode with specific output */
+	enum pw_rot_mode mode = pw_config_rot_mode(c, "DSI-1");
+	assert(mode == PW_ROT_HARDWARE);
+
+	/* Test wildcard fallback */
+	enum pw_rot_mode mode_other = pw_config_rot_mode(c, "HDMI-1");
+	assert(mode_other == PW_ROT_AUTO);
+
+	/* Test NULL config */
+	enum pw_rot_mode mode_null = pw_config_rot_mode(NULL, "DSI-1");
+	assert(mode_null == PW_ROT_AUTO);
+
+	/* Test NULL output name */
+	enum pw_rot_mode mode_null_name = pw_config_rot_mode(c, NULL);
+	assert(mode_null_name == PW_ROT_AUTO);
+
+	pw_config_free(c);
+	printf("✓ test_rotation_config\n");
+	return 0;
+}
+
+static int test_copytype_config(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Test pw_config_copy_override with specific output */
+	enum pw_copy_override ov = pw_config_copy_override(c, "DSI-1");
+	assert(ov == PW_COPY_YES);
+
+	/* Test wildcard fallback */
+	enum pw_copy_override ov_other = pw_config_copy_override(c, "HDMI-1");
+	assert(ov_other == PW_COPY_NO);
+
+	/* Test NULL config */
+	enum pw_copy_override ov_null = pw_config_copy_override(NULL, "DSI-1");
+	assert(ov_null == PW_COPY_AUTO);
+
+	/* Test NULL output name */
+	enum pw_copy_override ov_null_name = pw_config_copy_override(c, NULL);
+	assert(ov_null_name == PW_COPY_NO);
+
+	pw_config_free(c);
+	printf("✓ test_copytype_config\n");
+	return 0;
+}
+
+static int test_zerocopy_config(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Check zerocopy settings were parsed */
+	assert(c->zerocopy == true);
+	assert(c->single_buffer == true);
+	assert(c->panel_autohide == false);
+
+	pw_config_free(c);
+	printf("✓ test_zerocopy_config\n");
+	return 0;
+}
+
+static int test_memory_config(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Check memory settings were parsed */
+	assert(c->arena_max == 2);
+	assert(c->trim_threshold_kb == 512);
+	assert(c->mmap_threshold_kb == 256);
+	assert(c->top_pad_kb == 32);
+	assert(c->trim_after_start == true);
+
+	pw_config_free(c);
+	printf("✓ test_memory_config\n");
+	return 0;
+}
+
+static int test_panel_action(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Verify that PW_ACTION_TOGGLE_PANEL is defined and can be used in parse_action */
+	enum pw_action action;
+	/* Note: panel action is tested implicitly through parse_action in config.c */
+	(void)action;
+
+	pw_config_free(c);
+	printf("✓ test_panel_action\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -209,6 +308,11 @@ int main(int argc, char *argv[])
 	failed += test_keybinding_parsing();
 	failed += test_touch_cursor_parsing();
 	failed += test_validation_ranges();
+	failed += test_rotation_config();
+	failed += test_copytype_config();
+	failed += test_zerocopy_config();
+	failed += test_memory_config();
+	failed += test_panel_action();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

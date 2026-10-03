@@ -65,3 +65,48 @@ color = #101010
 # fill = #2050c0
 # outline = #ffffff
 # frame_interval_ms = 83
+
+[rotation]
+# Per-output rotation mode override.
+# "<output name> = <mode>" or "* = <mode>".
+# Modes: auto (default, uses hardware rotation when available), hardware, software.
+# auto uses the DRM plane rotation property when the plane supports it (e.g., MediaQ),
+# else software rotation. hardware asks for the plane rotation and falls back to software
+# rotation (with an error in the log) if it is not available. software always uses software rotation in the renderer.
+# DSI-1 = hardware
+# * = auto
+
+[copytype]
+# Per-output copy-type override (damage-clip framebuffer copies to VRAM).
+# "<output name> = <type>" or "* = <type>".
+# Types: auto (default, enabled for drivers that benefit), yes, no.
+# Requires the kernel driver to support DRM_IOCTL_MODE_OBJ_GETPROPERTIES
+# (FB_DAMAGE_CLIPS). Drivers: mq11xx, w100, sa1100-lcdc (copy-type);
+# pxa-lcdc (scans DMA buffers, no copy).
+# DSI-1 = auto
+# * = auto
+
+[zerocopy]
+# Zero-copy and single-buffer client support.
+# enable: advertise picowl-buffer-v1 and DMA-BUF feedback (default true).
+# single_buffer: allow single-buffer (non-double-buffered) clients on
+#   copy-type outputs where they are safe (default true).
+# panel_autohide: hide the panel while an app is fullscreen (default true).
+# enable = true
+# single_buffer = true
+# panel_autohide = true
+
+[memory]
+# Memory allocator tuning (M_* malloc() environment variables).
+# arena_max: number of arenas (1 per CPU core by default). Range: 1..8 (default 1).
+# trim_threshold_kb: bytes of excess before malloc_trim() on idle (default 256).
+# mmap_threshold_kb: size threshold for mmap-allocated blocks in kB (default 128).
+# top_pad_kb: extra bytes reserved at the top of the heap in kB (default 16).
+# trim_after_start: call malloc_trim() once after startup (default true).
+# Ranges: trim_threshold_kb 0..65536, mmap_threshold_kb 16..4096, top_pad_kb 0..65536;
+# out-of-range values are rejected and the default is kept.
+# arena_max = 1
+# trim_threshold_kb = 256
+# mmap_threshold_kb = 128
+# top_pad_kb = 16
+# trim_after_start = true
