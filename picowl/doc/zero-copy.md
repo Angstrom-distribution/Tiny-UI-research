@@ -143,7 +143,7 @@ swapchain cannot be created at all, one INFO line "single-buffer off" names the
 reason.
 
 Patch 0003 makes this safe: the page-flip handler releases the scanned-out fb
-(`drm_fb_move(&plane->current_fb, &plane->queued_fb)`), `drm_atomic_connector_prepare`
+(`drm_fb_clear(&plane->current_fb)` after the queued-to-current move), `drm_atomic_connector_prepare`
 (FB_DAMAGE_CLIPS) and `pick_max_bpc` guard against `primary_fb == NULL`, and the
 copy-type drop is atomic only.
 
@@ -171,7 +171,7 @@ rotated image is produced by the display controller, not by the CPU.
   possibly swapping the 90 and 270 rows (kernel convention to be confirmed on
   hardware).
 - `set_hw_rotation` is legal only while the output is disabled. It swaps the
-  mode dimensions, sets `output->current_mode = NULL` and assigns
+  mode dimensions, sets `output->current_mode = NULL` and zeroes
   `output->width/height`. The NULL `current_mode` is essential:
   `output_compare_state` compares the mode pointer, and `wlr_output_commit_state`
   strips unchanged fields, so re-committing the same mode would be a no-op and

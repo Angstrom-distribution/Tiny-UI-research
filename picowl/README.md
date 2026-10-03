@@ -68,7 +68,7 @@ Config file is INI format, read from `$XDG_CONFIG_HOME/picowl/picowl.ini` (defau
 ### [render] section
 
 - `format = RGB565 | XRGB8888 | ARGB8888`
-  - Preferred pixel format for rendering. If the backend cannot provide it, falls back to the backend default (usually the scanout format). Default: RGB565.
+  - Preferred pixel format for rendering. If the backend cannot provide it, falls back to XRGB8888. Default: RGB565.
 
 ### [output] section
 

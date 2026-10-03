@@ -15,7 +15,7 @@ Upstream-Status: Inappropriate [picowl specific]
  3 files changed, 191 insertions(+), 20 deletions(-)
 
 diff --git a/include/render/pixman.h b/include/render/pixman.h
-index f9fbf4fe..27a8aa07 100644
+index cbc2e969..2dce9aee 100644
 --- a/include/render/pixman.h
 +++ b/include/render/pixman.h
 @@ -14,6 +14,11 @@ struct wlr_pixman_pixel_format {
@@ -30,7 +30,7 @@ index f9fbf4fe..27a8aa07 100644
  struct wlr_pixman_renderer {
  	struct wlr_renderer wlr_renderer;
  
-@@ -30,6 +35,14 @@ struct wlr_pixman_buffer {
+@@ -31,6 +36,14 @@ struct wlr_pixman_buffer {
  
  	pixman_image_t *image;
  
@@ -45,7 +45,7 @@ index f9fbf4fe..27a8aa07 100644
  	struct wl_listener buffer_destroy;
  	struct wl_list link; // wlr_pixman_renderer.buffers
  };
-@@ -66,11 +79,6 @@ struct wlr_pixman_texture {
+@@ -67,11 +80,6 @@ struct wlr_pixman_texture {
  	struct wlr_buffer *buffer; // if created via texture_from_buffer
  };
  
@@ -325,10 +325,10 @@ index 2c159c2b..3720f1ca 100644
  	wlr_buffer_lock(buffer->buffer);
  	pass->buffer = buffer;
 diff --git a/render/pixman/renderer.c b/render/pixman/renderer.c
-index f1c77719..bc8a243f 100644
+index f9f01938..d8a998a2 100644
 --- a/render/pixman/renderer.c
 +++ b/render/pixman/renderer.c
-@@ -275,6 +275,9 @@ static void destroy_buffer(struct wlr_pixman_buffer *buffer) {
+@@ -316,6 +316,9 @@ static void destroy_buffer(struct wlr_pixman_buffer *buffer) {
  	wl_list_remove(&buffer->buffer_destroy.link);
  
  	pixman_image_unref(buffer->image);
