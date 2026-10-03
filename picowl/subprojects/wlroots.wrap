@@ -4,7 +4,7 @@ revision = 0.19.0
 depth = 1
 # picowl patches, relative to subprojects/packagefiles (keep in sync with
 # oe/recipes-graphics/wlroots/files)
-diff_files = wlroots/0001-pixman-read-dmabuf-client-buffers-via-mmap.patch, wlroots/0002-pixman-pass-memcpy-and-fill-fast-paths.patch, wlroots/0003-drm-hardware-rotation-and-copy-type.patch
+diff_files = wlroots/0001-pixman-read-dmabuf-client-buffers-via-mmap.patch, wlroots/0002-pixman-pass-memcpy-and-fill-fast-paths.patch, wlroots/0003-drm-hardware-rotation-and-copy-type.patch, wlroots/0004-drm-lease-overlay-planes.patch
 
 [provide]
 dependency_names = wlroots-0.19

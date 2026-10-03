@@ -1,0 +1,133 @@
+From: picowl <picowl@localhost>
+Subject: [PATCH 4/4] backend/drm: lease overlay planes, fix the lease grant use-after-free
+
+wlr_drm_create_lease() leased only the connector, its CRTC, the primary and
+the cursor plane. A KMS client could therefore never use an overlay plane
+(MediaQ and w100 YUV overlays). Remember each plane's possible_crtcs and add
+every overlay plane that can scan out on the leased CRTC. Without libliftoff
+wlroots never uses overlay planes, so this takes nothing from the compositor.
+
+wlr_drm_lease_request_v1_grant() stored the request's
+wlr_drm_lease_connector_v1 pointers in the lease, but creating the lease
+destroys the leased outputs, and that frees those connectors. It then wrote
+active_lease through the freed pointers, and lease_handle_destroy() wrote
+through them again when the lease ended. The connectors are always withdrawn
+by the grant, so the lease keeps no pointers to them.
+
+WLR_DRM_LEASE_OVERLAY_PLANES in <wlr/backend/drm.h> tells the compositor that
+the patch is applied.
+
+Upstream-Status: Inappropriate [picowl specific]
+---
+ backend/drm/drm.c         | 23 ++++++++++++++++++++++-
+ include/backend/drm/drm.h |  2 ++
+ include/wlr/backend/drm.h |  6 ++++++
+ types/wlr_drm_lease_v1.c  | 17 ++++-------------
+ 4 files changed, 34 insertions(+), 14 deletions(-)
+
+diff --git a/backend/drm/drm.c b/backend/drm/drm.c
+index fd8aedef..e17fc38f 100644
+--- a/backend/drm/drm.c
++++ b/backend/drm/drm.c
+@@ -171,6 +171,7 @@ static bool init_plane(struct wlr_drm_backend *drm,
+ 
+ 	p->type = type;
+ 	p->id = id;
++	p->possible_crtcs = drm_plane->possible_crtcs;
+ 	p->props = props;
+ 	p->initial_crtc_id = drm_plane->crtc_id;
+ 
+@@ -2294,7 +2295,7 @@ struct wlr_drm_lease *wlr_drm_create_lease(struct wlr_output **outputs,
+ 			get_drm_backend_from_backend(outputs[0]->backend);
+ 
+ 	int n_objects = 0;
+-	uint32_t objects[4 * n_outputs + 1];
++	uint32_t objects[3 * n_outputs + drm->num_planes + 1];
+ 	for (size_t i = 0; i < n_outputs; ++i) {
+ 		struct wlr_drm_connector *conn =
+ 				get_drm_connector_from_output(outputs[i]);
+@@ -2323,6 +2324,26 @@ struct wlr_drm_lease *wlr_drm_create_lease(struct wlr_output **outputs,
+ 			wlr_log(WLR_DEBUG, "Cursor plane %d", conn->crtc->cursor->id);
+ 			objects[n_objects++] = conn->crtc->cursor->id;
+ 		}
++
++		/* Overlay planes are never used without libliftoff, so they can go
++		 * to the lessee. A plane that several CRTCs can use is leased once. */
++		size_t crtc_idx = conn->crtc - drm->crtcs;
++		for (size_t j = 0; j < drm->num_planes; ++j) {
++			struct wlr_drm_plane *plane = &drm->planes[j];
++			if (plane->type != DRM_PLANE_TYPE_OVERLAY ||
++					!(plane->possible_crtcs & (UINT32_C(1) << crtc_idx))) {
++				continue;
++			}
++
++			bool leased = false;
++			for (int k = 0; k < n_objects; ++k) {
++				leased = leased || objects[k] == plane->id;
++			}
++			if (!leased) {
++				wlr_log(WLR_DEBUG, "Overlay plane %d", plane->id);
++				objects[n_objects++] = plane->id;
++			}
++		}
+ 	}
+ 
+ 	assert(n_objects != 0);
+diff --git a/include/backend/drm/drm.h b/include/backend/drm/drm.h
+index 0f1df46f..1d9b3f45 100644
+--- a/include/backend/drm/drm.h
++++ b/include/backend/drm/drm.h
+@@ -23,6 +23,8 @@ struct wlr_drm_viewport {
+ struct wlr_drm_plane {
+ 	uint32_t type;
+ 	uint32_t id;
++	/* Bit i is set if the plane can be used with wlr_drm_backend.crtcs[i] */
++	uint32_t possible_crtcs;
+ 
+ 	/* Only initialized on multi-GPU setups */
+ 	struct wlr_drm_surface mgpu_surf;
+diff --git a/include/wlr/backend/drm.h b/include/wlr/backend/drm.h
+index bbc4363a..7c123d37 100644
+--- a/include/wlr/backend/drm.h
++++ b/include/wlr/backend/drm.h
+@@ -60,6 +60,12 @@ uint32_t wlr_drm_connector_get_id(struct wlr_output *output);
+  */
+ int wlr_drm_backend_get_non_master_fd(struct wlr_backend *backend);
+ 
++/**
++ * Defined if wlr_drm_create_lease() also leases the overlay planes which can
++ * scan out on the CRTC of the leased output (and the lease grant is safe).
++ */
++#define WLR_DRM_LEASE_OVERLAY_PLANES 1
++
+ /**
+  * Leases the given outputs to the caller. The outputs must be from the
+  * associated DRM backend.
+diff --git a/types/wlr_drm_lease_v1.c b/types/wlr_drm_lease_v1.c
+index c64bb089..d021cf8d 100644
+--- a/types/wlr_drm_lease_v1.c
++++ b/types/wlr_drm_lease_v1.c
+@@ -180,19 +180,10 @@ struct wlr_drm_lease_v1 *wlr_drm_lease_request_v1_grant(
+ 		return NULL;
+ 	}
+ 
+-	lease->connectors = calloc(request->n_connectors, sizeof(*lease->connectors));
+-	if (!lease->connectors) {
+-		wlr_log(WLR_ERROR, "Failed to allocate lease connectors list");
+-		close(fd);
+-		wp_drm_lease_v1_send_finished(lease->resource);
+-		free(lease);
+-		return NULL;
+-	}
+-	lease->n_connectors = request->n_connectors;
+-	for (size_t i = 0; i < request->n_connectors; ++i) {
+-		lease->connectors[i] = request->connectors[i];
+-		lease->connectors[i]->active_lease = lease;
+-	}
++	/* Creating the lease destroyed the leased outputs, which freed their
++	 * wlr_drm_lease_connector_v1, so the lease must not point at them. */
++	lease->connectors = NULL;
++	lease->n_connectors = 0;
+ 
+ 	lease->destroy.notify = lease_handle_destroy;
+ 	wl_signal_add(&lease->drm_lease->events.destroy, &lease->destroy);

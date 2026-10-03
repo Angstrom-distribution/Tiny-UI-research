@@ -1,12 +1,14 @@
 # wlroots 0.19 patches for picowl
 
-Three patches against wlroots 0.19.0 (commit 13a62a23). They add what picowl
+Four patches against wlroots 0.19.0 (commit 13a62a23). They add what picowl
 needs on GPU-less iPAQ-class devices: the pixman renderer reads client
 DMA-BUFs, the pixman render pass copies and fills without per-frame
-allocations, and the DRM backend can rotate in hardware and knows about
-copy-type drivers. The patches only add mechanisms; policy (which output is
-copy-type, when to rotate in hardware, the single-buffer swapchain) is picowl
-code in `src/output.c`, `src/copytype.c` and `src/zerocopy.c`.
+allocations, the DRM backend can rotate in hardware and knows about
+copy-type drivers, and a DRM lease includes the overlay planes and no longer
+writes to freed memory. The patches only add mechanisms; policy (which output
+is copy-type, when to rotate in hardware, the single-buffer swapchain, who
+may lease) is picowl code in `src/output.c`, `src/copytype.c`,
+`src/zerocopy.c` and `src/lease.c`.
 
 They are applied by:
 
@@ -26,6 +28,13 @@ bool wlr_drm_connector_supports_hw_rotation(struct wlr_output *output,
 bool wlr_drm_connector_set_hw_rotation(struct wlr_output *output,
 	enum wl_output_transform transform);
 void wlr_drm_connector_set_copy_type(struct wlr_output *output, bool copy_type);
+```
+
+Patch 0004 adds no function, only a feature macro (`include/wlr/backend/drm.h`),
+which picowl's `meson.build` checks at configure time:
+
+```c
+#define WLR_DRM_LEASE_OVERLAY_PLANES 1
 ```
 
 Patch 0001 also reads the environment variable
@@ -190,6 +199,44 @@ in `src/copytype.c`, the one-slot swapchain (`single_buffer`, RGB565,
 `copy_type` event for clients, and the log line `output NAME: driver 'X'
 copy_type=yes|no rotation_mode=auto|hardware|software`.
 
+## 0004-drm-lease-overlay-planes.patch
+
+**What:** `wlr_drm_create_lease()` also leases the overlay planes, and
+`wlr_drm_lease_request_v1_grant()` no longer writes to freed memory.
+
+**Why:** a lessee (the media player, `--vo drm:lease`) can only use objects
+that are in the lease, and stock wlroots 0.19 leases the connector, its CRTC,
+the CRTC's primary plane and its cursor plane, never an overlay plane (the
+hx4700 w100 overlay). Separately, the grant is a use-after-free (below).
+
+**How:**
+
+1. `struct wlr_drm_plane` gets `possible_crtcs`, filled in `init_plane()` from
+   `drmModePlane`.
+2. `wlr_drm_create_lease()` sizes its `objects[]` array as
+   `3 * n_outputs + drm->num_planes + 1` and adds every
+   `DRM_PLANE_TYPE_OVERLAY` plane of `drm->planes` whose `possible_crtcs` has
+   the bit of the leased CRTC. A plane which several CRTCs can use is added
+   once (the kernel rejects a duplicate object). Without libliftoff wlroots
+   never uses overlay planes, so this takes nothing from the compositor.
+3. `wlr_drm_lease_request_v1_grant()` kept the request's
+   `wlr_drm_lease_connector_v1` pointers in the lease and wrote
+   `active_lease` through them. But `wlr_drm_create_lease()` destroys the
+   leased outputs, which frees those connectors through
+   `handle_output_destroy()`, so both that write and the one in
+   `lease_handle_destroy()` at the end of the lease hit freed memory. The
+   connectors are always withdrawn by a grant, so the lease now keeps none
+   (`connectors = NULL`, `n_connectors = 0`).
+
+Whether a later upstream release fixes (3) was not checked (no network access
+when the patch was written). The overlay planes of the out-of-tree iPAQ
+drivers are unverified: check `modetest -p` for their `possible_crtcs`.
+
+**Tests:** none run in the build container (no `/dev/dri`).
+`tests/lease-vkms.sh` runs a full lease on vkms (needs root); with ASan builds
+of picowl and wlroots it catches the use-after-free, and with
+`PW_LEASE_EXPECT_OVERLAY=1` it checks that the overlay is in the lease.
+
 ## Updating the patches
 
 The patches apply with `patch -p1` to a pristine wlroots 0.19.0 tree, in order.
@@ -201,7 +248,7 @@ To change one:
 3. Regenerate each patch from its commit with the same `git format-patch` style
    header (keep the `From:`/`Subject:` lines and the description; `git diff
    --abbrev=8` for the body, `--stat=80` for the diffstat).
-4. Copy the three `.patch` files into both `subprojects/packagefiles/wlroots/`
+4. Copy the four `.patch` files into both `subprojects/packagefiles/wlroots/`
    and `oe/recipes-graphics/wlroots/files/`; the two sets must be
    byte-identical:
 
