@@ -1,2 +1,3 @@
 option('tests', type: 'boolean', value: true, description: 'Build the unit tests (tests/)')
 option('systemd', type: 'feature', value: 'auto', description: 'Install the systemd unit')
+option('tools', type: 'boolean', value: true, description: 'Build and install host tools (picowl-cursor-convert)')

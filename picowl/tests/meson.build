@@ -27,3 +27,17 @@ pw_test_client = executable('pw-test-client',
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client],
   timeout: 30)
+
+test_cursorfit_exe = executable('test-cursorfit',
+  'test-cursorfit.c',
+  link_with: pwcursorfit,
+  include_directories: include_directories('../src'),
+)
+test('cursorfit', test_cursorfit_exe)
+
+test_cursor_builtin_exe = executable('test-cursor-builtin',
+  'test-cursor-builtin.c',
+  link_with: pwcursorfit,
+  include_directories: include_directories('../src'),
+)
+test('cursor-builtin', test_cursor_builtin_exe)

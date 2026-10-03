@@ -59,6 +59,12 @@ sources = files(
   'src/idle.c',
 )
 
+pwcursorfit = static_library(
+  'pwcursorfit',
+  'src/cursorfit.c', 'src/cursor-builtin.c',
+  include_directories: include_directories('src'),
+)
+
 picowl_exe = executable(
   'picowl',
   sources, protocol_headers,
@@ -73,6 +79,10 @@ systemd = dependency('systemd', required: get_option('systemd'))
 if systemd.found()
   unitdir = systemd.get_variable(pkgconfig: 'systemdsystemunitdir', default_value: get_option('prefix') / 'lib/systemd/system')
   install_data('data/picowl.service', install_dir: unitdir)
+endif
+
+if get_option('tools')
+  subdir('tools')
 endif
 
 if get_option('tests')
