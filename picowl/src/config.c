@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <wayland-util.h>
 #include <drm_fourcc.h>
 #include "picowl.h"
@@ -112,14 +113,59 @@ static bool parse_hold_action(const char *str, enum pw_hold_action *action)
 	return false;
 }
 
+/* Parse boolean value and return success. On invalid value, return false and keep the previous value.
+ * This version logs errors. For use in config parsing where we want to report problems. */
+static bool parse_bool_log(const char *str, const char *key, bool *out)
+{
+	if (!str || !out)
+		return false;
+
+	/* Make case-insensitive by converting to lowercase for comparison */
+	char lower[16];
+	size_t len = strlen(str);
+	if (len >= sizeof(lower))
+		return false;  /* Too long */
+
+	for (size_t i = 0; i <= len; i++)
+		lower[i] = tolower((unsigned char)str[i]);
+
+	/* Accept yes/no/true/false/1/0/on/off (case-insensitive) */
+	if (strcmp(lower, "yes") == 0 || strcmp(lower, "true") == 0 ||
+	    strcmp(lower, "1") == 0 || strcmp(lower, "on") == 0) {
+		*out = true;
+		return true;
+	}
+	if (strcmp(lower, "no") == 0 || strcmp(lower, "false") == 0 ||
+	    strcmp(lower, "0") == 0 || strcmp(lower, "off") == 0) {
+		*out = false;
+		return true;
+	}
+
+	/* Invalid value: log and keep previous value */
+	if (key)
+		pw_log(WLR_ERROR, "Invalid boolean value for '%s': %s (use yes/no, true/false, 1/0, or on/off)", key, str);
+	return false;
+}
+
+/* Backward-compatible version without logging. */
 static bool parse_bool(const char *str)
 {
-	/* Accept yes/no/true/false/1/0/on/off */
-	if (strcmp(str, "yes") == 0 || strcmp(str, "true") == 0 ||
-	    strcmp(str, "1") == 0 || strcmp(str, "on") == 0)
+	if (!str)
+		return false;
+
+	char lower[16];
+	size_t len = strlen(str);
+	if (len >= sizeof(lower))
+		return false;
+
+	for (size_t i = 0; i <= len; i++)
+		lower[i] = tolower((unsigned char)str[i]);
+
+	if (strcmp(lower, "yes") == 0 || strcmp(lower, "true") == 0 ||
+	    strcmp(lower, "1") == 0 || strcmp(lower, "on") == 0)
 		return true;
-	if (strcmp(str, "no") == 0 || strcmp(str, "false") == 0 ||
-	    strcmp(str, "0") == 0 || strcmp(str, "off") == 0)
+	if (strcmp(lower, "no") == 0 || strcmp(lower, "false") == 0 ||
+	    strcmp(lower, "0") == 0 || strcmp(lower, "off") == 0)
 		return false;
 	return false; /* Invalid, use default */
 }
@@ -220,23 +266,57 @@ struct pw_config *pw_config_load(const char *path)
 		return NULL;
 
 	FILE *f = NULL;
+	const char *loaded_path = NULL;
+
 	if (path) {
+		/* Explicit path from -c: must succeed */
 		f = fopen(path, "r");
+		if (!f) {
+			pw_log(WLR_ERROR, "Failed to open config file '%s': %s", path, strerror(errno));
+			return c; /* Still return defaults, but log the error */
+		}
+		loaded_path = path;
 	} else {
 		/* Try XDG_CONFIG_HOME/picowl/picowl.ini first */
-		const char *home = getenv("HOME");
-		if (home) {
+		const char *xdg_config = getenv("XDG_CONFIG_HOME");
+		if (xdg_config && xdg_config[0]) {
 			char buf[512];
-			snprintf(buf, sizeof(buf), "%s/.config/picowl/picowl.ini", home);
+			snprintf(buf, sizeof(buf), "%s/picowl/picowl.ini", xdg_config);
 			f = fopen(buf, "r");
+			if (f) {
+				loaded_path = buf;
+			}
 		}
-		/* Try /etc/picowl.ini as fallback */
-		if (!f)
+
+		/* Try HOME/.config/picowl/picowl.ini */
+		if (!f) {
+			const char *home = getenv("HOME");
+			if (home) {
+				char buf[512];
+				snprintf(buf, sizeof(buf), "%s/.config/picowl/picowl.ini", home);
+				f = fopen(buf, "r");
+				if (f) {
+					loaded_path = buf;
+				}
+			}
+		}
+
+		/* Try /etc/picowl.ini as final fallback */
+		if (!f) {
 			f = fopen("/etc/picowl.ini", "r");
+			if (f) {
+				loaded_path = "/etc/picowl.ini";
+			}
+		}
+
+		if (!f) {
+			pw_log(WLR_INFO, "No config file found; using defaults");
+			return c; /* Missing file in implicit search is not an error */
+		}
 	}
 
-	if (!f)
-		return c; /* Missing file is not an error */
+	if (!loaded_path)
+		loaded_path = "(unknown)";
 
 	char line[1024];
 	const char *section = NULL;
@@ -438,11 +518,13 @@ struct pw_config *pw_config_load(const char *path)
 		} else if (strcmp(section, "zerocopy") == 0) {
 			/* Zero-copy and memory settings */
 			if (strcmp(key, "enable") == 0) {
-				c->zerocopy = parse_bool(val);
+				parse_bool_log(val, "zerocopy.enable", &c->zerocopy);
 			} else if (strcmp(key, "single_buffer") == 0) {
-				c->single_buffer = parse_bool(val);
+				parse_bool_log(val, "zerocopy.single_buffer", &c->single_buffer);
 			} else if (strcmp(key, "panel_autohide") == 0) {
-				c->panel_autohide = parse_bool(val);
+				parse_bool_log(val, "zerocopy.panel_autohide", &c->panel_autohide);
+			} else {
+				pw_log(WLR_ERROR, "Unknown key in [zerocopy]: %s", key);
 			}
 		} else if (strcmp(section, "memory") == 0) {
 			/* Memory configuration */
@@ -475,7 +557,9 @@ struct pw_config *pw_config_load(const char *path)
 					pw_log(WLR_ERROR, "top_pad_kb out of range [0..65536], using default");
 				}
 			} else if (strcmp(key, "trim_after_start") == 0) {
-				c->trim_after_start = parse_bool(val);
+				parse_bool_log(val, "memory.trim_after_start", &c->trim_after_start);
+			} else {
+				pw_log(WLR_ERROR, "Unknown key in [memory]: %s", key);
 			}
 		} else if (strcmp(section, "core") == 0) {
 			/* [core] section for backwards compatibility */
@@ -555,7 +639,11 @@ struct pw_config *pw_config_load(const char *path)
 					} else {
 						pw_log(WLR_INFO, "[power.low] max_brightness_pct %d out of range [1..100], using default 40", val_int);
 					}
+				} else {
+					pw_log(WLR_ERROR, "Unknown key in [power.%s]: %s", profile_name, key);
 				}
+			} else {
+				pw_log(WLR_ERROR, "Unknown power profile: [power.%s]", profile_name);
 			}
 		} else {
 			pw_log(WLR_INFO, "Unknown config section: [%s]", section);
@@ -564,6 +652,10 @@ struct pw_config *pw_config_load(const char *path)
 
 	fclose(f);
 	free((void*)section);
+
+	/* Log which config file was loaded */
+	if (loaded_path)
+		pw_log(WLR_INFO, "Loaded config from %s", loaded_path);
 
 	/* Backwards compatibility: if legacy [idle] timeout_ms (or [core] idle_timeout_ms) was set and no
 	 * [power.*] blank_after_s was configured, apply it to all profiles. */
