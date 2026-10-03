@@ -437,6 +437,10 @@ void pw_output_rotate(struct pw_output *o, enum wl_output_transform t);
  * Implemented in input.c. */
 void pw_input_apply_rotation(struct pw_server *s, struct pw_output *o);
 
+/* Unmap touch devices from output gone, which is about to be destroyed, and
+ * remap them to another output if one remains. Implemented in input.c. */
+void pw_input_output_removed(struct pw_server *s, struct pw_output *gone);
+
 /* Recompute panel visibility (autohide). Implemented in layer.c. */
 void pw_panel_update(struct pw_server *s);
 

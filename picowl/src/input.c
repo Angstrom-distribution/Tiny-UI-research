@@ -485,6 +485,25 @@ void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
 #endif
 }
 
+/* wlr_cursor keeps a raw pointer to the output a touch device is mapped to:
+ * unmap it before the output is freed and follow a surviving output. */
+void pw_input_output_removed(struct pw_server *server, struct pw_output *gone)
+{
+	if (!server->cursor)
+		return;
+	struct pw_touch_dev *t;
+	wl_list_for_each(t, &touch_devs, link)
+		wlr_cursor_map_input_to_output(server->cursor, t->dev, NULL);
+
+	struct pw_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (o != gone) {
+			pw_input_apply_rotation(server, o);
+			break;
+		}
+	}
+}
+
 static int64_t now_ms(void)
 {
 	struct timespec ts;
