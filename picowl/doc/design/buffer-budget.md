@@ -318,7 +318,7 @@ Hardware-only checklist (hx4700 and h2200 at least, plus the h3970 for the CMA p
 | `pw-test-client --zerocopy-count` and the hardware checklist on 2-3 boards | 0.5-1 day [est] |
 | **Total** | **about 2-2.75 days [est]**, about 250 lines of C including tests [est] |
 
-## 10. Implementation notes
+## Implementation notes
 
 - **Shared rule type.** The per-app-hold plan landed first with `struct pw_app_rule` (kind `PW_RULE_APP` or `PW_RULE_LAYER`, list `pw_config.app_rules`), so the plan's `struct pw_app_config` and `apps` list do not exist. The buffer fields (`zb_buffers`, `zb_budget_kb`, `zb_pool`, `exe`) were added to `pw_app_rule`. `pw_config_app()` returns the `PW_RULE_APP` rule for an app_id. `zerocopy_*` keys and `exe` are accepted only in `[app.*]`; in `[layer.*]` they fall into the "unknown key" log.
 - **Parsing.** One helper, `parse_int_log()`, does the range checks with `strtol` and rejects trailing junk (the plan said `atoi`). `total_kb` accepts 0..65536. A rule gets a pool if `zerocopy_buffers` or `zerocopy_budget_kb` was accepted; pool numbers are assigned after parsing, so merged sections and bad values are settled first. `exe` needs `realpath()`, so `config.c` defines `_XOPEN_SOURCE 700` (the project's `_POSIX_C_SOURCE` alone hides it in glibc).

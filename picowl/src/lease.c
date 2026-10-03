@@ -110,6 +110,11 @@ static void handle_request(struct wl_listener *listener, void *data)
 	/* The lessee modesets a display which picowl must not think is blank. */
 	if (server->blanked)
 		pw_power_set_blanked(server, false);
+	if (server->blanked) {
+		pw_log(WLR_INFO, "lease: rejected (cannot unblank the output)");
+		wlr_drm_lease_request_v1_reject(req);
+		return;
+	}
 
 	/* On failure wlroots has sent `finished` already, and the request is not
 	 * rejected a second time here. picowl keeps the output. */

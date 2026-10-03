@@ -255,7 +255,7 @@ All are in the copyrel style (`tests/test-copyrel.c`): `assert` plus `printf("ok
 4. **Per-buffer `caching`.** Needed only if a second allocator ever appears (multi-GPU, udmabuf): `picowl_buffer_v1.caching` at v3, sent before `done`.
 5. **Ship v2 together with the per-app budget?** They are independent; the budget changes no wire format. Bundling them only saves one docs pass.
 
-## 10. Implementation notes
+## Implementation notes
 
 - **As planned.** The XML diff of §2.4, the `pw_caching_*` functions in `copytype.c/.h`, `pw_zbproto_send_bind` in `zbproto.c/.h` (the version gate uses `PICOWL_BUFFER_MANAGER_V1_CACHING_SINCE_VERSION`), `PW_ZB_MGR_VERSION 2` (defined in `zbproto.h` instead of `zerocopy.c`, so the test can see it), `[zerocopy] caching`, the start-up log line, and the driver table (sa1100-lcdc is `write_combined`; the §9 Q1 default stands). `mgr_create_buffer` is unchanged and already creates the buffer at the manager's version. `struct pw_copyrel` and the re-send loops are untouched.
 - **Driver table.** `pw_caching_driver` lists only the cacheable names (mq11xx, mediaq, w100, imageon); everything else, sa1100 aliases included, falls to `write_combined`. The test keeps the list mirroring `pw_copytype_driver` with an expected value for each entry, so a new copy-type driver is a conscious choice. The comment in `pw_copytype_driver` that called sa1100-lcdc a shmem driver was fixed.

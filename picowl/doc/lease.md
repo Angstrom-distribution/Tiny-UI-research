@@ -43,7 +43,7 @@ picowl has no outputs (wlroots destroys the `wlr_output` and creates it again wh
 | Power | Dimming and blanking are held (`PW_INHIBIT_LEASE`, see `doc/power.md`). A blanked screen is unblanked before the grant. Normal timeouts restart from the end of the lease |
 | Keyboard | Unchanged: the lessee's toplevel keeps the focus and gets the keys |
 | Keybindings | `blank` (the power key), `cycle`, `spawn`, `panel`: end the lease first, then run. `close` and `quit` run as usual (the lease ends with the client or the compositor). `rotate` is ignored: the player owns scanout |
-| Touch | Every touch device is mapped to the region `{0,0,W,H}` in panel-native mode pixels and gets its default calibration matrix, so the player receives pointer coordinates in the frame its KMS code renders in, on hardware- and software-rotation boards alike. The lessee's toplevel is the target. Tap-and-hold works (`BTN_RIGHT`), without the animation |
+| Touch | Every touch device is mapped to the region `{0,0,W,H}` in panel-native mode pixels and gets its default calibration matrix, so the player receives pointer coordinates in the frame its KMS code renders in, on hardware- and software-rotation boards alike. The lessee's toplevel is the target. Tap-and-hold follows the lessee's `[app.<app_id>]` hold settings (`BTN_RIGHT` by default, nothing with `hold_action = none`), without the animation. A blanked screen that cannot be unblanked rejects the lease |
 | Focus | New toplevels and activation requests (xdg-activation, foreign-toplevel) do not take the focus. New toplevels stack behind the lessee, so a pop-up does not end playback |
 | Views and panel | No configures go out. The panel's layer surface is closed with the output, as after a VT switch; it re-creates its surface on the next `wl_output` |
 | Lessee unmaps or is destroyed | picowl revokes |
@@ -82,7 +82,7 @@ Hardware checklist (h2210, h5550, hx4700, h3870, h3970), with `-d 3`:
 - [ ] `mediaplayer --vo drm:lease` gets the fd; `drmModeGetLease` lists the expected objects (on the hx4700 the overlay too).
 - [ ] MediaQ C8 and doubling, and the hx4700 overlay, play; drops match bare `--vo drm`.
 - [ ] No dimming or blanking during a lease longer than `blank_after_s`; normal timeouts resume afterwards.
-- [ ] A tap reaches the player in native pixels on a rotated board; a hold gives `BTN_RIGHT`.
+- [ ] A tap reaches the player in native pixels on a rotated board; a hold gives `BTN_RIGHT` (or the per-app setting).
 - [ ] Power key: the lease ends and the screen blanks. App-cycle key: the lease ends and the next view is shown.
 - [ ] Player exit and `kill -9`: picowl repaints with hardware rotation, copy type, touch matrix and panel back. Measure the restore time.
 - [ ] `chvt` away while leased: the player gets `finished`; `chvt` back: picowl's output returns (parking path).
