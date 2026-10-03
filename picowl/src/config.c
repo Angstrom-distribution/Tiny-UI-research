@@ -147,29 +147,6 @@ static bool parse_bool_log(const char *str, const char *key, bool *out)
 	return false;
 }
 
-/* Backward-compatible version without logging. */
-static bool parse_bool(const char *str)
-{
-	if (!str)
-		return false;
-
-	char lower[16];
-	size_t len = strlen(str);
-	if (len >= sizeof(lower))
-		return false;
-
-	for (size_t i = 0; i <= len; i++)
-		lower[i] = tolower((unsigned char)str[i]);
-
-	if (strcmp(lower, "yes") == 0 || strcmp(lower, "true") == 0 ||
-	    strcmp(lower, "1") == 0 || strcmp(lower, "on") == 0)
-		return true;
-	if (strcmp(lower, "no") == 0 || strcmp(lower, "false") == 0 ||
-	    strcmp(lower, "0") == 0 || strcmp(lower, "off") == 0)
-		return false;
-	return false; /* Invalid, use default */
-}
-
 static bool parse_hex_color(const char *str, uint32_t *out)
 {
 	/* Parse #RRGGBB as 0xRRGGBB */
@@ -267,6 +244,7 @@ struct pw_config *pw_config_load(const char *path)
 
 	FILE *f = NULL;
 	const char *loaded_path = NULL;
+	char cfgbuf[512]; /* backs loaded_path for the XDG/HOME cases */
 
 	if (path) {
 		/* Explicit path from -c: must succeed */
@@ -280,11 +258,10 @@ struct pw_config *pw_config_load(const char *path)
 		/* Try XDG_CONFIG_HOME/picowl/picowl.ini first */
 		const char *xdg_config = getenv("XDG_CONFIG_HOME");
 		if (xdg_config && xdg_config[0]) {
-			char buf[512];
-			snprintf(buf, sizeof(buf), "%s/picowl/picowl.ini", xdg_config);
-			f = fopen(buf, "r");
+			snprintf(cfgbuf, sizeof(cfgbuf), "%s/picowl/picowl.ini", xdg_config);
+			f = fopen(cfgbuf, "r");
 			if (f) {
-				loaded_path = buf;
+				loaded_path = cfgbuf;
 			}
 		}
 
@@ -292,11 +269,10 @@ struct pw_config *pw_config_load(const char *path)
 		if (!f) {
 			const char *home = getenv("HOME");
 			if (home) {
-				char buf[512];
-				snprintf(buf, sizeof(buf), "%s/.config/picowl/picowl.ini", home);
-				f = fopen(buf, "r");
+				snprintf(cfgbuf, sizeof(cfgbuf), "%s/.config/picowl/picowl.ini", home);
+				f = fopen(cfgbuf, "r");
 				if (f) {
-					loaded_path = buf;
+					loaded_path = cfgbuf;
 				}
 			}
 		}
