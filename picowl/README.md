@@ -1,11 +1,11 @@
 # picowl
 
-A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman, targeting sub-100ms latency and <2% idle CPU. Designed for embedded developers working with extreme constraints: read `../docs/ipaq-ui/` for the research, architecture, and hardware profiles.
+A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman. Designed for embedded developers working with extreme constraints: read `../docs/ipaq-ui/compositor.md` and `../docs/ipaq-ui/hardware.md` for the architecture, hardware rotation, memory optimization, and device profiles. Implementation details in `doc/buffers.md`, `doc/zero-copy.md`, and `subprojects/packagefiles/wlroots/README.md`.
 
 ## Status
 
-- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking, per-output rotation via config, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
-- **Planned**: zero-copy surface buffer model (mmap_ptr to avoid per-frame pixel copies on RGB565), MediaQ hardware rotation and pixel doubling (routes through DRM/KMS layer), video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths).
+- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is fullscreen, on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking, per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
+- **Planned**: video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths), C8 (8-bpp palettised) output on MediaQ (design and options documented in `doc/zero-copy.md`), fixing the per-commit `wlr_client_buffer` allocation in wlroots core. Hardware rotation, copy-type swapchain, and direct scanout are compiled and unit tested; the hardware paths still need the checklist in `doc/zero-copy.md` run on a device.
 - **Known constraints**: no general cursor theme (only the tap-and-hold wait animation is drawn by picowl), no window animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
 
 ## Build
@@ -21,8 +21,10 @@ ninja -C build
 
 **Dependencies:**
 - `wlroots 0.19` (fetched as meson subproject fallback if not installed)
-- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`
+- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`, `libinput`
 - C11 compiler, meson >= 1.3
+
+picowl carries three wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput is linked directly (touch calibration).
 
 `wlroots 0.19` is configured minimally: DRM/libinput backends, pixman renderer only, no GLES2/Vulkan/GBM. On OpenEmbedded systems (wrynose/blacksail), see `oe/README.md` for a prebuilt wlroots recipe.
 
@@ -82,6 +84,42 @@ DSI-1 = 90
 * = normal
 ```
 
+### [rotation] section
+
+Per-output rotation mode: `<output-name> = <mode>` (`*` matches any output).
+
+- `auto` (default): hardware rotation when the primary plane has the `rotation` property (MediaQ mq11xx only), else software.
+- `hardware`: require hardware rotation; logs an error and falls back if unsupported.
+- `software`: always rotate in the renderer.
+
+If the hardware result has the wrong size, picowl logs "hw rotation size mismatch" and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See `../docs/ipaq-ui/compositor.md § 5.3` for implementation details and `../docs/ipaq-ui/hardware.md § 5` for per-device rotation capabilities.
+
+### [copytype] section
+
+Per-output override of copy-type detection: `<output-name> = auto | yes | no`. `auto` detects the driver via `drmGetVersion`:
+- Copy-type (damage-clipped copy to VRAM): `mq11xx`, `w100`, `sa1100-lcdc`
+- Scanout (direct DMA read): `pxa-lcdc` and others
+
+Copy-type outputs use a single-buffer swapchain (kernel copies damage rectangles); scanout outputs may degrade to double-buffer if composition is needed. See `../docs/ipaq-ui/hardware.md` for device-specific details.
+
+### [zerocopy] section
+
+- `enable = true|false`: advertise picowl-buffer-v1 and custom linux-dmabuf feedback (default true). See `doc/buffers.md` for the protocol and client usage.
+- `single_buffer = true|false`: single-buffer swapchain on copy-type outputs when safe (RGB565, copy-type driver, no format change needed; default true). See `../docs/ipaq-ui/compositor.md § 5.4` for swapchain management.
+- `panel_autohide = true|false`: hide the panel while an app is focused so a single fullscreen buffer can be scanned out directly (reduces render list to 1 entry; default true). See `../docs/ipaq-ui/compositor.md § 7` for panel autohide behavior.
+
+### [memory] section
+
+malloc tuning via `mallopt`, applied before and after config is read. Reduces memory fragmentation and heap padding on constrained devices:
+
+- `arena_max` (default 1): Number of malloc arenas (1 per CPU core by default; constrain to 1 on single-core to reduce fragmentation).
+- `trim_threshold_kb` (default 256): Bytes of excess before malloc_trim() on idle.
+- `mmap_threshold_kb` (default 128): Size threshold for mmap-allocated blocks (range 16..4096 so malloc does not mmap tiny blocks).
+- `top_pad_kb` (default 16): Extra bytes reserved at heap top (range 0..65536).
+- `trim_after_start = true|false`: Call `malloc_trim(0)` once after startup (default true).
+
+Out-of-range values are rejected and the default is kept. Measured VmHWM (headless, 1280×720): 9.5 MB (baseline 9.4 MB). See `../docs/ipaq-ui/compositor.md § 5.4` for memory optimization strategy and `tests/rss.sh` for the RSS measurement test.
+
 ### [idle] section
 
 - `timeout_ms = <milliseconds>`
@@ -111,12 +149,13 @@ Keyboard shortcuts. Format: `<modifiers>+<key> = <action> [command]`.
 
 - `<modifiers>`: zero or more of `alt`, `ctrl`, `shift`, `logo` separated by `+`.
 - `<key>`: XKB keysym name (e.g., `Tab`, `F4`, `Return`), or a numeric evdev keycode as `code:116` (KEY_POWER).
-- `<action>`: `spawn`, `cycle`, `close`, `blank`, `rotate`, `quit`.
+- `<action>`: `spawn`, `cycle`, `close`, `blank`, `rotate`, `panel`, `quit`.
   - `spawn <command>`: fork and exec `/bin/sh -c <command>` (detached, no zombies).
   - `cycle`: raise the next mapped toplevel in stacking order.
   - `close`: send a close request to the focused toplevel.
   - `blank`: toggle screen on/off (same as Power key or output-power-management requests).
-  - `rotate`: cycle output rotation (planned, not yet implemented).
+  - `rotate`: cycle output rotation of the first output (normal, 90, 180, 270; keeps the flipped bit).
+  - `panel`: toggle the panel while panel autohide is active (forces it visible until focus changes).
   - `quit`: exit the compositor.
 - `[command]`: optional shell command for the `spawn` action.
 
@@ -219,6 +258,11 @@ For complete usage examples and troubleshooting, see **[doc/cursors.md](doc/curs
 
 ## Supported Protocols
 
+Overview of what picowl adds on top of the wlroots set below:
+
+- `picowl_buffer_manager_v1` / `picowl_buffer_v1` (`protocols/picowl-buffer-v1.xml`): compositor-allocated RGB565 dmabufs, `copy_type`, `copied` (direct scanout on copy-type outputs) and `retained` events so clients on copy-type outputs can use a single buffer until the compositor composites.
+- `zwp_linux_dmabuf_v1` v4 with hand-built feedback (RGB565/LINEAR, scanout tranche).
+
 Picowl advertises and implements (via wlroots 0.19):
 
 **XDG Shell & Core Composition:**
@@ -246,6 +290,31 @@ Picowl advertises and implements (via wlroots 0.19):
 **Power & Idle:**
 - `zwlr_output_power_management_v1`: screen blanking requests (dim/off).
 - `org_kde_kwin_idle_notify` (formerly `org_kde_kwin_idle`): idle timeout notifications (used by screen locker).
+
+## Testing
+
+```sh
+source <hostprefix>/env.sh
+meson setup build && meson test -C build
+WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
+```
+
+### Automated Tests (Headless)
+
+Tests: `config`, `smoke` (headless run, also with `--zerocopy`), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, cursor and touch-hold unit tests, and `rss`.
+
+- **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
+
+### Hardware Validation Checklist
+
+DRM paths (rotation, copy-type, swapchain, direct scanout) cannot run in the build container (no /dev/dri, no vkms); they are compiled and unit-tested only. On a real device, verify:
+
+- Hardware rotation: `check_hw_size` succeeds, touch calibration correct, no "hw rotation size mismatch" log
+- Copy-type single-buffer: swapchain stays at 1 slot, no "degraded to 2 slots" log
+- Direct scanout: scene logs it, render list is 1 entry, no composition
+- Damage clipping: only changed regions copied to VRAM
+
+See the hardware-only checklist in `doc/zero-copy.md`.
 
 ## OpenEmbedded / Yocto
 
