@@ -500,13 +500,17 @@ static void new_xdg_popup(struct wl_listener *l, void *data)
 
 /* ---- init ------------------------------------------------------------- */
 
-void pw_view_init(struct pw_server *server)
+bool pw_view_init(struct pw_server *server)
 {
 	the_server = server;
 	wl_list_init(&server->views);
 	server->focused_view = NULL;
 
 	server->xdg_shell = wlr_xdg_shell_create(server->display, 3);
+	if (!server->xdg_shell) {
+		pw_log(WLR_ERROR, "cannot create xdg shell");
+		return false;
+	}
 	server->foreign_toplevel_mgr = wlr_foreign_toplevel_manager_v1_create(server->display);
 	ext_list = wlr_ext_foreign_toplevel_list_v1_create(server->display, 1);
 
@@ -514,6 +518,7 @@ void pw_view_init(struct pw_server *server)
 	wl_signal_add(&server->xdg_shell->events.new_toplevel, &server->new_xdg_toplevel);
 	new_xdg_popup_listener.notify = new_xdg_popup;
 	wl_signal_add(&server->xdg_shell->events.new_popup, &new_xdg_popup_listener);
+	return true;
 }
 
 void pw_view_finish(struct pw_server *server)

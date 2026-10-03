@@ -316,8 +316,9 @@ void pw_output_update_geometry(struct pw_output *output);
  */
 
 /* Create the xdg-shell global, foreign-toplevel manager, and listeners. Apps
- * are always sized to the usable area (maximized). Called by pw_server_init(). */
-void pw_view_init(struct pw_server *server);
+ * are always sized to the usable area (maximized). Called by pw_server_init().
+ * Returns false on failure (logged). */
+bool pw_view_init(struct pw_server *server);
 
 /* Remove listeners that outlive their views (xdg popup). Called by
  * pw_server_finish() before the display is destroyed. */
@@ -368,8 +369,8 @@ bool pw_layer_has_exclusive_focus(struct pw_server *server);
 
 /* Create seat, cursor (no drawn cursor), virtual keyboard manager, and the
  * new_input listener; handle keyboards, touch and pointer. Called by
- * pw_server_init(). */
-void pw_input_init(struct pw_server *server);
+ * pw_server_init(). Returns false on failure (logged). */
+bool pw_input_init(struct pw_server *server);
 
 /* Remove the listeners installed by pw_input_init() so the cursor and seat
  * can be destroyed. Called by pw_server_finish() before wlr_cursor_destroy. */

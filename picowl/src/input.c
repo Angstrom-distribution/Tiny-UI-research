@@ -748,7 +748,7 @@ static void handle_request_set_cursor(struct wl_listener *l, void *data)
 	(void)l; (void)data;
 }
 
-void pw_input_init(struct pw_server *server)
+bool pw_input_init(struct pw_server *server)
 {
 	memset(&st, 0, sizeof(st));
 	wl_list_init(&touch_devs);
@@ -767,6 +767,16 @@ void pw_input_init(struct pw_server *server)
 	wl_list_init(&server->keyboards);
 	server->seat = wlr_seat_create(server->display, "seat0");
 	server->cursor = wlr_cursor_create();
+	server->virtual_keyboard_mgr =
+		wlr_virtual_keyboard_manager_v1_create(server->display);
+	if (!server->seat || !server->cursor || !server->virtual_keyboard_mgr) {
+		pw_log(WLR_ERROR, "cannot create seat, cursor or virtual keyboard");
+		/* no listeners yet: pw_input_finish must see no cursor */
+		if (server->cursor)
+			wlr_cursor_destroy(server->cursor);
+		server->cursor = NULL;
+		return false;
+	}
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
 	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
@@ -775,8 +785,6 @@ void pw_input_init(struct pw_server *server)
 	st.th_timer = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server->display), th_timer_cb, NULL);
 
-	server->virtual_keyboard_mgr =
-		wlr_virtual_keyboard_manager_v1_create(server->display);
 	server->new_virtual_keyboard.notify = handle_new_virtual_keyboard;
 	wl_signal_add(&server->virtual_keyboard_mgr->events.new_virtual_keyboard,
 		&server->new_virtual_keyboard);
@@ -810,6 +818,7 @@ void pw_input_init(struct pw_server *server)
 	wl_signal_add(&server->seat->events.request_set_cursor, &server->request_set_cursor);
 	server->request_set_selection.notify = handle_request_set_selection;
 	wl_signal_add(&server->seat->events.request_set_selection, &server->request_set_selection);
+	return true;
 }
 
 void pw_input_finish(struct pw_server *server)
