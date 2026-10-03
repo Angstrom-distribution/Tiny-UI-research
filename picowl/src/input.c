@@ -131,7 +131,12 @@ static void focus_surface(struct pw_server *server, struct wlr_surface *surface)
 		struct pw_view *view;
 		wl_list_for_each(view, &server->views, link) {
 			if (view->xdg_toplevel == top) {
-				if (view != server->focused_view)
+				/* An on-demand layer surface may hold the keyboard
+				 * while this view is still focused_view. */
+				struct wlr_surface *kf =
+					server->seat->keyboard_state.focused_surface;
+				if (view != server->focused_view ||
+				    (kf && wlr_layer_surface_v1_try_from_wlr_surface(kf)))
 					pw_view_focus(view);
 				return;
 			}
