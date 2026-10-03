@@ -151,6 +151,7 @@ struct pw_config {
 	struct wl_list rotation_modes; /* struct pw_output_rotmode */
 	struct wl_list copy_overrides; /* struct pw_output_copyover */
 	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
+	enum pw_caching_override caching_override; /* [zerocopy] caching (default auto) */
 	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
 	int zb_max_buffers;        /* buffers per client (default 3) */
 	int zb_budget_kb;          /* pool of clients without an [app.*] pool (default 2048) */

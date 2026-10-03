@@ -259,6 +259,7 @@ struct pw_config *pw_config_default(void)
 	wl_list_init(&c->rotation_modes);
 	wl_list_init(&c->copy_overrides);
 	c->zerocopy = true;
+	c->caching_override = PW_CACHING_OV_AUTO;
 	c->single_buffer = true;
 	c->zb_max_buffers = 3;
 	c->zb_budget_kb = 2048;
@@ -551,6 +552,11 @@ struct pw_config *pw_config_load(const char *path)
 				parse_bool_log(val, "zerocopy.panel_autohide", &c->panel_autohide);
 			} else if (strcmp(key, "max_buffers_per_client") == 0) {
 				parse_int_log(val, "max_buffers_per_client", 1, 32, &c->zb_max_buffers);
+			} else if (strcmp(key, "caching") == 0) {
+				if (!pw_caching_parse(val, &c->caching_override)) {
+					pw_log(WLR_ERROR, "Invalid [zerocopy] caching: %s (valid: auto, cacheable, write_combined)", val);
+					c->caching_override = PW_CACHING_OV_AUTO;
+				}
 			} else if (strcmp(key, "budget_kb") == 0) {
 				parse_int_log(val, "budget_kb", 0, 65536, &c->zb_budget_kb);
 			} else if (strcmp(key, "total_kb") == 0) {

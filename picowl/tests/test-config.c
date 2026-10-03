@@ -387,6 +387,7 @@ static int test_zerocopy_config(void)
 	assert(c->zb_budget_kb == 2048);
 	assert(c->zb_total_kb == 0);
 	assert(c->zb_n_pools == 1);
+	assert(c->caching_override == PW_CACHING_OV_AUTO);
 
 	pw_config_free(c);
 	printf("✓ test_zerocopy_config\n");
@@ -622,6 +623,26 @@ static int test_zerocopy_limits(void)
 	remove(path);
 	assert(c != NULL);
 	assert(c->zb_max_buffers == 3 && c->zb_budget_kb == 0 && c->zb_total_kb == 65536);
+	pw_config_free(c);
+
+	/* [zerocopy] caching: case-insensitive, an invalid value keeps auto */
+	path = write_tmp_ini("picowl-test-zbcache.ini", "[zerocopy]\ncaching = Cacheable\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->caching_override == PW_CACHING_OV_CACHEABLE);
+	pw_config_free(c);
+
+	path = write_tmp_ini("picowl-test-zbcache2.ini", "[zerocopy]\ncaching = WRITE_COMBINED\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->caching_override == PW_CACHING_OV_WC);
+	pw_config_free(c);
+
+	path = write_tmp_ini("picowl-test-zbcache3.ini",
+		"[zerocopy]\ncaching = cacheable\ncaching = wc\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->caching_override == PW_CACHING_OV_AUTO);
 	pw_config_free(c);
 
 	printf("✓ test_zerocopy_limits\n");
