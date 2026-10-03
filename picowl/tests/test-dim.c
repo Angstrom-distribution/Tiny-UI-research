@@ -314,6 +314,31 @@ int main(void)
 	EQS(d.state, PW_DIM_BLANKED);
 	EQ64(pw_dim_next_deadline(&d), -1);
 
+	/* Lease (lease.c): the grant unblanks first, then holds like an inhibitor,
+	 * and the end restarts the timers from that moment. */
+	fresh();
+	EQ(pw_dim_force_blank(&d), B);
+	EQ(pw_dim_force_unblank(&d, 1000), UB);
+	EQ(pw_dim_set_inhibited(&d, true, 1000), 0);
+	EQ(pw_dim_tick(&d, 900000), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQ(pw_dim_activity(&d, 5000), 0); /* touch under the lease: no wake-up swallowed */
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ(pw_dim_set_inhibited(&d, false, 60000), 0);
+	EQ64(pw_dim_next_deadline(&d), 60100);
+	EQ(pw_dim_tick(&d, 60200), B | 0); /* both due: straight to blank */
+
+	/* A DIMMED screen is undimmed by the grant; a profile switch during the
+	 * lease does not arm anything. */
+	fresh();
+	EQ(pw_dim_tick(&d, 100), D);
+	EQ(pw_dim_set_inhibited(&d, true, 150), UD);
+	EQ(pw_dim_set_timeouts(&d, 10, 20, 200), 0);
+	EQ64(pw_dim_next_deadline(&d), -1);
+	EQS(d.state, PW_DIM_ACTIVE);
+	EQ(pw_dim_set_inhibited(&d, false, 1000), 0);
+	EQ64(pw_dim_next_deadline(&d), 1010);
+
 	/* pw_dim_init clears the flag */
 	d.inhibited = true;
 	pw_dim_init(&d, 100, 200);

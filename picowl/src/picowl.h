@@ -140,6 +140,10 @@ struct pw_config {
 	int poll_s;                /* fallback sysfs re-read period, 0 = off (default 300) */
 	struct pw_power_timing power[PW_PROFILE_COUNT]; /* indexed by enum pw_power_profile */
 	int low_max_brightness_pct; /* brightness cap while LOW, % of max (default 40, 1..100) */
+
+	/* [lease] */
+	bool lease_enable;         /* offer wp_drm_lease_device_v1 (default true) */
+	char *lease_allow;         /* comma-separated app_ids, "*" = any (default "mediaplayer") */
 };
 
 /*

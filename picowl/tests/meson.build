@@ -78,6 +78,9 @@ test('cursor-builtin', test_cursor_builtin_exe)
 
 test_inc = include_directories('../src')
 
+test('leasepolicy', executable('test-leasepolicy', 'test-leasepolicy.c',
+  '../src/leasepolicy.c', protocol_headers, dependencies: [wlroots, wayland_server],
+  include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',

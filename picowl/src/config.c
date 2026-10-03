@@ -232,6 +232,8 @@ struct pw_config *pw_config_default(void)
 	c->power[PW_PROFILE_BATTERY] = (struct pw_power_timing){ 20, 60, true };
 	c->power[PW_PROFILE_LOW] = (struct pw_power_timing){ 10, 30, true };
 	c->low_max_brightness_pct = 40;
+	c->lease_enable = true;
+	c->lease_allow = strdup("mediaplayer");
 	add_default_keybindings(c);
 	return c;
 }
@@ -502,6 +504,18 @@ struct pw_config *pw_config_load(const char *path)
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [zerocopy]: %s", key);
 			}
+		} else if (strcmp(section, "lease") == 0) {
+			if (strcmp(key, "enable") == 0) {
+				parse_bool_log(val, "lease.enable", &c->lease_enable);
+			} else if (strcmp(key, "allow") == 0) {
+				char *allow = strdup(val);
+				if (allow) {
+					free(c->lease_allow);
+					c->lease_allow = allow;
+				}
+			} else {
+				pw_log(WLR_ERROR, "Unknown key in [lease]: %s", key);
+			}
 		} else if (strcmp(section, "memory") == 0) {
 			/* Memory configuration */
 			if (strcmp(key, "arena_max") == 0) {
@@ -725,6 +739,7 @@ void pw_config_free(struct pw_config *config)
 		return;
 
 	free(config->backlight);
+	free(config->lease_allow);
 
 	struct pw_output_transform *t, *t_tmp;
 	wl_list_for_each_safe(t, t_tmp, &config->transforms, link) {
