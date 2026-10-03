@@ -34,3 +34,34 @@ color = #101010
 # alt+F4 = close
 # code:116 = blank
 # logo+Return = spawn foot
+
+[touch]
+# Tap-and-hold gesture detection (default: enabled with right-click behaviour).
+# hold_action: right-click (default) or none (disable hold detection).
+# hold_delay_ms: start animation after this delay (default 300 ms).
+# hold_ms: send right-click after this duration from touch-down (default 900 ms).
+#   Must be greater than hold_delay_ms. Range: integers.
+# slop_px: movement tolerance before hold is triggered; if exceeded, triggers drag instead
+#   (default 8 px). Range: 0..64.
+# hold_action = right-click
+# hold_delay_ms = 300
+# hold_ms = 900
+# slop_px = 8
+
+[cursor]
+# Cursor appearance during hold animation (only visible during the hold animation).
+# hold_animation: builtin (default, Pocket PC 2003 rotating circle of circles) or
+#   path to a PAM/PPM strip of square frames (frame width = height, hotspot = centre).
+#   Platform cursor rules: ARGB8888, at most 64x64, every pixel fully opaque or
+#   exactly 0x00000000 (transparent pixels must be all-zero), at most 2 distinct
+#   opaque colours per frame. Non-compliant strips are converted at load time
+#   with a logged warning; use picowl-cursor-convert to fix them offline.
+# fill, outline: builtin animation dot and outline colours in #RRGGBB format.
+#   Colours are compared at 6 bits per component; for example #2050c0 and
+#   #2353c3 count as the same colour. Default: fill=#2050c0, outline=#ffffff.
+# frame_interval_ms: animation frame duration in milliseconds. Range: 20..1000.
+#   Default: 83 ms (~12 fps).
+# hold_animation = builtin
+# fill = #2050c0
+# outline = #ffffff
+# frame_interval_ms = 83

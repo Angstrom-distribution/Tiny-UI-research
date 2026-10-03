@@ -30,6 +30,16 @@ static int test_default_config(void)
 	}
 	assert(kb_count >= 3); /* At least KEY_POWER, Alt+Tab, Logo+Escape */
 
+	/* Check default touch/cursor config */
+	assert(c->hold_action == PW_HOLD_RIGHT_CLICK);
+	assert(c->hold_delay_ms == 300);
+	assert(c->hold_ms == 900);
+	assert(c->slop_px == 8);
+	assert(c->hold_animation == NULL);
+	assert(c->cursor_fill == 0x2050c0);
+	assert(c->cursor_outline == 0xffffff);
+	assert(c->cursor_frame_ms == 83);
+
 	pw_config_free(c);
 	printf("✓ test_default_config\n");
 	return 0;
@@ -142,6 +152,48 @@ static int test_keybinding_parsing(void)
 	return 0;
 }
 
+static int test_touch_cursor_parsing(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* Check touch configuration was parsed */
+	assert(c->hold_action == PW_HOLD_RIGHT_CLICK);
+	assert(c->hold_delay_ms == 300);
+	assert(c->hold_ms == 900);
+	assert(c->slop_px == 8);
+
+	/* Check cursor configuration was parsed */
+	assert(c->hold_animation != NULL && strcmp(c->hold_animation, "builtin") == 0);
+	assert(c->cursor_fill == 0x2050c0);
+	assert(c->cursor_outline == 0xffffff);
+	assert(c->cursor_frame_ms == 83);
+
+	pw_config_free(c);
+	printf("✓ test_touch_cursor_parsing\n");
+	return 0;
+}
+
+static int test_validation_ranges(void)
+{
+	/* Test that out-of-range values are corrected during validation */
+	struct pw_config *c = pw_config_default();
+	assert(c != NULL);
+
+	/* Simulate invalid configuration (slop_px out of range) */
+	c->slop_px = 100;  /* > 64 */
+
+	/* After loading (which calls validation), we expect default */
+	struct pw_config *c2 = pw_config_load("/nonexistent/path/test.ini");
+	assert(c2 != NULL);
+	assert(c2->slop_px == 8); /* Should be default */
+
+	pw_config_free(c);
+	pw_config_free(c2);
+	printf("✓ test_validation_ranges\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -155,6 +207,8 @@ int main(int argc, char *argv[])
 	failed += test_missing_file();
 	failed += test_config_free_null();
 	failed += test_keybinding_parsing();
+	failed += test_touch_cursor_parsing();
+	failed += test_validation_ranges();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

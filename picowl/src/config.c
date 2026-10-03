@@ -95,6 +95,31 @@ static bool parse_action(const char *str, enum pw_action *action)
 	return false;
 }
 
+static bool parse_hold_action(const char *str, enum pw_hold_action *action)
+{
+	if (strcmp(str, "right-click") == 0) {
+		*action = PW_HOLD_RIGHT_CLICK;
+		return true;
+	}
+	if (strcmp(str, "none") == 0) {
+		*action = PW_HOLD_NONE;
+		return true;
+	}
+	return false;
+}
+
+static bool parse_hex_color(const char *str, uint32_t *out)
+{
+	/* Parse #RRGGBB as 0xRRGGBB */
+	if (str[0] != '#' || strlen(str) != 7)
+		return false;
+	for (int i = 1; i < 7; i++)
+		if (!isxdigit((unsigned char)str[i]))
+			return false;
+	*out = (uint32_t)strtoul(str + 1, NULL, 16);
+	return true;
+}
+
 static void add_default_keybindings(struct pw_config *c)
 {
 	struct pw_keybinding *kb;
@@ -140,6 +165,14 @@ struct pw_config *pw_config_default(void)
 	c->background[2] = 0.1f;
 	c->background[3] = 1.0f;
 	c->idle_timeout_ms = 60000; /* 60 seconds */
+	c->hold_action = PW_HOLD_RIGHT_CLICK;
+	c->hold_delay_ms = 300;
+	c->hold_ms = 900;
+	c->slop_px = 8;
+	c->hold_animation = NULL;
+	c->cursor_fill = 0x2050c0;
+	c->cursor_outline = 0xffffff;
+	c->cursor_frame_ms = 83;
 	add_default_keybindings(c);
 	return c;
 }
@@ -298,6 +331,44 @@ struct pw_config *pw_config_load(const char *path)
 
 			free(key_dup);
 			free(val_dup);
+		} else if (strcmp(section, "touch") == 0) {
+			/* Touch (tap-and-hold) configuration */
+			if (strcmp(key, "hold_action") == 0) {
+				enum pw_hold_action action;
+				if (parse_hold_action(val, &action)) {
+					c->hold_action = action;
+				} else {
+					pw_log(WLR_ERROR, "Unknown hold_action: %s (valid: right-click, none)", val);
+				}
+			} else if (strcmp(key, "hold_delay_ms") == 0) {
+				c->hold_delay_ms = atoi(val);
+			} else if (strcmp(key, "hold_ms") == 0) {
+				c->hold_ms = atoi(val);
+			} else if (strcmp(key, "slop_px") == 0) {
+				c->slop_px = atoi(val);
+			}
+		} else if (strcmp(section, "cursor") == 0) {
+			/* Cursor (hold animation) configuration */
+			if (strcmp(key, "hold_animation") == 0) {
+				free(c->hold_animation);
+				c->hold_animation = strdup(val);
+			} else if (strcmp(key, "fill") == 0) {
+				uint32_t color;
+				if (parse_hex_color(val, &color)) {
+					c->cursor_fill = color;
+				} else {
+					pw_log(WLR_ERROR, "Invalid color format: %s (use #RRGGBB)", val);
+				}
+			} else if (strcmp(key, "outline") == 0) {
+				uint32_t color;
+				if (parse_hex_color(val, &color)) {
+					c->cursor_outline = color;
+				} else {
+					pw_log(WLR_ERROR, "Invalid color format: %s (use #RRGGBB)", val);
+				}
+			} else if (strcmp(key, "frame_interval_ms") == 0) {
+				c->cursor_frame_ms = atoi(val);
+			}
 		} else {
 			pw_log(WLR_INFO, "Unknown config section: [%s]", section);
 		}
@@ -305,6 +376,25 @@ struct pw_config *pw_config_load(const char *path)
 
 	fclose(f);
 	free((void*)section);
+
+	/* Validate touch and cursor configuration ranges */
+	if (c->hold_ms <= c->hold_delay_ms) {
+		pw_log(WLR_ERROR, "hold_ms (%d) must be greater than hold_delay_ms (%d); using defaults",
+			c->hold_ms, c->hold_delay_ms);
+		c->hold_ms = 900;
+		c->hold_delay_ms = 300;
+	}
+
+	if (c->slop_px < 0 || c->slop_px > 64) {
+		pw_log(WLR_ERROR, "slop_px (%d) out of range [0..64]; using default 8", c->slop_px);
+		c->slop_px = 8;
+	}
+
+	if (c->cursor_frame_ms < 20 || c->cursor_frame_ms > 1000) {
+		pw_log(WLR_ERROR, "cursor_frame_ms (%d) out of range [20..1000]; using default 83", c->cursor_frame_ms);
+		c->cursor_frame_ms = 83;
+	}
+
 	return c;
 }
 
@@ -333,5 +423,6 @@ void pw_config_free(struct pw_config *config)
 	}
 
 	free(config->render_format_pref);
+	free(config->hold_animation);
 	free(config);
 }

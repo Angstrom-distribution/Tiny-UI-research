@@ -28,6 +28,13 @@ test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client],
   timeout: 30)
 
+test_touchhold_exe = executable('test-touchhold',
+  'test-touchhold.c',
+  '../src/touchhold.c',
+  include_directories: include_directories('../src'),
+)
+test('touchhold', test_touchhold_exe)
+
 test_cursorfit_exe = executable('test-cursorfit',
   'test-cursorfit.c',
   link_with: pwcursorfit,

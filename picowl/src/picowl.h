@@ -66,6 +66,11 @@ struct pw_autostart {
 	char *command;
 };
 
+enum pw_hold_action {
+	PW_HOLD_RIGHT_CLICK,       /* hold -> BTN_RIGHT click (default) */
+	PW_HOLD_NONE,              /* no hold detection, immediate left press */
+};
+
 struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
@@ -74,6 +79,19 @@ struct pw_config {
 	struct wl_list autostart;   /* struct pw_autostart */
 	struct wl_list keybindings; /* struct pw_keybinding */
 	float background[4];       /* RGBA, 0..1 */
+
+	/* [touch] tap-and-hold. */
+	enum pw_hold_action hold_action; /* default PW_HOLD_RIGHT_CLICK */
+	int hold_delay_ms;         /* animation starts after this (default 300) */
+	int hold_ms;               /* right click fires after this, measured from
+	                            * touch-down (default 900) */
+	int slop_px;               /* movement tolerance (default 8) */
+
+	/* [cursor] */
+	char *hold_animation;      /* path to PAM strip, or NULL = builtin */
+	uint32_t cursor_fill;      /* builtin dot colour 0xRRGGBB (default 0x2050c0) */
+	uint32_t cursor_outline;   /* builtin outline colour 0xRRGGBB (default 0xffffff) */
+	int cursor_frame_ms;       /* animation frame interval (default 83, ~12 fps) */
 };
 
 /*
