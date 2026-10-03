@@ -38,6 +38,10 @@ OUT=$("$CLIENT" --zerocopy-count 7 --app-id mediaplayer 2>&1) || fail "zerocopy-
 echo "$OUT"
 case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy-count degradation message" ;; esac
 case "$OUT" in *mapped*) ;; *) fail "zerocopy-count client did not report mapped" ;; esac
+# Likewise no global to probe, and a v2-capable client must not choke on that.
+OUT=$("$CLIENT" --probe 2>&1) || fail "probe client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"probe bufmgr none"*) ;; *) fail "headless picowl advertises picowl-buffer" ;; esac
 if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
 	fail "picowl log has 'Failed to upload buffer'"
 fi

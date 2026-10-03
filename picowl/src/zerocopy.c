@@ -9,12 +9,14 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/interfaces/wlr_buffer.h>
 #include "picowl.h"
 #include "zbquota.h"
+#include "zbproto.h"
 #include "picowl-buffer-v1-protocol.h"
 
 /* ZWP_LINUX_DMABUF_FEEDBACK_V1_TRANCHE_FLAGS_SCANOUT (an enum in the
@@ -47,6 +49,7 @@ static struct {
 	uint32_t total_bytes;
 	uint32_t *pool_used;    /* per pool, 0 = clients without an [app.*] pool */
 	uint32_t page;
+	uint32_t caching;       /* enum pw_caching, sent on bind, never changes */
 	bool active;
 	bool copy_type;
 } st;
@@ -448,8 +451,7 @@ static void mgr_bind(struct wl_client *client, void *data, uint32_t version,
 	}
 	wl_resource_set_implementation(r, &mgr_impl, NULL, mgr_resource_destroy);
 	wl_list_insert(&st.mgrs, wl_resource_get_link(r));
-	picowl_buffer_manager_v1_send_format(r, DRM_FORMAT_RGB565);
-	send_copy_type(r);
+	pw_zbproto_send_bind(r, st.copy_type, st.caching);
 }
 
 /* ---- idle copied ---------------------------------------------------- */
@@ -526,6 +528,16 @@ bool pw_zerocopy_init(struct pw_server *s)
 	long page = sysconf(_SC_PAGESIZE);
 	st.page = page > 0 ? (uint32_t)page : 4096;
 
+	char driver[32] = "";
+	drmVersionPtr dv = drmGetVersion(drm_fd);
+	if (dv) {
+		snprintf(driver, sizeof(driver), "%s", dv->name ? dv->name : "");
+		drmFreeVersion(dv);
+	} else {
+		wlr_log(WLR_INFO, "zero-copy: drmGetVersion failed, caching defaults to write_combined");
+	}
+	st.caching = pw_caching_resolve(driver, s->config->caching_override);
+
 	if (!wlr_drm_format_set_add(&st.fmtset, DRM_FORMAT_RGB565,
 			DRM_FORMAT_MOD_LINEAR)) {
 		wlr_log(WLR_INFO, "zero-copy disabled: format set allocation failed");
@@ -555,7 +567,7 @@ bool pw_zerocopy_init(struct pw_server *s)
 	 * renderer has no DRM fd and no dmabuf texture formats. */
 
 	st.global = wl_global_create(s->display, &picowl_buffer_manager_v1_interface,
-		1, NULL, mgr_bind);
+		PW_ZB_MGR_VERSION, NULL, mgr_bind);
 	st.idle_timer = wl_event_loop_add_timer(s->event_loop, idle_cb, NULL);
 	st.pool_used = calloc(s->config->zb_n_pools, sizeof(*st.pool_used));
 	if (!st.global || !st.idle_timer || !st.pool_used) {
@@ -574,7 +586,8 @@ bool pw_zerocopy_init(struct pw_server *s)
 	s->buffer_mgr = &st;
 	st.active = true;
 	st.copy_type = any_copy_type();
-	wlr_log(WLR_INFO, "zero-copy enabled (copy_type=%d)", st.copy_type);
+	wlr_log(WLR_INFO, "zero-copy enabled (copy_type=%d caching=%s driver '%s')",
+		st.copy_type, pw_caching_name(st.caching), driver);
 	return true;
 }
 

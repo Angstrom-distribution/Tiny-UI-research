@@ -86,6 +86,7 @@ sources = files(
   'src/copytype.c',
   'src/copyrel.c',
   'src/zerocopy.c',
+  'src/zbproto.c',
   'src/zbquota.c',
   'src/mem.c',
   'src/backlight.c',

@@ -2,7 +2,7 @@
 <protocol name="picowl_buffer_v1">
   <copyright>MIT</copyright>
 
-  <interface name="picowl_buffer_manager_v1" version="1">
+  <interface name="picowl_buffer_manager_v1" version="2">
     <description summary="allocate compositor-owned RGB565 buffers">
       Lets a client obtain a buffer allocated by the compositor (a dmabuf
       fd). The client wraps the fd into a wl_buffer with zwp_linux_dmabuf_v1
@@ -12,6 +12,8 @@
       device memory. Clients then start with one buffer and may draw into it
       again after a copied event; when a retained event answers a commit
       instead, they switch to a second buffer and use wl_buffer.release.
+      From version 2, the caching event tells whether the CPU mapping of
+      the buffers is cacheable.
     </description>
 
     <request name="destroy" type="destructor">
@@ -54,12 +56,33 @@
       </description>
       <arg name="copy_type" type="uint"/>
     </event>
+
+    <enum name="caching" since="2">
+      <entry name="write_combined" value="0"
+             summary="not cacheable: write sequentially, never read back"/>
+      <entry name="cacheable" value="1"
+             summary="ordinary cacheable memory: reading back is cheap"/>
+    </enum>
+
+    <event name="caching" since="2">
+      <description summary="CPU caching of the buffers' memory">
+        Sent once, when the manager is bound, after copy_type. Describes
+        how the CPU mapping of the dmabuf fd of every buffer created by
+        this manager behaves. write_combined also covers uncached
+        mappings: reads from them are very slow, so clients should only
+        write, sequentially, and never decode into or read back from the
+        buffer. The value never changes for the lifetime of the manager
+        object, and does not depend on copy_type, copied or retained.
+      </description>
+      <arg name="caching" type="uint" enum="caching"/>
+    </event>
   </interface>
 
-  <interface name="picowl_buffer_v1" version="1">
+  <interface name="picowl_buffer_v1" version="2">
     <description summary="a compositor-allocated buffer">
       Describes a dmabuf allocated by the compositor. Wrap the fd with
       zwp_linux_dmabuf_v1 (params.add + create_immed).
+      Version 2 has no changes; the version follows the manager's.
     </description>
 
     <enum name="reason">
