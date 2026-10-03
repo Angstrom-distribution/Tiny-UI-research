@@ -1,4 +1,11 @@
-/* pw-test-client - minimal wl_shm + xdg-shell client used by the smoke test. */
+/* pw-test-client - minimal wl_shm + xdg-shell client used by the smoke test.
+ *   --zerocopy            commit dmabuf frames from picowl-buffer-v1
+ *   --zerocopy-count N    request N buffers, print how many were granted
+ *   --app-id ID           xdg_toplevel app_id (default picowl-test-client)
+ *   --bind-version N      bind picowl_buffer_manager_v1 at min(advertised, N)
+ *                         (default and maximum 2; 1 behaves as a v1 client)
+ *   --probe               print what the picowl-buffer global announced and exit
+ *   --readback            with --zerocopy: time 32-bit reads of buffer 0 */
 #define _GNU_SOURCE
 #include <stdbool.h>
 #include <stdint.h>
@@ -9,6 +16,7 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <linux/dma-buf.h>
 #include <wayland-client.h>
@@ -31,6 +39,8 @@ static struct zwp_linux_dmabuf_v1 *dmabuf;
 static struct picowl_buffer_manager_v1 *pbm;
 static bool pb_fmt_565;
 static int pb_copy_type = -1;
+static int pb_caching = -1;     /* -1: not received (v1 compositor or client) */
+static uint32_t pb_version, pb_bind_max = 2;
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -58,8 +68,15 @@ static void pbm_copy_type(void *d, struct picowl_buffer_manager_v1 *m, uint32_t 
 	(void)d; (void)m;
 	pb_copy_type = (int)t;
 }
+static void pbm_caching(void *d, struct picowl_buffer_manager_v1 *m, uint32_t c)
+{
+	(void)d; (void)m;
+	pb_caching = (int)c;
+}
+/* The caching member must be set: libwayland aborts on a NULL one when the
+ * manager is bound at version 2. */
 static const struct picowl_buffer_manager_v1_listener pbm_listener = {
-	pbm_format, pbm_copy_type
+	pbm_format, pbm_copy_type, pbm_caching
 };
 
 static void reg_global(void *d, struct wl_registry *r, uint32_t name,
@@ -71,7 +88,9 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
 		dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, 3);
 	else if (!strcmp(iface, picowl_buffer_manager_v1_interface.name)) {
-		pbm = wl_registry_bind(r, name, &picowl_buffer_manager_v1_interface, 1);
+		pb_version = ver < pb_bind_max ? ver : pb_bind_max;
+		pbm = wl_registry_bind(r, name, &picowl_buffer_manager_v1_interface,
+			pb_version);
 		picowl_buffer_manager_v1_add_listener(pbm, &pbm_listener, NULL);
 	} else if (!strcmp(iface, wl_shm_interface.name)) {
 		shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
@@ -263,8 +282,32 @@ static void zc_commit(struct zbuf *z, int w, int h)
 	zc_commits++;
 }
 
+static int64_t now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/* One pass of 32-bit loads over the whole buffer, in microseconds. On
+ * write-combined or uncached memory it is several times slower. */
+static int64_t zc_readback_us(struct zbuf *z)
+{
+	const volatile uint32_t *p = (const volatile uint32_t *)z->map;
+	size_t n = z->size / 4;
+	uint32_t sum = 0;
+	dmabuf_sync(z->fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+	int64_t t0 = now_us();
+	for (size_t i = 0; i < n; i++)
+		sum += p[i];
+	int64_t dt = now_us() - t0;
+	dmabuf_sync(z->fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+	(void)sum;
+	return dt;
+}
+
 /* Returns 0 on success, -1 when zero-copy is unavailable (nothing committed). */
-static int run_zerocopy(struct wl_display *dpy, int w, int h)
+static int run_zerocopy(struct wl_display *dpy, int w, int h, bool readback)
 {
 	struct zbuf zb[2];
 	int nbuf;
@@ -336,17 +379,62 @@ static int run_zerocopy(struct wl_display *dpy, int w, int h)
 		wl_display_roundtrip(dpy);
 	}
 	alarm(0);
-	printf("picowl-test-client: zerocopy %d frames copy_type=%d\n", frames, pb_copy_type);
+	printf("picowl-test-client: zerocopy %d frames copy_type=%d caching=%d\n",
+		frames, pb_copy_type, pb_caching);
+	if (readback)
+		printf("picowl-test-client: readback_us=%lld bytes=%zu caching=%d\n",
+			(long long)zc_readback_us(&zb[0]), zb[0].size, pb_caching);
 	fflush(stdout);
+	return 0;
+}
+
+/* Request n buffers, stop at the first failure and report how many the
+ * compositor granted (its per-client and pool limits). -1 = unavailable. */
+static int run_zerocopy_count(struct wl_display *dpy, int w, int h, int n)
+{
+	if (!dmabuf || !pbm || !pb_fmt_565)
+		return -1;
+	struct zbuf *zb = calloc(n, sizeof(*zb));
+	if (!zb)
+		return -1;
+	int granted = 0;
+	for (int i = 0; i < n; i++) {
+		if (!zc_create(dpy, &zb[i], w, h)) {
+			zc_destroy(&zb[i]);
+			break;
+		}
+		granted++;
+	}
+	printf("picowl-test-client: zerocopy-count requested %d granted %d\n", n, granted);
+	fflush(stdout);
+	for (int i = 0; i < granted; i++)
+		zc_destroy(&zb[i]);
+	free(zb);
+	wl_display_roundtrip(dpy);
 	return 0;
 }
 
 int main(int argc, char **argv)
 {
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
-	for (int i = 1; i < argc; i++)
+	int zc_count = 0;
+	bool probe = false, readback = false;
+	const char *app_id = "picowl-test-client";
+	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--zerocopy"))
 			want_zc = true;
+		else if (!strcmp(argv[i], "--zerocopy-count") && i + 1 < argc)
+			zc_count = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--bind-version") && i + 1 < argc) {
+			int v = atoi(argv[++i]);
+			pb_bind_max = v >= 1 && v <= 2 ? (uint32_t)v : 2;
+		} else if (!strcmp(argv[i], "--probe"))
+			probe = true;
+		else if (!strcmp(argv[i], "--readback"))
+			readback = true;
+		else if (!strcmp(argv[i], "--app-id") && i + 1 < argc)
+			app_id = argv[++i];
+	}
 
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
@@ -358,6 +446,16 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (probe) {
+		if (pbm)
+			printf("picowl-test-client: probe bufmgr version=%u format=%d "
+				"copy_type=%d caching=%d\n", pb_version, pb_fmt_565,
+				pb_copy_type, pb_caching);
+		else
+			printf("picowl-test-client: probe bufmgr none\n");
+		fflush(stdout);
+		return 0;
+	}
 	if (!compositor || !shm || !wm_base) {
 		fprintf(stderr, "picowl-test-client: missing globals\n");
 		return 1;
@@ -371,7 +469,7 @@ int main(int argc, char **argv)
 	struct xdg_toplevel *tl = xdg_surface_get_toplevel(xdg_surface);
 	xdg_toplevel_add_listener(tl, &tl_listener, NULL);
 	xdg_toplevel_set_title(tl, "picowl-test");
-	xdg_toplevel_set_app_id(tl, "picowl-test-client");
+	xdg_toplevel_set_app_id(tl, app_id);
 	wl_surface_commit(surface);
 
 	while (!configured)
@@ -379,8 +477,13 @@ int main(int argc, char **argv)
 			return timeout_exit();
 
 	int w = cfg_w > 0 ? cfg_w : 64, h = cfg_h > 0 ? cfg_h : 64;
-	if (want_zc) {
-		int rc = run_zerocopy(dpy, w, h);
+	if (zc_count > 0) {
+		if (run_zerocopy_count(dpy, w, h, zc_count) == 0)
+			return 0;
+		printf("picowl-test-client: zerocopy unavailable, using wl_shm\n");
+		fflush(stdout);
+	} else if (want_zc) {
+		int rc = run_zerocopy(dpy, w, h, readback);
 		if (rc > 0)
 			return 1;
 		if (rc == 0)

@@ -73,6 +73,8 @@ test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',
   include_directories: test_inc))
+test('zbquota', executable('test-zbquota', 'test-zbquota.c', '../src/zbquota.c',
+  include_directories: test_inc))
 test('copyrel', executable('test-copyrel', 'test-copyrel.c', '../src/copyrel.c',
   include_directories: test_inc))
 test('pixman-pass', executable('test-pixman-pass', 'test-pixman-pass.c',
@@ -80,6 +82,10 @@ test('pixman-pass', executable('test-pixman-pass', 'test-pixman-pass.c',
 test('pixman-dmabuf', executable('test-pixman-dmabuf', 'test-pixman-dmabuf.c',
   dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
 
+test('bufproto', executable('test-bufproto', 'test-bufproto.c', '../src/zbproto.c',
+  protocol_headers, picowl_buffer_code, pb_client_h,
+  dependencies: [wayland_server, wayland_client, libdrm], include_directories: test_inc),
+  args: [pw_test_client], timeout: 60)
 test('rss', find_program('sh'),
   args: [files('rss.sh'), picowl_exe, pw_test_client],
   env: {'PW_RSS_CEILING_KB': get_option('rss_ceiling_kb').to_string()},

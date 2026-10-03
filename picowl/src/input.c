@@ -579,6 +579,38 @@ static int th_timer_cb(void *data)
 	return 0;
 }
 
+/* Rule identity for a touched surface: toplevel app_id or layer namespace.
+ * Walks subsurfaces and popup parents. Returns NULL if no app_id/namespace found
+ * (lock surface, unknown role, etc). */
+static const char *hold_identity(struct wlr_surface *s, enum pw_rule_kind *kind)
+{
+	if (!s)
+		return NULL;
+
+	struct wlr_surface *root = wlr_surface_get_root_surface(s);
+	for (int depth = 0; depth < 16; depth++) {
+		struct wlr_xdg_toplevel *tl = wlr_xdg_toplevel_try_from_wlr_surface(root);
+		if (tl) {
+			*kind = PW_RULE_APP;
+			return tl->app_id;  /* may be NULL */
+		}
+		struct wlr_xdg_popup *pp = wlr_xdg_popup_try_from_wlr_surface(root);
+		if (pp) {
+			if (!pp->parent)
+				return NULL;
+			root = wlr_surface_get_root_surface(pp->parent);
+			continue;
+		}
+		struct wlr_layer_surface_v1 *ls = wlr_layer_surface_v1_try_from_wlr_surface(root);
+		if (ls) {
+			*kind = PW_RULE_LAYER;
+			return ls->namespace;
+		}
+		return NULL;  /* lock surface, unknown role */
+	}
+	return NULL;
+}
+
 static void touch_handle_down(struct wl_listener *l, void *data)
 {
 	(void)l;
@@ -609,7 +641,19 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 	} else {
 		wlr_seat_pointer_clear_focus(server->seat);
 	}
-	unsigned a = pw_touchhold_down(&st.th, st.down_x, st.down_y, now_ms());
+	/* Set per-app/layer hold parameters */
+	struct pw_hold_params hp;
+	enum pw_rule_kind kind = PW_RULE_APP;
+	const char *id = s ? hold_identity(s, &kind) : NULL;
+	bool hit = pw_config_hold(server->config, kind, id, &hp);
+	unsigned a = pw_touchhold_set_params(&st.th, (enum pw_th_hold_action)hp.action,
+		hp.delay_ms, hp.hold_ms, hp.slop_px);
+	th_exec(a, ev->time_msec);
+	if (hit)
+		pw_log(WLR_DEBUG, "hold: %s '%s' -> %s", kind == PW_RULE_APP ? "app" : "layer",
+			id, hp.action == PW_HOLD_NONE ? "none" : "right-click");
+	/* Now perform the touch down */
+	a = pw_touchhold_down(&st.th, st.down_x, st.down_y, now_ms());
 	th_exec(a, ev->time_msec);
 	th_rearm();
 }

@@ -29,6 +29,8 @@
  *          DRAGGING -> IDLE, SEND_LEFT_RELEASE. TRIGGERED -> IDLE, SWALLOW.
  *  cancel: any -> IDLE; STOP_ANIMATION if animating; DRAGGING yields
  *          SEND_LEFT_RELEASE so no button stays stuck; else nothing.
+ *  set_params: if not IDLE, cancel first; returns cancel actions. Replaces
+ *          thresholds and action (same clamping as init).
  *  tick:   PENDING and now >= down+delay -> ANIMATING, START_ANIMATION.
  *          PENDING/ANIMATING and now >= down+hold_ms -> TRIGGERED,
  *          [STOP_ANIMATION,] SEND_RIGHT_CLICK|SWALLOW. (Both thresholds
@@ -77,6 +79,11 @@ struct pw_touchhold {
 
 void pw_touchhold_init(struct pw_touchhold *th, enum pw_th_hold_action action,
 	int delay_ms, int hold_ms, int slop_px);
+/* Replace thresholds/action. Same clamping as init. If not IDLE, cancels
+ * first and returns the cancel actions (STOP_ANIMATION or SEND_LEFT_RELEASE),
+ * else 0. Not IDLE -> caller must run result through th_exec before next down. */
+unsigned pw_touchhold_set_params(struct pw_touchhold *th,
+	enum pw_th_hold_action action, int delay_ms, int hold_ms, int slop_px);
 unsigned pw_touchhold_down(struct pw_touchhold *th, int x, int y, int64_t now_ms);
 unsigned pw_touchhold_motion(struct pw_touchhold *th, int x, int y, int64_t now_ms);
 unsigned pw_touchhold_up(struct pw_touchhold *th, int64_t now_ms);

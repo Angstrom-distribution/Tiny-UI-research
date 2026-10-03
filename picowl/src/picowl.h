@@ -96,6 +96,34 @@ enum pw_hold_action {
 	PW_HOLD_NONE,              /* no hold detection, immediate left press */
 };
 
+enum pw_rule_kind {
+	PW_RULE_APP,               /* app_id (xdg_toplevel) */
+	PW_RULE_LAYER,             /* namespace (zwlr_layer_surface_v1) */
+};
+
+struct pw_hold_params {
+	enum pw_hold_action action;
+	int delay_ms, hold_ms, slop_px;
+};
+
+#define PW_HOLD_SET_ACTION (1u << 0)
+#define PW_HOLD_SET_DELAY  (1u << 1)
+#define PW_HOLD_SET_HOLD   (1u << 2)
+#define PW_HOLD_SET_SLOP   (1u << 3)
+
+struct pw_app_rule {
+	struct wl_list link;          /* pw_config.app_rules, file order */
+	enum pw_rule_kind kind;
+	char *name;                   /* app_id or layer namespace */
+	unsigned set;                 /* PW_HOLD_SET_*: keys given in the section */
+	struct pw_hold_params hold;   /* fully resolved after pw_config_load() */
+	/* [app.*] only: picowl-buffer-v1 limits (zerocopy_* keys) */
+	int zb_buffers;               /* -1 = [zerocopy] max_buffers_per_client */
+	int zb_budget_kb;             /* -1 = zb_buffers x frame of the largest output */
+	unsigned zb_pool;             /* 0 = no pool (default pool), else 1..zb_n_pools-1 */
+	char *exe;                    /* realpath the client binary must have, or NULL */
+};
+
 struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
@@ -111,6 +139,7 @@ struct pw_config {
 	int hold_ms;               /* right click fires after this, measured from
 	                            * touch-down (default 900) */
 	int slop_px;               /* movement tolerance (default 8) */
+	struct wl_list app_rules;   /* struct pw_app_rule */
 
 	/* [cursor] */
 	char *hold_animation;      /* path to PAM strip, or NULL = builtin */
@@ -122,7 +151,12 @@ struct pw_config {
 	struct wl_list rotation_modes; /* struct pw_output_rotmode */
 	struct wl_list copy_overrides; /* struct pw_output_copyover */
 	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
+	enum pw_caching_override caching_override; /* [zerocopy] caching (default auto) */
 	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
+	int zb_max_buffers;        /* buffers per client (default 3) */
+	int zb_budget_kb;          /* pool of clients without an [app.*] pool (default 2048) */
+	int zb_total_kb;           /* ceiling over all pools, 0 = none (default 0) */
+	unsigned zb_n_pools;       /* 1 (default pool) + [app.*] rules with a pool */
 	bool panel_autohide;       /* hide the panel while an app is fullscreen (default true) */
 	int arena_max;             /* M_ARENA_MAX (default 1) */
 	int trim_threshold_kb;     /* M_TRIM_THRESHOLD in kB (default 256) */
@@ -455,5 +489,13 @@ enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *outpu
 
 /* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
+
+/* The [app.*] rule for an app_id (exact match), or NULL. NULL-safe. config.c */
+const struct pw_app_rule *pw_config_app(const struct pw_config *c, const char *app_id);
+
+/* Effective hold parameters for a surface identity. name NULL or no
+ * matching rule -> the [touch] globals. Returns true if a rule matched. */
+bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
+	const char *name, struct pw_hold_params *out);
 
 #endif

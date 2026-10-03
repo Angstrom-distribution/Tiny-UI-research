@@ -51,6 +51,15 @@ color = #101010
 # hold_ms = 900
 # slop_px = 8
 
+# Per-app tap-and-hold overrides: [app.<app_id>] (xdg toplevels, exact match)
+# and per-layer overrides: [layer.<namespace>] (layer-shell surfaces).
+# Keys are the same as [touch]; unset keys are inherited from [touch], wherever
+# [touch] appears in the file. Bad timings revert to the [touch] values.
+# Example: a media player that times its own long press. hold_action = none
+# sends the left press at touch-down, with no right-click and no animation.
+# [app.mediaplayer]
+# hold_action = none
+
 [cursor]
 # Cursor appearance during hold animation (only visible during the hold animation).
 # hold_animation: builtin (default, Pocket PC 2003 rotating circle of circles) or
@@ -96,9 +105,39 @@ color = #101010
 # single_buffer: allow single-buffer (non-double-buffered) clients on
 #   copy-type outputs where they are safe (default true).
 # panel_autohide: hide the panel while an app is fullscreen (default true).
+# max_buffers_per_client: buffers one client may hold. Range 1..32 (default 3).
+# budget_kb: memory shared by all clients without an [app.*] buffer rule.
+#   Range 0..65536 (default 2048); 0 = none of them may allocate.
+# total_kb: ceiling over all pools. 0 = no extra limit (default), else 1..65536.
+# caching: what the caching event (picowl-buffer-v1 version 2) tells clients about
+#   the CPU mapping of the buffers: auto (default, from the DRM driver: cacheable for
+#   mq11xx and w100, write_combined for everything else, sa1100-lcdc included),
+#   cacheable or write_combined. Case-insensitive; an invalid value keeps auto.
+#   Clients never read back from, or decode into, write_combined buffers.
+# Sizes are counted in whole pages as allocated. A request over a limit gets
+# failed(no_memory). Out-of-range values are rejected and the default is kept.
 # enable = true
 # single_buffer = true
 # panel_autohide = true
+# max_buffers_per_client = 3
+# budget_kb = 2048
+# total_kb = 0
+# caching = auto
+
+# Per-app buffer limits: an [app.<app_id>] section (the one used for the hold
+# overrides above) with zerocopy_* keys gets its own pool, shared by all
+# clients matching it. The client must call xdg_toplevel.set_app_id before
+# create_buffer. Not for [layer.*].
+# zerocopy_buffers: buffers per client, 1..32 (default max_buffers_per_client).
+# zerocopy_budget_kb: pool size, 0..65536 (default zerocopy_buffers full frames
+#   of the largest output, so one value fits every board).
+# exe: the client's /proc/<pid>/exe must be this file (symlinks resolved at
+#   load), otherwise it gets the default limits. Optional.
+# On shmem drivers (mq11xx, w100) the pool is resident RAM: 7 buffers are
+# 1 MiB on QVGA and 4.1 MiB on the hx4700.
+# [app.mediaplayer]
+# zerocopy_buffers = 7
+# exe = /usr/bin/mediaplayer-wayland
 
 [memory]
 # Memory allocator tuning (M_* malloc() environment variables).
