@@ -43,7 +43,9 @@ struct dbuf {
 };
 
 static void dbuf_destroy(struct wlr_buffer *b) {
-	(void)b;
+	struct dbuf *d = wl_container_of(b, d, base);
+	wlr_buffer_finish(b);
+	free(d);
 }
 static bool dbuf_begin(struct wlr_buffer *b, uint32_t flags, void **data,
 		uint32_t *format, size_t *stride) {
@@ -341,7 +343,8 @@ int main(void) {
 
 	CHECK(count_maps() == base, "maps leaked after rejected buffers");
 
-	free(d);
+	// Drop, not free: the renderer still has d on its buffer list
+	wlr_buffer_drop(&d->base);
 	wlr_renderer_destroy(r);
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);
