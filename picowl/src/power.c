@@ -16,7 +16,8 @@
 struct pw_power {
 	struct pw_server *server;
 	struct pw_backlight *bl;        /* NULL: no usable backlight */
-	bool bl_disabled;               /* write failed or on/off device */
+	bool bl_disabled;               /* not writable, vanished or on/off device */
+	bool bl_retry;                  /* last write failed, redo on next input */
 	struct pw_dim dim;
 	enum pw_power_profile profile;
 	struct pw_ps_uevent uev;
@@ -66,15 +67,23 @@ static void write_level(struct pw_power *p, int level)
 {
 	if (!bl_usable(p))
 		return;
-	if (pw_backlight_set(p->bl, level) < 0) {
-		if (errno == EACCES || errno == EPERM)
-			pw_log(WLR_ERROR, "backlight %s not writable, dimming disabled",
-				pw_backlight_name(p->bl));
-		else
-			pw_log(WLR_ERROR, "backlight %s write failed (%s), dimming disabled",
-				pw_backlight_name(p->bl), strerror(errno));
+	if (pw_backlight_set(p->bl, level) == 0) {
+		p->bl_retry = false;
+		return;
+	}
+	/* Only a permanent error stops dimming; anything else (EIO, EBUSY from
+	 * the driver) is retried on the next input or transition, so the panel
+	 * is not left dimmed. */
+	if (errno == EACCES || errno == EPERM || errno == ENOENT) {
+		pw_log(WLR_ERROR, "backlight %s not writable (%s), dimming disabled",
+			pw_backlight_name(p->bl), strerror(errno));
 		p->bl_disabled = true;
+		p->bl_retry = false;
 		pw_dim_set_timeouts(&p->dim, 0, blank_ms_for(p, p->profile), now_ms());
+	} else {
+		pw_log(WLR_ERROR, "backlight %s write failed (%s), will retry",
+			pw_backlight_name(p->bl), strerror(errno));
+		p->bl_retry = true;
 	}
 }
 
@@ -110,8 +119,15 @@ static void run_actions(struct pw_power *p, unsigned act)
 {
 	if (act & PW_DIM_ACT_BLANK)
 		pw_output_blank(p->server, true);
-	if (act & PW_DIM_ACT_UNBLANK)
+	if (act & PW_DIM_ACT_UNBLANK) {
 		pw_output_blank(p->server, false);
+		if (p->server->blanked) {
+			/* The outputs did not come back: stay BLANKED so the next
+			 * input retries (and is swallowed), and leave the backlight. */
+			pw_dim_force_blank(&p->dim);
+			return;
+		}
+	}
 	if (act & (PW_DIM_ACT_DIM | PW_DIM_ACT_UNDIM | PW_DIM_ACT_UNBLANK))
 		apply_level(p);
 }
@@ -230,6 +246,8 @@ bool pw_power_activity(struct pw_server *server)
 	sync_blanked(p);
 	unsigned act = pw_dim_activity(&p->dim, now_ms());
 	run_actions(p, act);
+	if (p->bl_retry)
+		apply_level(p);
 	rearm(p);
 	return act & PW_DIM_ACT_SWALLOW_INPUT;
 }

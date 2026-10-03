@@ -106,7 +106,9 @@ Example: h5550 with GPIO backlight. h3870 and h3970 with PWM can have > 1, allow
 
 ### Write Failures
 
-If backlight write fails with EACCES or EPERM (permission denied), dimming is disabled and blanking continues. Logged as "backlight <name> not writable, dimming disabled".
+If a backlight write fails with EACCES, EPERM or ENOENT (permission denied, device gone), dimming is disabled and blanking continues. Logged as "backlight <name> not writable (...), dimming disabled". Any other error (EIO, EBUSY) is logged as "write failed, will retry" and the level is written again on the next input or transition, so the panel is not left dimmed; the user level is still restored at exit.
+
+While the panel is held at a level other than the user level (dimmed or LOW-capped), the user level is also kept in `$XDG_RUNTIME_DIR/picowl-backlight-<dev>` (`/run` if unset). After a crash the restarted picowl takes the user level from that file instead of the reduced live brightness. The file is removed when the user level is written back.
 
 ## sysfs Paths and Access Control
 

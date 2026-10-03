@@ -74,4 +74,20 @@ PID=$!
 wait_level "$DIR/sys-low/class/backlight/test-bl/brightness" 25 20
 kill -TERM "$PID"; wait "$PID"; PID=
 echo "power-e2e: LOW profile capped 40 -> 25"
+
+# 3. Crash while dimmed: the restarted picowl must still know the user level
+# (40), not take the dimmed 12 for it, and restore 40 on a clean exit.
+mktree "$DIR/sys-crash" ac
+bl=$DIR/sys-crash/class/backlight/test-bl
+rm "$bl/actual_brightness"; ln -s brightness "$bl/actual_brightness"
+PICOWL_SYSFS_ROOT=$DIR/sys-crash "$PICOWL" -c "$DIR/picowl.ini" -d 2 >"$DIR/picowl.log" 2>&1 &
+PID=$!
+wait_level "$bl/brightness" 12 30
+kill -9 "$PID"; wait "$PID" 2>/dev/null; PID=
+PICOWL_SYSFS_ROOT=$DIR/sys-crash "$PICOWL" -c "$DIR/picowl.ini" -d 2 >"$DIR/picowl.log" 2>&1 &
+PID=$!
+sleep 0.5
+kill -TERM "$PID"; wait "$PID"; PID=
+[ "$(cat "$bl/brightness")" = 40 ] || fail "user level lost after crash: $(cat "$bl/brightness"), expected 40"
+echo "power-e2e: user level 40 survives a crash while dimmed"
 cleanup

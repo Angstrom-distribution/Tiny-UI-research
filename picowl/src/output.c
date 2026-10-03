@@ -118,27 +118,6 @@ static bool output_enable_software(struct pw_output *o)
 		o->rotation);
 }
 
-/* After an enabling commit with hardware rotation the output size must be
- * the rotated native size; otherwise the driver did not apply the rotation
- * and we fall back to software rotation. */
-static void check_hw_size(struct pw_output *o)
-{
-	if (!o->hw_rotation)
-		return;
-	struct wlr_output *wo = o->wlr_output;
-	int ew, eh;
-	pw_rot_logical_size(o->rotation, o->native_w, o->native_h, &ew, &eh);
-	if (wo->width == ew && wo->height == eh)
-		return;
-	pw_log(WLR_ERROR, "output %s: hw rotation size mismatch: %dx%d, "
-		"expected %dx%d; using software rotation", wo->name,
-		wo->width, wo->height, ew, eh);
-	output_commit_disable(o);
-	if (!output_enable_software(o))
-		pw_log(WLR_ERROR, "output %s: software fallback commit failed",
-			wo->name);
-}
-
 /* Apply o->rotation to an output that is currently disabled (initial
  * setup, unblank, or runtime rotation after a disabling commit), using
  * hardware rotation when possible. Leaves the output enabled. */
@@ -152,11 +131,12 @@ static bool output_enable_rotated(struct pw_output *o)
 		/* The patch nulled current_mode: MODE is not stripped. */
 		struct wlr_output_mode *mode = wlr_output_preferred_mode(wo);
 		o->hw_rotation = true;
+		/* wo->width/height come from the swapped mode, so the size cannot
+		 * tell whether the kernel applied the rotation: only a failed
+		 * commit falls back to software rotation. */
 		if (mode && output_commit_enable(o, mode,
-				WL_OUTPUT_TRANSFORM_NORMAL)) {
-			check_hw_size(o);
+				WL_OUTPUT_TRANSFORM_NORMAL))
 			return true;
-		}
 		pw_log(WLR_ERROR, "output %s: hw rotation commit failed, "
 			"using software rotation", wo->name);
 	} else if (o->rot_mode == PW_ROT_HARDWARE) {
@@ -178,6 +158,16 @@ static void copy_drop_core_swapchain(struct pw_output *o)
 	}
 }
 
+/* Why this output runs without the single-buffer swapchain; once per output. */
+static void single_buffer_off(struct pw_output *o, const char *why)
+{
+	if (o->sb_off_logged)
+		return;
+	o->sb_off_logged = true;
+	pw_log(WLR_INFO, "output %s: single-buffer off, using 2 slots: %s",
+		o->wlr_output->name, why);
+}
+
 static struct wlr_swapchain *copy_swapchain_create(struct pw_output *o)
 {
 	static struct wlr_drm_format_set set; /* RGB565/LINEAR, kept for the process */
@@ -185,23 +175,32 @@ static struct wlr_swapchain *copy_swapchain_create(struct pw_output *o)
 	struct wlr_output *wo = o->wlr_output;
 
 	if (!o->copy_type || !server->config->single_buffer || !wo->enabled ||
-			wo->render_format != DRM_FORMAT_RGB565 ||
 			wo->width <= 0 || wo->height <= 0)
 		return NULL;
+	if (wo->render_format != DRM_FORMAT_RGB565) {
+		single_buffer_off(o, "render format is not RGB565");
+		return NULL;
+	}
 	const struct wlr_drm_format_set *prim = wlr_output_get_primary_formats(wo,
 		server->allocator->buffer_caps);
 	if (!prim || !wlr_drm_format_set_has(prim, DRM_FORMAT_RGB565,
-			DRM_FORMAT_MOD_LINEAR))
+			DRM_FORMAT_MOD_LINEAR)) {
+		single_buffer_off(o, "no RGB565/LINEAR primary plane format");
 		return NULL;
+	}
 	if (!wlr_drm_format_set_get(&set, DRM_FORMAT_RGB565) &&
 			!wlr_drm_format_set_add(&set, DRM_FORMAT_RGB565,
-				DRM_FORMAT_MOD_LINEAR))
+				DRM_FORMAT_MOD_LINEAR)) {
+		single_buffer_off(o, "out of memory");
 		return NULL;
+	}
 	struct wlr_swapchain *sc = wlr_swapchain_create(server->allocator,
 		wo->width, wo->height, wlr_drm_format_set_get(&set, DRM_FORMAT_RGB565));
 	if (sc)
 		pw_log(WLR_INFO, "output %s: single-buffer swapchain %dx%d",
 			wo->name, wo->width, wo->height);
+	else
+		single_buffer_off(o, "swapchain allocation failed");
 	return sc;
 }
 
@@ -262,12 +261,12 @@ static void output_frame(struct wl_listener *listener, void *data)
 		output->copy_swapchain ? &opts : NULL);
 	pw_zerocopy_output_committed(output, needs && ok);
 
-	static bool degraded_logged;
-	if (!degraded_logged && output->copy_swapchain &&
+	if (!output->sb_degraded_logged && output->copy_swapchain &&
 			output->copy_swapchain->slots[1].buffer) {
-		degraded_logged = true;
-		pw_log(WLR_DEBUG, "output %s: single-buffer degraded to 2 slots",
-			output->wlr_output->name);
+		output->sb_degraded_logged = true;
+		pw_log(WLR_INFO, "output %s: single-buffer degraded to 2 slots "
+			"(the kernel keeps the scanned-out buffer locked, e.g. legacy "
+			"KMS ignores copy_type)", output->wlr_output->name);
 	}
 
 	struct timespec now;
@@ -361,10 +360,6 @@ static void output_new(struct wl_listener *listener, void *data)
 	output->rot_mode = pw_config_rot_mode(server->config, wlr_output->name);
 	output->rotation = output_config_transform(server->config, wlr_output->name);
 
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
-	output->native_w = mode ? mode->width : wlr_output->width;
-	output->native_h = mode ? mode->height : wlr_output->height;
-
 	output->copy_type = false;
 	output->drm_driver[0] = '\0';
 	if (wlr_output_is_drm(wlr_output)) {
@@ -392,6 +387,13 @@ static void output_new(struct wl_listener *listener, void *data)
 				output->copy_type = false;
 			}
 		}
+		/* wlroots ignores copy_type without atomic modesetting. */
+		const char *na = getenv("WLR_DRM_NO_ATOMIC");
+		if (output->copy_type && na && strcmp(na, "1") == 0) {
+			pw_log(WLR_INFO, "output %s: copy_type disabled: legacy KMS "
+				"(WLR_DRM_NO_ATOMIC)", wlr_output->name);
+			output->copy_type = false;
+		}
 		wlr_drm_connector_set_copy_type(wlr_output, output->copy_type);
 	}
 	pw_log(WLR_INFO, "output %s: driver '%s' copy_type=%s rotation_mode=%s",
@@ -405,19 +407,30 @@ static void output_new(struct wl_listener *listener, void *data)
 		free(output);
 		return;
 	}
-	if (!mode) {
-		output->native_w = wlr_output->width;
-		output->native_h = wlr_output->height;
-	}
 	if (output->hw_rotation)
 		pw_log(WLR_INFO, "output %s: hardware rotation %d, %dx%d",
 			wlr_output->name, (int)output->rotation,
 			wlr_output->width, wlr_output->height);
 
+	/* Hotplugged while blanked: stay dark, the unblank enables it. */
+	if (server->blanked)
+		output_commit_disable(output);
+
 	const float *bg = server->config->background;
 	output->background = wlr_scene_rect_create(server->layer_background,
 		wlr_output->width, wlr_output->height, bg);
 	if (!output->background) {
+		output_commit_disable(output);
+		free(output);
+		return;
+	}
+	/* Before the listeners: output_frame needs it. */
+	output->scene_output = wlr_scene_output_create(server->scene, wlr_output);
+	if (!output->scene_output) {
+		pw_log(WLR_ERROR, "output %s: cannot create scene output",
+			wlr_output->name);
+		wlr_scene_node_destroy(&output->background->node);
+		output_commit_disable(output);
 		free(output);
 		return;
 	}
@@ -434,8 +447,7 @@ static void output_new(struct wl_listener *listener, void *data)
 
 	struct wlr_output_layout_output *lo =
 		wlr_output_layout_add_auto(server->output_layout, wlr_output);
-	output->scene_output = wlr_scene_output_create(server->scene, wlr_output);
-	if (lo && output->scene_output)
+	if (lo)
 		wlr_scene_output_layout_add_output(server->scene_layout, lo,
 			output->scene_output);
 
@@ -540,6 +552,17 @@ static void output_set_power(struct pw_output *o, bool on)
 	wlr_output_schedule_frame(wo);
 }
 
+/* All outputs are disabled (the real state, which a failed commit can leave
+ * different from the requested one). */
+static bool outputs_all_off(struct pw_server *server)
+{
+	struct pw_output *o;
+	wl_list_for_each(o, &server->outputs, link)
+		if (o->wlr_output->enabled)
+			return false;
+	return !wl_list_empty(&server->outputs);
+}
+
 static void output_power_set_mode(struct wl_listener *listener, void *data)
 {
 	const struct wlr_output_power_v1_set_mode_event *event = data;
@@ -552,11 +575,7 @@ static void output_power_set_mode(struct wl_listener *listener, void *data)
 		if (o->wlr_output == event->output)
 			output_set_power(o, !off);
 
-	bool all_off = true;
-	wl_list_for_each(o, &server->outputs, link)
-		if (o->wlr_output->enabled)
-			all_off = false;
-	server->blanked = all_off && !wl_list_empty(&server->outputs);
+	server->blanked = outputs_all_off(server);
 	pw_power_sync_blanked(server);
 }
 
@@ -581,7 +600,10 @@ void pw_output_blank(struct pw_server *server, bool blank)
 
 	wl_list_for_each(output, &server->outputs, link)
 		output_set_power(output, !blank);
-	server->blanked = blank;
+	/* From the real state: if the unblank commit failed, the display is
+	 * still dark and power.c must keep swallowing input and retry. */
+	server->blanked = wl_list_empty(&server->outputs) ? blank :
+		outputs_all_off(server);
 }
 
 void pw_output_usable_area(struct pw_output *output, struct wlr_box *box)

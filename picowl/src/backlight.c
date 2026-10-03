@@ -64,6 +64,52 @@ static int read_sysfs_int(const char *root, const char *dev, const char *attr)
 	return -1;
 }
 
+/* While the panel sits at a level picowl wrote that differs from the user
+ * level (dimmed, LOW cap), the user level is kept in a file in the runtime
+ * dir, so a restart after a crash does not take the reduced level for the
+ * user's. The file is removed when the user level is written back. */
+static void state_path(const struct pw_backlight *bl, char *path, size_t len)
+{
+	const char *dir = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, len, "%s/picowl-backlight-%s",
+		(dir && *dir) ? dir : "/run", bl->name);
+}
+
+static void state_save(const struct pw_backlight *bl, int level)
+{
+	char path[512];
+	state_path(bl, path, sizeof(path));
+	if (level == bl->user) {
+		unlink(path);
+		return;
+	}
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0)
+		return;
+	char buf[16];
+	int len = snprintf(buf, sizeof(buf), "%d\n", bl->user);
+	if (write(fd, buf, len) != len)
+		unlink(path);
+	close(fd);
+}
+
+/* Saved user level (1..max), or -1. */
+static int state_load(const struct pw_backlight *bl)
+{
+	char path[512], buf[16];
+	state_path(bl, path, sizeof(path));
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	ssize_t n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0)
+		return -1;
+	buf[n] = '\0';
+	long v = strtol(buf, NULL, 10);
+	return (v >= 1 && v <= bl->max) ? (int)v : -1;
+}
+
 /* Read a string from a sysfs file. Returns 0 on success. */
 static int read_sysfs_string(const char *root, const char *dev, const char *attr,
 	char *buf, size_t len)
@@ -198,11 +244,16 @@ struct pw_backlight *pw_backlight_open(const char *root, const char *name)
 	if (user > max)
 		user = max;
 
-	strcpy(bl->name, dev_name);
+	snprintf(bl->name, sizeof(bl->name), "%s", dev_name);
 	bl->max = max;
 	bl->user = user;
 	bl->root = root;
 	bl->max_brightness_written = 0;
+
+	/* A previous run died while the panel was dimmed or capped. */
+	int saved = state_load(bl);
+	if (saved > 0)
+		bl->user = user = saved;
 
 	bl_log_debug( "backlight: opened %s (max=%d, user=%d)", dev_name, max, user);
 
@@ -299,6 +350,7 @@ int pw_backlight_set(struct pw_backlight *bl, int level)
 		return -1;
 	}
 
+	state_save(bl, level);
 	return 0;
 }
 
