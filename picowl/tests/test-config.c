@@ -443,6 +443,8 @@ static int test_power_config(void)
 	/* Check [power.battery] section parsing */
 	assert(c->power[PW_PROFILE_BATTERY].dim_after_s == 30);
 	assert(c->power[PW_PROFILE_BATTERY].blank_after_s == 120);
+	assert(!c->power[PW_PROFILE_BATTERY].inhibit);
+	assert(c->power[PW_PROFILE_AC].inhibit); /* unset keeps the default */
 
 	/* Check [power.low] section parsing */
 	assert(c->power[PW_PROFILE_LOW].dim_after_s == 15);
@@ -473,6 +475,8 @@ static int test_power_defaults(void)
 	assert(c->power[PW_PROFILE_LOW].dim_after_s == 10);
 	assert(c->power[PW_PROFILE_LOW].blank_after_s == 30);
 	assert(c->low_max_brightness_pct == 40);
+	for (int i = 0; i < PW_PROFILE_COUNT; i++)
+		assert(c->power[i].inhibit);
 
 	pw_config_free(c);
 	printf("✓ test_power_defaults\n");
@@ -496,7 +500,7 @@ static int test_power_validation(void)
 	const char *path = write_tmp_ini("picowl-test-power-bad.ini",
 		"[power]\nlow_capacity = 150\ndim_level = 0\npoll_s = 10\n"
 		"[power.ac]\nblank_after_s = -5\n"
-		"[power.low]\nmax_brightness_pct = 0\n");
+		"[power.low]\nmax_brightness_pct = 0\ninhibit = maybe\n");
 	struct pw_config *c = pw_config_load(path);
 	remove(path);
 	assert(c != NULL);
@@ -505,6 +509,7 @@ static int test_power_validation(void)
 	assert(c->poll_s == 300);
 	assert(c->power[PW_PROFILE_AC].blank_after_s == 600);
 	assert(c->low_max_brightness_pct == 40);
+	assert(c->power[PW_PROFILE_LOW].inhibit); /* typo keeps the default */
 	pw_config_free(c);
 	printf("✓ test_power_validation\n");
 	return 0;
@@ -649,6 +654,43 @@ static int test_zerocopy_limits(void)
 	return 0;
 }
 
+static int test_lease_config(void)
+{
+	/* Defaults: leasing on, only the media player may lease. */
+	struct pw_config *c = pw_config_default();
+	assert(c != NULL);
+	assert(c->lease_enable == true);
+	assert(c->lease_allow && strcmp(c->lease_allow, "mediaplayer") == 0);
+	pw_config_free(c);
+
+	c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+	assert(c->lease_enable == false);
+	assert(strcmp(c->lease_allow, "mediaplayer, vlc ,foot") == 0);
+	pw_config_free(c);
+
+	/* An empty list is kept (rejects every request); a bad boolean and an
+	 * unknown key leave the defaults. */
+	const char *path = write_tmp_ini("picowl-test-lease.ini",
+		"[lease]\nallow =\nenable = maybe\nbogus = 1\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->lease_enable == true);
+	assert(c->lease_allow && c->lease_allow[0] == '\0');
+	pw_config_free(c);
+
+	path = write_tmp_ini("picowl-test-lease2.ini", "[lease]\nallow = *\nenable = yes\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->lease_enable == true);
+	assert(strcmp(c->lease_allow, "*") == 0);
+	pw_config_free(c);
+	printf("✓ test_lease_config\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -676,6 +718,7 @@ int main(int argc, char *argv[])
 	failed += test_power_defaults();
 	failed += test_power_validation();
 	failed += test_legacy_idle_timeout();
+	failed += test_lease_config();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

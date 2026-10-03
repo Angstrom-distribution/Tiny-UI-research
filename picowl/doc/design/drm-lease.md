@@ -1,6 +1,8 @@
 # DRM lease support
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** implemented.
+
+The code is in `src/lease.c` and `src/leasepolicy.c` with hooks in `src/output.c`, `src/input.c`, `src/view.c`, `src/power.c` and `src/config.c`, plus wlroots patch 0004; the user documentation is `doc/lease.md`. Deviations from this plan are listed under [Implementation notes](#implementation-notes).
 
 picowl offers its DRM output through `wp_drm_lease_device_v1` (wlroots `wlr_drm_lease_v1`). The media player (`--vo drm:lease`) can then drive KMS directly, without a VT switch, and picowl takes the output back when the lease ends. This is work item 9 of `doc/mediaplayer-integration.md` §4, and Path B step 2 in §3.2 of that document.
 
@@ -62,8 +64,10 @@ New section, parsed like `[zerocopy]` (`src/config.c:438-446`, `parse_bool` at :
 
 ```ini
 [lease]
-enable = true          ; create the wp_drm_lease_device_v1 global
-allow = mediaplayer    ; comma-separated app_ids allowed to lease; * = any
+# create the wp_drm_lease_device_v1 global
+enable = true
+# comma-separated app_ids allowed to lease; * = any
+allow = mediaplayer
 ```
 
 | Key | Default | Meaning |
@@ -292,3 +296,21 @@ Runtime:
 | CI tests (policy, config, power hold, smoke) | 0.5 day |
 | Hardware bring-up on five boards with the player | 2 days |
 | **Total** | **about 6.5 days** |
+
+## Implementation notes
+
+Deviations from the plan above. The line references in the plan are against the old commit; everything was re-located in the current code.
+
+- **No `pw_power_hold`.** The idle-inhibit work had already added a source mask: `pw_power_inhibit(server, reason, on)` with `PW_INHIBIT_CLIENT` and `PW_INHIBIT_SESSION` (`src/power.h`), and `power.c` already listens to the session `active` signal. The lease is one more bit, `PW_INHIBIT_LEASE`, and the plan's `PW_HOLD_*` names do not exist. The plan's "holding from BLANKED unblanks" does not hold for that mask (an inhibitor never unblanks), so the grant calls `pw_power_set_blanked(false)` before it grants. `PW_HOLD_SESSION`'s other job, removing the blank mismatch across a VT switch, was not needed: `output_adopt` already disables a re-created output while `server->blanked` is set (the "Hotplugged while blanked" branch), which keeps the two consistent. The power tests are therefore lease sequences in `tests/test-dim.c` (unblank, hold, release; undim and a profile switch while held), not a new `pw_power_hold` test. The bit mask itself lives in `power.c`, which has no unit test; `power-e2e` covers it for the client reason.
+- **`pw_lease_init` runs at the end of `pw_server_init`** (after `pw_power_init`), not after `pw_output_init`. It still runs before `wlr_backend_start`, so the first output is offered. The request handler needs the views, the layers and the power module, which exist by then. `pw_output_finish` is new: wlroots asserts that nothing listens to `session->events.active` when the session is destroyed, so `output.c` removes its listener like `power.c` does. `pw_lease_finish` runs before `wl_display_destroy_clients`, after `pw_zerocopy_finish`.
+- **`struct pw_lease` is smaller than the plan's.** It has no `client` and `touch_box` (the box is captured in the handler and given to `pw_input_lease_touch`, which keeps it) and has the session listener (revoke on pause) and the lessee `view`.
+- **Native size.** `pw_output` no longer has `native_w`/`native_h`. `lease.c` takes the preferred mode, which is the mode in use, and undoes wlroots' 90/270 swap when the output rotates in hardware (`pw_rot_logical_size`). It does not use `wlr_output->width` because wlroots clears it while a hardware-rotated output is disabled.
+- **Requests for other than one connector are rejected** (log: "the request must name one active output"), the plan's "one output, one lease". This is not a verdict of `pw_lease_decide`.
+- **`pw_lease_decide` takes a facts struct** (`struct pw_lease_facts`), and `leasepolicy.h` includes `picowl.h` for `enum pw_action`, so the unit test builds against the wlroots headers like `test-config` (there is no wlroots call in it). `REJECT_DISABLED` cannot happen at run time (a disabled lease creates no global), it is kept for the policy.
+- **Focus guard in one place.** `pw_view_focus` returns early for any view but the lessee's (`pw_lease_blocks_focus`), which covers `view_map`, xdg-activation, the foreign-toplevel activate request and the click path, so `handle_request_activate` in `server.c` is unchanged. `view_map` also inserts a new view behind the lessee and lowers its scene node. `view_unmap` calls `pw_lease_view_gone` (the destroy path goes through unmap).
+- **`touch_handle_motion` is unchanged.** It uses no surface lookup, only the grab offsets, which are 0 under a lease (`pw_input_lease_touch` also resets them). A touch device added during a lease is mapped too. Pointer devices (a mouse) are not remapped.
+- **A feature macro for patch 0004.** The patch adds `#define WLR_DRM_LEASE_OVERLAY_PLANES 1` to `<wlr/backend/drm.h>`, and `meson.build` fails the configure without it. The grant fix is needed for leasing to be safe, and nothing else in the headers tells that the patch is applied.
+- **Patch 0004 (c).** The lease keeps `connectors = NULL`, `n_connectors = 0`. Whether upstream fixed the use-after-free after 0.19.0 was not checked: the build container has no network access. `objects[]` has `3 * n_outputs + drm->num_planes + 1` entries as planned, and an overlay plane that is possible on several leased CRTCs is added once, because the kernel rejects a duplicate object.
+- **Tests that could not run here.** There is no `/dev/dri`, no vkms and no kernel module support in the build container, so `tests/lease-vkms.sh` (with `tests/pw-lease-client.c`, suite `vkms`, exit 77 without root, `/dev/dri` and the module) was compiled but never run. The grant path, the parking path, the touch mapping and the key policy at run time were reviewed but not exercised; the ASan confirmation of the grant fix is open. The `meson test` run under `-Db_sanitize=address,undefined` passes (except `rss`, whose ceiling the sanitizer exceeds). The `lease-vkms` script treats a picowl that cannot start (no seat) as a skip, not a failure. Its close-fd-only case runs only when `/run/udev` exists.
+- **Open questions** are answered as proposed: power key and cycle key revoke (question 3), touch in native pixels (4), nothing for udev (5), layer surfaces are closed with the output as in the VT-switch path (6, 7). Questions 1, 2 and 8 are open: they need upstream, the boards and a CI runner.
+- **No inline comments in the `[lease]` snippet.** The parser (`src/config.c`) takes only whole-line `#`/`;` comments, so a `; ...` after a value would become part of it. §2.2 and `doc/lease.md` put the comments on their own lines.

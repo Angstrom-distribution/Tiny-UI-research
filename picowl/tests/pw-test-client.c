@@ -23,6 +23,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 #include "picowl-buffer-v1-client-protocol.h"
+#include "idle-inhibit-unstable-v1-client-protocol.h"
 
 #define FMT_RGB565 WL_SHM_FORMAT_RGB565
 
@@ -41,6 +42,9 @@ static bool pb_fmt_565;
 static int pb_copy_type = -1;
 static int pb_caching = -1;     /* -1: not received (v1 compositor or client) */
 static uint32_t pb_version, pb_bind_max = 2;
+static struct zwp_idle_inhibit_manager_v1 *inhibit_mgr;
+static const char *no_global;      /* --expect-no-global NAME */
+static bool saw_no_global;         /* ... and the registry advertised it */
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -83,10 +87,14 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	const char *iface, uint32_t ver)
 {
 	(void)d;
+	if (no_global && !strcmp(iface, no_global))
+		saw_no_global = true;
 	if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
 		dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, 3);
+	else if (!strcmp(iface, zwp_idle_inhibit_manager_v1_interface.name))
+		inhibit_mgr = wl_registry_bind(r, name, &zwp_idle_inhibit_manager_v1_interface, 1);
 	else if (!strcmp(iface, picowl_buffer_manager_v1_interface.name)) {
 		pb_version = ver < pb_bind_max ? ver : pb_bind_max;
 		pbm = wl_registry_bind(r, name, &picowl_buffer_manager_v1_interface,
@@ -419,6 +427,8 @@ int main(int argc, char **argv)
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
 	int zc_count = 0;
 	bool probe = false, readback = false;
+	bool want_inhibit = false;
+	int linger = 0;
 	const char *app_id = "picowl-test-client";
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--zerocopy"))
@@ -434,6 +444,12 @@ int main(int argc, char **argv)
 			readback = true;
 		else if (!strcmp(argv[i], "--app-id") && i + 1 < argc)
 			app_id = argv[++i];
+		else if (!strcmp(argv[i], "--inhibit"))
+			want_inhibit = true;
+		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
+			linger = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
+			no_global = argv[++i];
 	}
 
 	alarm(5);
@@ -446,6 +462,14 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (no_global) {
+		if (saw_no_global) {
+			fprintf(stderr, "picowl-test-client: unexpected global %s\n", no_global);
+			return 1;
+		}
+		printf("picowl-test-client: no global %s\n", no_global);
+		return 0;
+	}
 	if (probe) {
 		if (pbm)
 			printf("picowl-test-client: probe bufmgr version=%u format=%d "
@@ -470,6 +494,13 @@ int main(int argc, char **argv)
 	xdg_toplevel_add_listener(tl, &tl_listener, NULL);
 	xdg_toplevel_set_title(tl, "picowl-test");
 	xdg_toplevel_set_app_id(tl, app_id);
+	if (want_inhibit) {
+		if (!inhibit_mgr) {
+			fprintf(stderr, "picowl-test-client: no idle inhibit manager\n");
+			return 1;
+		}
+		zwp_idle_inhibit_manager_v1_create_inhibitor(inhibit_mgr, surface);
+	}
 	wl_surface_commit(surface);
 
 	while (!configured)
@@ -530,5 +561,12 @@ int main(int argc, char **argv)
 
 	printf("picowl-test-client: mapped %dx%d format %u\n", w, h, format);
 	fflush(stdout);
+	/* --linger S: stay connected (answering pings) for S s after the first frame. */
+	alarm(linger + 5);
+	for (int i = 0; i < linger * 10; i++) {
+		usleep(100000);
+		if (wl_display_roundtrip(dpy) < 0)
+			return timeout_exit();
+	}
 	return 0;
 }

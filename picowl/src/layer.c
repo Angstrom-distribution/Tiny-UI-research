@@ -172,13 +172,16 @@ void pw_panel_update(struct pw_server *s)
 		&& fv && fv->mapped && !s->panel_forced_visible
 		&& !top_has_exclusive(s);
 
-	if (hidden == s->panel_hidden)
-		return;
-	s->panel_hidden = hidden;
-	wlr_scene_node_set_enabled(&s->layer_panel->node, !hidden);
-	struct pw_output *o;
-	wl_list_for_each(o, &s->outputs, link)
-		pw_layer_arrange(o);
+	if (hidden != s->panel_hidden) {
+		s->panel_hidden = hidden;
+		wlr_scene_node_set_enabled(&s->layer_panel->node, !hidden);
+		struct pw_output *o;
+		wl_list_for_each(o, &s->outputs, link)
+			pw_layer_arrange(o);
+	}
+	/* Focus, stacking or panel visibility changed: a hidden panel's
+	 * inhibitors must not count. */
+	pw_idle_inhibit_update(s);
 }
 
 void pw_panel_toggle(struct pw_server *s)
@@ -265,6 +268,7 @@ static void handle_destroy(struct wl_listener *listener, void *data)
 	wl_list_remove(&ls->output_destroy.link);
 	wl_list_remove(&ls->new_popup.link);
 	wl_list_remove(&ls->link);
+	ls->wlr_layer_surface->data = NULL; /* idle.c reads it */
 	free(ls);
 
 	/* The scene node is destroyed by wlroots with the surface; re-arrange so

@@ -279,6 +279,7 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	pw_cursor_init(server);
 	pw_idle_init(server);
 	pw_power_init(server);
+	pw_lease_init(server); /* before the backend starts: the first output is offered */
 	return true;
 
 fail:
@@ -338,9 +339,11 @@ void pw_server_finish(struct pw_server *server)
 	listener_drop(&server->new_output);
 	listener_drop(&server->new_xdg_toplevel);
 	listener_drop(&server->new_layer_surface);
+	listener_drop(&server->new_idle_inhibitor); /* wlroots asserts it is empty at display destroy */
 	listener_drop(&server->output_power_set_mode);
 
 	pw_zerocopy_finish(server);
+	pw_lease_finish(server);
 
 	wl_display_destroy_clients(server->display);
 
@@ -358,6 +361,7 @@ void pw_server_finish(struct pw_server *server)
 		S.sigint = NULL;
 	}
 	pw_power_finish(server);
+	pw_output_finish(server);
 	if (server->idle_timer) {
 		wl_event_source_remove(server->idle_timer);
 		server->idle_timer = NULL;

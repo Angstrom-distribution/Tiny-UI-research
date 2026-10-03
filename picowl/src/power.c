@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <wlr/backend/session.h>
 #include "picowl.h"
 #include "power.h"
 #include "backlight.h"
@@ -20,6 +21,8 @@ struct pw_power {
 	bool bl_retry;                  /* last write failed, redo on next input */
 	struct pw_dim dim;
 	enum pw_power_profile profile;
+	unsigned inhibit_mask;          /* PW_INHIBIT_* reasons currently set */
+	struct wl_listener session_active;
 	struct pw_ps_uevent uev;
 	struct wl_event_source *uev_src;
 	struct wl_event_source *dim_timer;
@@ -132,6 +135,36 @@ static void run_actions(struct pw_power *p, unsigned act)
 		apply_level(p);
 }
 
+/* The output power protocol may change server->blanked behind our back. */
+static void sync_blanked(struct pw_power *p)
+{
+	bool sb = p->server->blanked;
+	if (sb && p->dim.state != PW_DIM_BLANKED)
+		pw_dim_force_blank(&p->dim);
+	else if (!sb && p->dim.state == PW_DIM_BLANKED) {
+		pw_dim_force_unblank(&p->dim, now_ms());
+		apply_level(p);
+	}
+}
+
+/* Effective inhibit: a client inhibitor only counts if the profile honours it. */
+static bool inhibit_wanted(const struct pw_power *p)
+{
+	return ((p->inhibit_mask & PW_INHIBIT_CLIENT)
+			&& p->server->config->power[p->profile].inhibit)
+		|| (p->inhibit_mask & ~PW_INHIBIT_CLIENT);
+}
+
+static void apply_inhibit(struct pw_power *p)
+{
+	bool on = inhibit_wanted(p);
+	if (on == p->dim.inhibited)
+		return;
+	sync_blanked(p);
+	run_actions(p, pw_dim_set_inhibited(&p->dim, on, now_ms()));
+	rearm(p);
+}
+
 static int dim_timer_cb(void *data)
 {
 	struct pw_power *p = data;
@@ -146,6 +179,7 @@ static void profile_changed(struct pw_power *p, enum pw_power_profile np)
 		return;
 	pw_log(WLR_INFO, "power profile %d -> %d", p->profile, np);
 	p->profile = np;
+	apply_inhibit(p); /* the new profile may honour inhibitors or not */
 	unsigned act = pw_dim_set_timeouts(&p->dim, dim_ms_for(p, np),
 		blank_ms_for(p, np), now_ms());
 	run_actions(p, act);
@@ -173,6 +207,13 @@ static int poll_cb(void *data)
 	reread_profile(p);
 	wl_event_source_timer_update(p->poll_timer, p->server->config->poll_s * 1000);
 	return 0;
+}
+
+static void session_active_cb(struct wl_listener *l, void *data)
+{
+	struct pw_power *p = wl_container_of(l, p, session_active);
+	(void)data;
+	pw_power_inhibit(p->server, PW_INHIBIT_SESSION, !p->server->session->active);
 }
 
 void pw_power_init(struct pw_server *server)
@@ -219,23 +260,20 @@ void pw_power_init(struct pw_server *server)
 			wl_event_source_timer_update(p->poll_timer, c->poll_s * 1000);
 	}
 
+	/* Another VT owns the display: no timers, no backlight writes under it. */
+	if (server->session) {
+		p->session_active.notify = session_active_cb;
+		wl_signal_add(&server->session->events.active, &p->session_active);
+		if (!server->session->active)
+			p->inhibit_mask |= PW_INHIBIT_SESSION;
+		apply_inhibit(p);
+	}
+
 	apply_level(p); /* LOW cap at startup */
 	rearm(p);
 	pw_log(WLR_INFO, "power: profile %d, backlight %s, dim %lld ms, blank %lld ms",
 		p->profile, p->bl ? pw_backlight_name(p->bl) : "none",
 		(long long)p->dim.dim_ms, (long long)p->dim.blank_ms);
-}
-
-/* The output power protocol may change server->blanked behind our back. */
-static void sync_blanked(struct pw_power *p)
-{
-	bool sb = p->server->blanked;
-	if (sb && p->dim.state != PW_DIM_BLANKED)
-		pw_dim_force_blank(&p->dim);
-	else if (!sb && p->dim.state == PW_DIM_BLANKED) {
-		pw_dim_force_unblank(&p->dim, now_ms());
-		apply_level(p);
-	}
 }
 
 bool pw_power_activity(struct pw_server *server)
@@ -277,12 +315,26 @@ void pw_power_sync_blanked(struct pw_server *server)
 	rearm(p);
 }
 
+void pw_power_inhibit(struct pw_server *server, unsigned reason, bool on)
+{
+	struct pw_power *p = server->power;
+	if (!p)
+		return;
+	if (on)
+		p->inhibit_mask |= reason;
+	else
+		p->inhibit_mask &= ~reason;
+	apply_inhibit(p);
+}
+
 void pw_power_finish(struct pw_server *server)
 {
 	struct pw_power *p = server->power;
 	if (!p)
 		return;
 	server->power = NULL;
+	if (server->session)
+		wl_list_remove(&p->session_active.link);
 	if (p->dim_timer)
 		wl_event_source_remove(p->dim_timer);
 	if (p->poll_timer)

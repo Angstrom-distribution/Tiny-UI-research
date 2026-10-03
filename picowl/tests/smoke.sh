@@ -46,6 +46,17 @@ if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
 	fail "picowl log has 'Failed to upload buffer'"
 fi
 
+OUT=$("$CLIENT" --inhibit 2>&1) || fail "inhibit client failed: $OUT"
+case "$OUT" in *mapped*) ;; *) fail "inhibit client did not report mapped" ;; esac
+sleep 0.2
+grep -q 'idle inhibit on' "$DIR/picowl.log" || fail "no 'idle inhibit on' in picowl log"
+grep -q 'idle inhibit off' "$DIR/picowl.log" || fail "no 'idle inhibit off' in picowl log"
+
+# Headless has no DRM backend: no lease global, and a clean teardown of the
+# NULL manager (wlroots asserts on a leftover request listener).
+grep -q 'lease: no DRM backend, disabled' "$DIR/picowl.log" || fail "no 'lease: no DRM backend' in picowl log"
+OUT=$("$CLIENT" --expect-no-global wp_drm_lease_device_v1 2>&1) || fail "lease global advertised: $OUT"
+
 kill -TERM "$PID"
 i=0
 while kill -0 "$PID" 2>/dev/null; do

@@ -7,6 +7,7 @@ void pw_dim_init(struct pw_dim *d, int64_t dim_ms, int64_t blank_ms)
 	d->dim_ms = dim_ms;
 	d->blank_ms = blank_ms;
 	d->last_activity = 0;
+	d->inhibited = false;
 }
 
 unsigned pw_dim_activity(struct pw_dim *d, int64_t now)
@@ -39,7 +40,7 @@ unsigned pw_dim_tick(struct pw_dim *d, int64_t now)
 {
 	int64_t elapsed;
 
-	if (d->state == PW_DIM_BLANKED)
+	if (d->state == PW_DIM_BLANKED || d->inhibited)
 		return 0;
 
 	elapsed = now - d->last_activity;
@@ -93,11 +94,29 @@ unsigned pw_dim_force_unblank(struct pw_dim *d, int64_t now)
 	return PW_DIM_ACT_UNBLANK;
 }
 
+unsigned pw_dim_set_inhibited(struct pw_dim *d, bool on, int64_t now)
+{
+	if (d->inhibited == on)
+		return 0;
+	d->inhibited = on;
+	if (on) {
+		if (d->state != PW_DIM_DIMMED)
+			return 0;
+		d->state = PW_DIM_ACTIVE;
+		d->last_activity = now;
+		return PW_DIM_ACT_UNDIM;
+	}
+	if (d->state == PW_DIM_BLANKED)
+		return 0;
+	d->last_activity = now;
+	return pw_dim_tick(d, now);
+}
+
 int64_t pw_dim_next_deadline(const struct pw_dim *d)
 {
 	int64_t deadline = -1;
 
-	if (d->state == PW_DIM_BLANKED)
+	if (d->state == PW_DIM_BLANKED || d->inhibited)
 		return -1;
 
 	/* If both timeouts are disabled, no deadline. */
