@@ -114,12 +114,12 @@ If `picowl/LICENSE` changes, update the `LIC_FILES_CHKSUM` md5 in `picowl_git.bb
 
 ## Cross-check against the project (latest)
 
-* picowl `DEPENDS` now matches `meson.build` (wlroots-0.19, wayland-server, wayland-protocols, xkbcommon, pixman-1, libdrm, native wayland-scanner); libinput was dropped (only wlroots uses it).
+* picowl `DEPENDS` now matches `meson.build` (wlroots-0.19, wayland-server, wayland-protocols, xkbcommon, pixman-1, libdrm, native wayland-scanner), including libinput (picowl itself uses its touch calibration matrix).
 * `-Dtests=false` is set; `PACKAGECONFIG[systemd]` maps the `systemd` DISTRO_FEATURE to `-Dsystemd=enabled/disabled`. meson installs the unit itself, so the recipe no longer copies it.
 * `/etc/picowl.ini` is still installed from `data/picowl.ini.example`; LICENSE md5 and wlroots 0.19.0 options were re-verified. `bitbake -p` parses cleanly (blacksail, wrynose).
 
 ## wlroots patches and libinput (zero-copy / rotation work)
 
 * `recipes-graphics/wlroots/files/` holds three patches (`0001` pixman dmabuf mmap, `0002` pixman fast paths, `0003` DRM hardware rotation and copy-type). `wlroots_0.19.0.bb` has `FILESEXTRAPATHS:prepend := "${THISDIR}/files:"` and lists them as `file://` entries in `SRC_URI`. They are byte-identical to `subprojects/packagefiles/wlroots/` (used by the meson wrap `diff_files`); keep both in sync (`diff -r`).
-* `libinput` is back in the picowl `DEPENDS` (and `-DPW_HAVE_LIBINPUT` is set by meson): picowl uses the libinput calibration matrix directly for touch rotation. This supersedes the earlier note that it was dropped. The comment above `RDEPENDS` in `picowl_git.bb` still says libinput is used inside wlroots only and could be updated.
+* `libinput` is back in the picowl `DEPENDS` (and `-DPW_HAVE_LIBINPUT` is set by meson): picowl uses the libinput calibration matrix directly for touch rotation. The comment above `RDEPENDS` in `picowl_git.bb` still says libinput is used inside wlroots only; that is stale (libseat and udev are wlroots-only).
 * The OE recipes were not built here (no bitbake); check the patches apply in `do_patch`.

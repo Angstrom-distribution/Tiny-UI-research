@@ -31,7 +31,8 @@ color = #101010
 [keybindings]
 # "<modifiers>+<key> = <action> [command]"
 # key is an xkb keysym name (Tab) or a numeric evdev keycode (code:116).
-# modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, quit.
+# modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, panel, quit.
+# Built-in defaults: code:116 = blank, alt+Tab = cycle, logo+Escape = quit.
 # alt+Tab = cycle
 # alt+F4 = close
 # code:116 = blank
@@ -82,8 +83,9 @@ color = #101010
 # Per-output copy-type override (damage-clip framebuffer copies to VRAM).
 # "<output name> = <type>" or "* = <type>".
 # Types: auto (default, enabled for drivers that benefit), yes, no.
-# Requires the kernel driver to support DRM_IOCTL_MODE_OBJ_GETPROPERTIES
-# (FB_DAMAGE_CLIPS). Drivers: mq11xx, w100, sa1100-lcdc (copy-type);
+# Requires a kernel with DRM_IOCTL_MODE_CLOSEFB (Linux 6.9 or a backport);
+# without it auto disables copy-type, and yes is honoured but logs an error.
+# Copy-type drivers should also support FB_DAMAGE_CLIPS. Drivers: mq11xx, w100, sa1100-lcdc (copy-type);
 # pxa-lcdc (scans DMA buffers, no copy).
 # DSI-1 = auto
 # * = auto
@@ -100,11 +102,13 @@ color = #101010
 
 [memory]
 # Memory allocator tuning (M_* malloc() environment variables).
-# arena_max: number of arenas (1 per CPU core by default). Range: 1..8 (default 1).
-# trim_threshold_kb: bytes of excess before malloc_trim() on idle (default 256).
+# arena_max: M_ARENA_MAX, number of malloc arenas. Range: 1..8 (default 1).
+# trim_threshold_kb: M_TRIM_THRESHOLD in kB, the amount of free memory at the
+#   top of the heap that glibc free() returns to the OS (default 256).
 # mmap_threshold_kb: size threshold for mmap-allocated blocks in kB (default 128).
 # top_pad_kb: extra bytes reserved at the top of the heap in kB (default 16).
-# trim_after_start: call malloc_trim() once after startup (default true).
+# trim_after_start: call malloc_trim(0) once from an idle callback after
+#   startup (default true).
 # Ranges: trim_threshold_kb 0..65536, mmap_threshold_kb 16..4096, top_pad_kb 0..65536;
 # out-of-range values are rejected and the default is kept.
 # arena_max = 1
@@ -117,8 +121,10 @@ color = #101010
 # Power supply aware backlight dimming configuration.
 # backlight: auto (prefer type firmware > platform > raw, first by name),
 #   or an explicit backlight device name in /sys/class/backlight/. Default: auto.
-# low_capacity: battery capacity threshold (%) below which LOW profile is used.
-#   Range: 0..100 (default 15). 0 disables LOW profile detection.
+# low_capacity: battery capacity threshold (%): LOW is used when the lowest
+#   battery capacity is <= this value. Range: 0..100 (default 15). 0 means LOW
+#   only at 0%; LOW cannot be disabled, set [power.low] timings equal to
+#   [power.battery] instead.
 # dim_level: dimmed brightness as % of user brightness. Range: 1..100 (default 30).
 #   To disable dimming set dim_after_s = 0 in the [power.*] profiles.
 # poll_s: sysfs re-read period for drivers that don't emit change events.
