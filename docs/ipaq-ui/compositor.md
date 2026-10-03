@@ -129,6 +129,15 @@ tinywl's interactive move/resize and xcursor code is deleted.
 
 ### 5.3 Buffer model: the zero-copy path
 
+**Status (picowl branch `picowl`):** implemented, but compiled and unit-tested only, because no test system has a DRM device. Pieces:
+- `picowl-buffer-v1` with `copied`/`retained` events. Early release is sent only for direct scanout on copy-type outputs.
+- RGB565 linear dmabuf feedback.
+- Panel auto-hide.
+- Single-buffer composition on copy-type outputs.
+- A wlroots patch so pixman can read dmabufs.
+
+See `picowl/doc/buffers.md` and `picowl/doc/zero-copy.md`, including the hardware-only checklist.
+
 1. **Compositor-allocated client buffers.**
    - A small private protocol: the client asks for a w×h RGB565 buffer and gets a dmabuf fd and stride.
    - The compositor creates a dumb buffer and PRIME-exports it. The client mmaps it and attaches it through linux-dmabuf.
@@ -150,6 +159,10 @@ tinywl's interactive move/resize and xcursor code is deleted.
    - It needs pixman to read dmabuf client buffers via mmap with `DMA_BUF_IOCTL_SYNC` (~150 lines in wlroots). Without that, those surfaces vanish whenever direct scanout fails.
 
 ### 5.4 Phase 2
+
+**Status:**
+- MediaQ hardware rotation (`[rotation] mode = auto|hardware|software`, wlroots patch 0003) is implemented, untested on hardware.
+- Pixel doubling, C8, video handoff and the windowed W3220 overlay are not implemented. The C8 options are written up in `picowl/doc/zero-copy.md`.
 | Feature | Approach | Size |
 |---|---|---|
 | MediaQ hardware rotation | Write the primary-plane `rotation` property; report the swapped size; rotate touch | 50–150 lines, incl. a wlroots patch |
