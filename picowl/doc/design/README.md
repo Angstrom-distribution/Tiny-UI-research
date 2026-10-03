@@ -1,6 +1,6 @@
 # picowl design plans
 
-**Status:** idle-inhibit and drm-lease are implemented; the other plans are design only.
+**Status:** all five plans (idle-inhibit, buffer-budget, caching-event, drm-lease, per-app-hold) are implemented.
 
 These are the picowl-side work items from [mediaplayer-integration.md](../mediaplayer-integration.md). Line references in the plans are against picowl commit b9eac6d and wlroots 0.19.0, so they drift as the code changes.
 
