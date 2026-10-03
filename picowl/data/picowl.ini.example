@@ -1,0 +1,36 @@
+# picowl configuration. Copy to ~/.config/picowl/picowl.ini or /etc/picowl.ini.
+# Lines starting with '#' or ';' are comments.
+
+[render]
+# Preferred render/scanout format: RGB565 (default), XRGB8888, ARGB8888.
+# If the backend cannot do it, picowl falls back to the backend default.
+format = RGB565
+
+[output]
+# Per-output rotation, "<output name> = <transform>".
+# Transforms: normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270.
+# "*" matches any output without its own entry.
+# DSI-1 = 90
+# * = normal
+
+[idle]
+# Milliseconds of inactivity before the screen is blanked; 0 disables.
+timeout_ms = 60000
+
+[background]
+# Background colour as RGB hex.
+color = #101010
+
+[autostart]
+# One shell command per line, run once at startup.
+# cmd = picowl-panel
+# cmd = picowl-osk
+
+[keybindings]
+# "<modifiers>+<key> = <action> [command]"
+# key is an xkb keysym name (Tab) or a numeric evdev keycode (code:116).
+# modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, quit.
+# alt+Tab = cycle
+# alt+F4 = close
+# code:116 = blank
+# logo+Return = spawn foot
