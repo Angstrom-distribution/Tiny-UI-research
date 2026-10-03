@@ -233,7 +233,7 @@ when the patch was written). The overlay planes of the out-of-tree iPAQ
 drivers are unverified: check `modetest -p` for their `possible_crtcs`.
 
 **Tests:** none run in the build container (no `/dev/dri`).
-`tests/lease-vkms.sh` runs a full lease on vkms (needs root); with ASan builds
+`tests/lease-vkms.sh` runs a full lease on vkms (opt-in with `PW_LEASE_VKMS=1`, needs root); with ASan builds
 of picowl and wlroots it catches the use-after-free, and with
 `PW_LEASE_EXPECT_OVERLAY=1` it checks that the overlay is in the lease.
 

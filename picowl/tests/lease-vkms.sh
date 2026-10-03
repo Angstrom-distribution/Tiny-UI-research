@@ -2,10 +2,11 @@
 # DRM lease end to end on the vkms virtual KMS device.
 # usage: lease-vkms.sh PICOWL PW_LEASE_CLIENT
 #
-# Needs root, the vkms module and /dev/dri; skips (exit 77) otherwise, so it
-# is harmless in a normal `meson test`. To run it:
+# Opt-in: it loads a kernel module and runs a DRM compositor on a VT, so it
+# skips (exit 77) unless PW_LEASE_VKMS=1. It also needs root, the vkms module
+# and /dev/dri. To run it:
 #   modprobe vkms enable_overlay=1        (overlay planes are only in vkms 6.x)
-#   meson test -C build --suite vkms --print-errorlogs
+#   PW_LEASE_VKMS=1 meson test -C build --suite vkms --print-errorlogs
 # The wlroots patch 0004 and the lessee's overlay plane are checked too: set
 # PW_LEASE_EXPECT_OVERLAY=1 when vkms has the overlay. LIBSEAT_BACKEND defaults
 # to builtin, which needs a free VT; use `noop` or a seatd otherwise. Build
@@ -15,6 +16,7 @@ PICOWL=$1
 CLIENT=$2
 
 skip() { echo "lease-vkms: SKIP: $*"; exit 77; }
+[ "$PW_LEASE_VKMS" = 1 ] || skip "opt-in: set PW_LEASE_VKMS=1"
 [ -d /dev/dri ] || skip "no /dev/dri"
 [ "$(id -u)" = 0 ] || skip "needs root"
 grep -qw vkms /proc/modules 2>/dev/null || modprobe vkms enable_overlay=1 2>/dev/null ||

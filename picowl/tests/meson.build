@@ -59,7 +59,8 @@ pw_test_client = executable('pw-test-client',
   inhibit_client_h, inhibit_client_c,
   dependencies: [wayland_client])
 
-# Needs root, the vkms module and /dev/dri; skips (exit 77) without them.
+# Opt-in (PW_LEASE_VKMS=1), needs root, the vkms module and /dev/dri; skips
+# (exit 77) otherwise.
 pw_lease_client = executable('pw-lease-client',
   'pw-lease-client.c', xdg_client_h, xdg_client_c,
   lease_client_h, lease_client_c,

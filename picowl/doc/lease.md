@@ -74,7 +74,7 @@ When the lease ends, wlroots emits `new_output`; `output_new` applies the hardwa
 - `leasepolicy` (unit): the grant matrix, the allow list, the key policy.
 - `config` (unit): the `[lease]` keys. `dim` (unit): the lease sequences of the state machine.
 - `smoke` (headless): the log line `lease: no DRM backend, disabled`, and `pw-test-client --expect-no-global wp_drm_lease_device_v1`. This covers the NULL manager and the teardown.
-- `lease-vkms` (suite `vkms`, needs root and the `vkms` module, skips with exit 77 otherwise): `tests/lease-vkms.sh` with `tests/pw-lease-client.c` runs picowl on a vkms card and checks the rejection, a normal lease cycle, `kill -9` of the lessee and the close-fd-only case, and the contents of the lease. Build picowl and wlroots with ASan to also check the grant fix of patch 0004.
+- `lease-vkms` (suite `vkms`, opt-in with `PW_LEASE_VKMS=1`, needs root and the `vkms` module, skips with exit 77 otherwise): `tests/lease-vkms.sh` with `tests/pw-lease-client.c` runs picowl on a vkms card and checks the rejection, a normal lease cycle, `kill -9` of the lessee and the close-fd-only case, and the contents of the lease. Build picowl and wlroots with ASan to also check the grant fix of patch 0004.
 
 Hardware checklist (h2210, h5550, hx4700, h3870, h3970), with `-d 3`:
 
