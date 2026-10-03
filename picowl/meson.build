@@ -57,6 +57,8 @@ sources = files(
   'src/layer.c',
   'src/input.c',
   'src/idle.c',
+  'src/touchhold.c',
+  'src/cursor.c',
 )
 
 pwcursorfit = static_library(
@@ -68,6 +70,7 @@ pwcursorfit = static_library(
 picowl_exe = executable(
   'picowl',
   sources, protocol_headers,
+  link_with: pwcursorfit,
   dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm],
   include_directories: include_directories('src'),
   install: true,

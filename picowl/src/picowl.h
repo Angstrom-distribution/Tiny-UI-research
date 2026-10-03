@@ -32,6 +32,7 @@
 #define pw_log(level, ...) wlr_log(level, __VA_ARGS__)
 
 struct pw_server;
+struct pw_cursor;
 
 /* ---- configuration ---------------------------------------------------- */
 
@@ -201,6 +202,7 @@ struct pw_server {
 
 	struct wlr_seat *seat;
 	struct wlr_cursor *cursor;
+	struct pw_cursor *hold_cursor; /* owned by cursor.c, NULL until pw_cursor_init */
 	struct wl_list keyboards;  /* struct pw_keyboard */
 	struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 
@@ -315,6 +317,11 @@ void pw_input_finish(struct pw_server *server);
 /* Execute binding->action (spawn, cycle, close, blank, rotate, quit). Called
  * by input.c's key handler when a keybinding matches; also usable by tests. */
 void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *binding);
+
+/*
+ * cursor.c (see cursor.h)
+ */
+#include "cursor.h"
 
 /*
  * idle.c

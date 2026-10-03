@@ -2,12 +2,15 @@
  * input.c - seat, keyboards, touch/pointer, keybindings.
  *
  * Touch is converted to pointer events for clients (single tracked touch id).
- * No xcursor manager is created and no cursor image is ever set: the devices
- * are stylus driven and the compositor draws no cursor.
+ * No xcursor manager is created; the devices are stylus driven and the
+ * compositor draws a cursor only during the tap-and-hold animation
+ * (cursor.c). Tap-and-hold itself is the pure state machine in touchhold.c;
+ * this file performs the actions it returns.
  */
 #include "picowl.h"
 
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include <linux/input-event-codes.h>
 #include <wlr/types/wlr_input_device.h>
@@ -17,6 +20,8 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <xkbcommon/xkbcommon.h>
+
+#include "touchhold.h"
 
 #define PW_MOD_MASK (WLR_MODIFIER_SHIFT | WLR_MODIFIER_CTRL | \
                      WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO)
@@ -33,6 +38,9 @@ struct pw_input_state {
 	struct xkb_keymap *keymap;     /* shared by all physical keyboards */
 	bool frame_pending;            /* pointer events sent since last frame */
 	double grab_ox, grab_oy;       /* layout origin of the touch-grabbed surface */
+	struct pw_touchhold th;        /* tap-and-hold state machine */
+	struct wl_event_source *th_timer;
+	int down_x, down_y;            /* layout coords of the touch-down point */
 
 	struct wl_listener cursor_motion;
 	struct wl_listener cursor_motion_abs;
@@ -394,6 +402,81 @@ static void pointer_dev_destroy(struct wl_listener *l, void *data)
 
 /* ---- touch ------------------------------------------------------------ */
 
+static int64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Arm (or disarm) the hold timer for the state machine's next deadline. */
+static void th_rearm(void)
+{
+	if (!st.th_timer)
+		return;
+	int64_t dl = pw_touchhold_next_deadline(&st.th);
+	if (dl < 0) {
+		wl_event_source_timer_update(st.th_timer, 0);
+		return;
+	}
+	int64_t d = dl - now_ms();
+	if (d < 1)
+		d = 1;
+	if (d > 100000)
+		d = 100000;
+	wl_event_source_timer_update(st.th_timer, (int)d);
+}
+
+/* Perform state machine actions in the documented order. */
+static void th_exec(unsigned a, uint32_t time)
+{
+	struct pw_server *server = st.server;
+	struct wlr_seat *seat = server->seat;
+
+	if (a & PW_TH_STOP_ANIMATION)
+		pw_cursor_hold_stop(server);
+	if (a & PW_TH_SEND_LEFT_PRESS) {
+		st.frame_pending = true;
+		wlr_seat_pointer_notify_button(seat, time, BTN_LEFT,
+			WL_POINTER_BUTTON_STATE_PRESSED);
+	}
+	if ((a & PW_TH_SEND_MOTION) && seat->pointer_state.focused_surface) {
+		/* keep the implicit grab's focus: report motion in its coordinates */
+		st.frame_pending = true;
+		wlr_seat_pointer_notify_motion(seat, time,
+			server->cursor->x - st.grab_ox, server->cursor->y - st.grab_oy);
+	}
+	if (a & PW_TH_SEND_RIGHT_CLICK) {
+		st.frame_pending = true;
+		wlr_seat_pointer_notify_button(seat, time, BTN_RIGHT,
+			WL_POINTER_BUTTON_STATE_PRESSED);
+		wlr_seat_pointer_notify_button(seat, time, BTN_RIGHT,
+			WL_POINTER_BUTTON_STATE_RELEASED);
+	}
+	if (a & PW_TH_SEND_LEFT_RELEASE) {
+		st.frame_pending = true;
+		wlr_seat_pointer_notify_button(seat, time, BTN_LEFT,
+			WL_POINTER_BUTTON_STATE_RELEASED);
+	}
+	if (a & PW_TH_START_ANIMATION)
+		pw_cursor_hold_start(server, st.down_x, st.down_y);
+}
+
+static int th_timer_cb(void *data)
+{
+	(void)data;
+	int64_t now = now_ms();
+	unsigned a = pw_touchhold_tick(&st.th, now);
+	th_exec(a, (uint32_t)now);
+	/* no touch frame will follow a timer-driven event: flush now */
+	if (st.frame_pending) {
+		st.frame_pending = false;
+		wlr_seat_pointer_notify_frame(st.server->seat);
+	}
+	th_rearm();
+	return 0;
+}
+
 static void touch_handle_down(struct wl_listener *l, void *data)
 {
 	(void)l;
@@ -409,6 +492,8 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 		return;
 
 	wlr_cursor_warp_absolute(server->cursor, &ev->touch->base, ev->x, ev->y);
+	st.down_x = (int)server->cursor->x;
+	st.down_y = (int)server->cursor->y;
 	double sx, sy;
 	struct wlr_surface *s = surface_at(server, server->cursor->x,
 		server->cursor->y, &sx, &sy);
@@ -419,11 +504,12 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 		st.frame_pending = true;
 		wlr_seat_pointer_notify_enter(server->seat, s, sx, sy);
 		wlr_seat_pointer_notify_motion(server->seat, ev->time_msec, sx, sy);
-		wlr_seat_pointer_notify_button(server->seat, ev->time_msec, BTN_LEFT,
-			WL_POINTER_BUTTON_STATE_PRESSED);
 	} else {
 		wlr_seat_pointer_clear_focus(server->seat);
 	}
+	unsigned a = pw_touchhold_down(&st.th, st.down_x, st.down_y, now_ms());
+	th_exec(a, ev->time_msec);
+	th_rearm();
 }
 
 static void touch_handle_motion(struct wl_listener *l, void *data)
@@ -435,21 +521,21 @@ static void touch_handle_motion(struct wl_listener *l, void *data)
 	if (ev->touch_id != st.touch_id || st.touch_swallowed)
 		return;
 	wlr_cursor_warp_absolute(server->cursor, &ev->touch->base, ev->x, ev->y);
-	/* keep the implicit grab's focus: report motion in its coordinates */
-	if (server->seat->pointer_state.focused_surface) {
-		st.frame_pending = true;
-		wlr_seat_pointer_notify_motion(server->seat, ev->time_msec,
-			server->cursor->x - st.grab_ox, server->cursor->y - st.grab_oy);
-	}
+	unsigned a = pw_touchhold_motion(&st.th, (int)server->cursor->x,
+		(int)server->cursor->y, now_ms());
+	if (!(a & PW_TH_SWALLOW))
+		th_exec(a, ev->time_msec);
+	th_rearm();
 }
 
-static void touch_release(uint32_t time_msec)
+static void touch_end(uint32_t time_msec, bool cancel)
 {
 	if (!st.touch_swallowed) {
-		st.frame_pending = true;
-		wlr_seat_pointer_notify_button(st.server->seat, time_msec, BTN_LEFT,
-			WL_POINTER_BUTTON_STATE_RELEASED);
+		unsigned a = cancel ? pw_touchhold_cancel(&st.th)
+			: pw_touchhold_up(&st.th, now_ms());
+		th_exec(a & ~(unsigned)PW_TH_SWALLOW, time_msec);
 	}
+	th_rearm();
 	st.touch_id = PW_NO_TOUCH;
 	st.touch_swallowed = false;
 }
@@ -461,7 +547,7 @@ static void touch_handle_up(struct wl_listener *l, void *data)
 	activity(st.server);
 	if (ev->touch_id != st.touch_id)
 		return;
-	touch_release(ev->time_msec);
+	touch_end(ev->time_msec, false);
 }
 
 static void touch_handle_cancel(struct wl_listener *l, void *data)
@@ -470,7 +556,7 @@ static void touch_handle_cancel(struct wl_listener *l, void *data)
 	struct wlr_touch_cancel_event *ev = data;
 	if (ev->touch_id != st.touch_id)
 		return;
-	touch_release(ev->time_msec);
+	touch_end(ev->time_msec, true);
 }
 
 static void touch_handle_frame(struct wl_listener *l, void *data)
@@ -489,6 +575,10 @@ static void touch_dev_destroy(struct wl_listener *l, void *data)
 	wl_list_remove(&t->destroy.link);
 	free(t);
 	if (--st.n_touch == 0) {
+		if (st.touch_id != PW_NO_TOUCH && !st.touch_swallowed)
+			th_exec(pw_touchhold_cancel(&st.th) & ~(unsigned)PW_TH_SWALLOW,
+				(uint32_t)now_ms());
+		th_rearm();
 		st.touch_id = PW_NO_TOUCH;
 		st.touch_swallowed = false;
 	}
@@ -566,6 +656,12 @@ void pw_input_init(struct pw_server *server)
 	server->cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
+	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
+		server->config->hold_delay_ms, server->config->hold_ms,
+		server->config->slop_px);
+	st.th_timer = wl_event_loop_add_timer(
+		wl_display_get_event_loop(server->display), th_timer_cb, NULL);
+
 	server->virtual_keyboard_mgr =
 		wlr_virtual_keyboard_manager_v1_create(server->display);
 	server->new_virtual_keyboard.notify = handle_new_virtual_keyboard;
@@ -605,6 +701,10 @@ void pw_input_init(struct pw_server *server)
 
 void pw_input_finish(struct pw_server *server)
 {
+	if (st.th_timer) {
+		wl_event_source_remove(st.th_timer);
+		st.th_timer = NULL;
+	}
 	if (st.keymap) {
 		xkb_keymap_unref(st.keymap);
 		st.keymap = NULL;

@@ -6,7 +6,7 @@ A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ
 
 - **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking, per-output rotation via config, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
 - **Planned**: zero-copy surface buffer model (mmap_ptr to avoid per-frame pixel copies on RGB565), MediaQ hardware rotation and pixel doubling (routes through DRM/KMS layer), video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths).
-- **Known constraints**: no drawn cursor (drawn by clients or overlay apps), no animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
+- **Known constraints**: no general cursor theme (only the tap-and-hold wait animation is drawn by picowl), no window animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
 
 ## Build
 
@@ -135,6 +135,87 @@ alt+F4 = close
 code:116 = blank
 logo+Return = spawn foot
 ```
+
+## Tap-and-hold and Cursor
+
+### Tap-and-Hold Behaviour
+
+Touch input on picowl supports a tap-and-hold gesture (enabled by default, configurable via `[touch]`):
+
+- **Touch-down**: Focus the surface at the touch point and send pointer enter + motion, but defer the left-button press.
+- **Tap** (touch-up before hold triggers): Send left button press and release as a single click.
+- **Drag** (movement > `slop_px` before hold triggers): Send the deferred left press and normal motion; no hold animation.
+- **Hold animation** (after `hold_delay_ms`): Display a wait cursor at the touch point, stepping frames via a timer at ~12 fps (configurable).
+- **Right-click** (after `hold_ms` total from touch-down): Hide the animation, send right button press and release (Pocket PC convention; GTK2 sees button 3), and swallow remaining touch events.
+- **Lift during animation**: Counts as a tap (left press + release) only if the hold had not yet triggered.
+
+The behaviour is controlled by the `[touch]` section (see `data/picowl.ini.example`):
+
+| Key | Default | Range | Meaning |
+|-----|---------|-------|---------|
+| `hold_action` | `right-click` | `right-click`, `none` | Enable right-click on hold (`none` = immediate left press like traditional pointer) |
+| `hold_delay_ms` | 300 | integers | Milliseconds before the hold animation starts |
+| `hold_ms` | 900 | > `hold_delay_ms` | Milliseconds from touch-down to right-click |
+| `slop_px` | 8 | 0..64 | Movement tolerance in pixels; exceeding this cancels hold and triggers drag |
+
+### Cursor Configuration
+
+Picowl draws a cursor **only during the tap-and-hold animation**. The animation is configured in the `[cursor]` section:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `hold_animation` | `builtin` | `builtin` (Pocket PC 2003 rotating circle) or path to a PAM/PPM strip file |
+| `fill` | `#2050c0` | Foreground colour of the builtin animation (`#RRGGBB` hex) |
+| `outline` | `#ffffff` | Outline colour of the builtin animation (`#RRGGBB` hex) |
+| `frame_interval_ms` | 83 | Frame duration in milliseconds (20..1000; default ~12 fps) |
+
+For comprehensive cursor documentation including platform constraints, custom animation format, and the conversion tool, see **[doc/cursors.md](doc/cursors.md)**.
+
+### Cursor Requirements and Tools
+
+Picowl enforces hardware cursor rules to avoid frame commit failures:
+
+- **ARGB8888 format**, size 1..64 pixels
+- **No translucency**: Every pixel is fully transparent (`0x00000000`) or fully opaque (alpha `0xff`)
+- **Two-colour limit**: At most 2 distinct opaque colours per frame (compared at 6 bits per component)
+
+These rules exist because:
+- The MediaQ MQ1132/MQ1188 hardware cursor is 2 bpp AND/XOR with two colour registers
+- The mq11xx DRM cursor plane rejects violations with `-EINVAL`, failing the entire frame
+- wlroots 0.19 does not test-commit cursors before the next update
+- Software cursor fallback boards benefit from the cost constraints
+
+A custom `hold_animation` file (PAM or PPM) is a horizontal strip of square frames. Non-compliant frames are automatically converted at load time with a logged warning; see **[doc/cursors.md](doc/cursors.md)** for details.
+
+#### picowl-cursor-convert Tool
+
+Use the `picowl-cursor-convert` tool to create, validate, or convert cursor strips:
+
+```
+picowl-cursor-convert [--frame-width N] [--fg #rrggbb] [--bg #rrggbb]
+                      [--premultiplied] [--hotspot X,Y] in.pam|ppm out.pam
+
+picowl-cursor-convert --check [--frame-width N] in.pam|ppm
+
+picowl-cursor-convert --export-builtin [--fg #rrggbb] [--bg #rrggbb] out.pam
+```
+
+**Options:**
+- `--check`: Validate without output; exit 0 (compliant) or 1 (non-compliant)
+- `--export-builtin`: Write the built-in animation as a template PAM file
+- `--fg`, `--bg`: Force specific colours; otherwise the two dominant colours are kept
+- `--premultiplied`: Input has premultiplied alpha
+
+**Exit codes:** 0 (success/compliant), 1 (non-compliant in `--check`), 2 (I/O or usage error)
+
+To convert PNG to PAM:
+
+```sh
+pngtopam -alphapam image.png image.pam          # netpbm
+convert image.png pam:image.pam                 # ImageMagick
+```
+
+For complete usage examples and troubleshooting, see **[doc/cursors.md](doc/cursors.md)**.
 
 ## Supported Protocols
 

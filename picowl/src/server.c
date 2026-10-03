@@ -251,6 +251,7 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	pw_view_init(server);
 	pw_layer_init(server);
 	pw_input_init(server);
+	pw_cursor_init(server);
 	pw_idle_init(server);
 	return true;
 
@@ -326,6 +327,7 @@ void pw_server_finish(struct pw_server *server)
 		server->idle_timer = NULL;
 	}
 
+	pw_cursor_finish(server);
 	pw_input_finish(server);
 	pw_view_finish(server);
 	/* Backend first: output destroy handlers still need the scene alive. */
