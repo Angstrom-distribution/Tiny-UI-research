@@ -145,6 +145,7 @@ int main(void)
 
 	rmdir_r(tmpdir);
 	mkdir_p(tmpdir);
+	setenv("XDG_RUNTIME_DIR", tmpdir, 1); /* user-level state file */
 
 	/* Test: no devices in empty tree */
 	char root[256];
@@ -374,6 +375,43 @@ int main(void)
 		ASSERT_EQ(pw_backlight_get_user(bl), 80, "set_user updates level");
 
 		pw_backlight_close(bl);
+	}
+
+	/* Test: a crash while dimmed must not make the dimmed level the user's.
+	 * The panel sits at 20 and picowl dies (close without restoring); the
+	 * next open reads actual_brightness 20 but gets the saved level 50. */
+	snprintf(root, sizeof(root), "%s/sys11", tmpdir);
+	snprintf(path, sizeof(path), "%s/class/backlight/crash", root);
+	mkdir_p(path);
+	write_attr(path, "type", "raw\n");
+	write_attr(path, "max_brightness", "100\n");
+	write_attr(path, "actual_brightness", "50\n");
+	write_attr(path, "brightness", "50\n");
+	bl = pw_backlight_open(root, "crash");
+	ASSERT_NOT_NULL(bl, "open crash device");
+	if (bl) {
+		ASSERT_EQ(pw_backlight_get_user(bl), 50, "user level before dim");
+		ASSERT_EQ(pw_backlight_set(bl, 20), 0, "dim write");
+		write_attr(path, "actual_brightness", "20\n");
+		pw_backlight_close(bl); /* crash: no restore */
+
+		bl = pw_backlight_open(root, "crash");
+		ASSERT_NOT_NULL(bl, "reopen after crash");
+		if (bl) {
+			ASSERT_EQ(pw_backlight_get_user(bl), 50,
+				"user level survives a crash while dimmed");
+			/* Writing the user level back clears the state. */
+			ASSERT_EQ(pw_backlight_set(bl, 50), 0, "restore write");
+			write_attr(path, "actual_brightness", "50\n");
+			pw_backlight_close(bl);
+		}
+		write_attr(path, "actual_brightness", "33\n");
+		bl = pw_backlight_open(root, "crash");
+		if (bl) {
+			ASSERT_EQ(pw_backlight_get_user(bl), 33,
+				"no state after a restore: live level is the user level");
+			pw_backlight_close(bl);
+		}
 	}
 
 	/* Test: read-only file handling (skip if running as root) */
