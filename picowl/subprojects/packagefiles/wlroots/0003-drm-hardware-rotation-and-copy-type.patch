@@ -6,19 +6,22 @@ wlr_drm_connector_set_hw_rotation() (primary plane "rotation" property,
 90/270 swap the wlr_output_mode size) and wlr_drm_connector_set_copy_type()
 (release the scanned-out fb after the page-flip for drivers which copy the
 damage to device memory during the commit). Atomic only. A rotated
-primary plane refuses buffers with a non-zero dst origin (direct scanout
-falls back to compositing).
+primary plane refuses buffers whose dst box is not the whole output
+(direct scanout falls back to compositing), and a commit enabling a CRTC
+whose primary plane cannot do the rotation fails instead of sending the
+swapped modes unrotated. The rotation and copy-type state is reset when
+the connector's output is destroyed.
 
 Upstream-Status: Inappropriate [picowl specific]
 ---
- backend/drm/atomic.c      |  27 +++++--
- backend/drm/drm.c         | 183 +++++++++++++++++++++++++++++++++++++++++++++-
+ backend/drm/atomic.c      |  38 +++++++--
+ backend/drm/drm.c         | 192 +++++++++++++++++++++++++++++++++++++++++++++-
  include/backend/drm/drm.h |  14 ++++
  include/wlr/backend/drm.h |  47 ++++++++++++
- 4 files changed, 262 insertions(+), 9 deletions(-)
+ 4 files changed, 282 insertions(+), 9 deletions(-)
 
 diff --git a/backend/drm/atomic.c b/backend/drm/atomic.c
-index 037c3c23..8dbdc32f 100644
+index 037c3c23..2fa1b46f 100644
 --- a/backend/drm/atomic.c
 +++ b/backend/drm/atomic.c
 @@ -195,6 +195,10 @@ static uint64_t max_bpc_for_format(uint32_t format) {
@@ -32,7 +35,25 @@ index 037c3c23..8dbdc32f 100644
  	uint32_t format = DRM_FORMAT_INVALID;
  	struct wlr_dmabuf_attributes attribs = {0};
  	if (wlr_buffer_get_dmabuf(fb->wlr_buf, &attribs)) {
-@@ -271,6 +275,7 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
+@@ -243,6 +247,17 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
+ 	struct wlr_output *output = &conn->output;
+ 	struct wlr_drm_crtc *crtc = conn->crtc;
+ 
++	if (state->active && conn->hw_rotation != 0 &&
++			(crtc->primary->props.rotation == 0 ||
++			(crtc->primary->rotation_mask & conn->hw_rotation) != conn->hw_rotation)) {
++		// supports_hw_rotation() looks at every possible CRTC while the
++		// output is disabled, the one allocated may not be able to rotate.
++		// The modes are rotated already, don't commit them unrotated.
++		wlr_drm_conn_log(conn, WLR_ERROR,
++			"Primary plane of the CRTC can't do the hardware rotation");
++		return false;
++	}
++
+ 	uint32_t mode_id = crtc->mode_id;
+ 	if (modeset) {
+ 		if (!create_mode_blob(conn, state, &mode_id)) {
+@@ -271,6 +286,7 @@ bool drm_atomic_connector_prepare(struct wlr_drm_connector_state *state, bool mo
  
  	uint32_t fb_damage_clips = 0;
  	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
@@ -40,7 +61,7 @@ index 037c3c23..8dbdc32f 100644
  			crtc->primary->props.fb_damage_clips != 0) {
  		create_fb_damage_clips_blob(drm, state->primary_fb->wlr_buf->width,
  			state->primary_fb->wlr_buf->height, &state->base->damage, &fb_damage_clips);
-@@ -425,7 +430,8 @@ static void atomic_connector_add(struct atomic *atom,
+@@ -425,7 +441,8 @@ static void atomic_connector_add(struct atomic *atom,
  		atomic_add(atom, conn->id, conn->props.content_type,
  			DRM_MODE_CONTENT_TYPE_GRAPHICS);
  	}
@@ -50,7 +71,7 @@ index 037c3c23..8dbdc32f 100644
  		atomic_add(atom, conn->id, conn->props.max_bpc, pick_max_bpc(conn, state->primary_fb));
  	}
  	atomic_add(atom, crtc->id, crtc->props.mode_id, state->mode_id);
-@@ -438,11 +444,20 @@ static void atomic_connector_add(struct atomic *atom,
+@@ -438,11 +455,20 @@ static void atomic_connector_add(struct atomic *atom,
  			atomic_add(atom, crtc->id, crtc->props.vrr_enabled, state->vrr_enabled);
  		}
  
@@ -77,7 +98,7 @@ index 037c3c23..8dbdc32f 100644
  		if (state->primary_in_fence_fd >= 0) {
  			set_plane_in_fence_fd(atom, crtc->primary, state->primary_in_fence_fd);
 diff --git a/backend/drm/drm.c b/backend/drm/drm.c
-index e9e4c6db..f676a5f7 100644
+index e9e4c6db..08077de2 100644
 --- a/backend/drm/drm.c
 +++ b/backend/drm/drm.c
 @@ -174,6 +174,19 @@ static bool init_plane(struct wlr_drm_backend *drm,
@@ -113,20 +134,23 @@ index e9e4c6db..f676a5f7 100644
  		generate_cvt_mode(&state->mode, width, height, (float)refresh / 1000);
  		state->mode.type = DRM_MODE_TYPE_USERDEF;
  	}
-@@ -719,6 +738,20 @@ static bool drm_connector_state_update_primary_fb(struct wlr_drm_connector *conn
+@@ -719,6 +738,23 @@ static bool drm_connector_state_update_primary_fb(struct wlr_drm_connector *conn
  	struct wlr_drm_plane *plane = crtc->primary;
  	struct wlr_buffer *source_buf = state->base->buffer;
  
 +	if (conn->hw_rotation != 0 && conn->hw_rotation != DRM_MODE_ROTATE_0) {
-+		// CRTC_X/Y are in rotated mode coordinates while the dst box is in
-+		// framebuffer coordinates; only the origin maps onto itself. Refuse
-+		// offset boxes (e.g. a direct scanout buffer placed by the scene),
-+		// the caller falls back to compositing.
++		// CRTC_X/Y/W/H are the dst box rotated within the mode while the dst
++		// box is in framebuffer coordinates, so only a box covering the
++		// whole framebuffer maps onto the CRTC without being repositioned or
++		// clipped. Refuse anything else (e.g. a direct scanout buffer placed
++		// or scaled by the scene), the caller falls back to compositing.
 +		struct wlr_box dst;
 +		output_state_get_buffer_dst_box(state->base, &dst);
-+		if (dst.x != 0 || dst.y != 0) {
++		int width, height;
++		output_pending_resolution(&conn->output, state->base, &width, &height);
++		if (dst.x != 0 || dst.y != 0 || dst.width != width || dst.height != height) {
 +			wlr_drm_conn_log(conn, WLR_DEBUG,
-+				"Offset buffer with hardware rotation, not scanning out");
++				"Partial buffer with hardware rotation, not scanning out");
 +			return false;
 +		}
 +	}
@@ -134,7 +158,7 @@ index e9e4c6db..f676a5f7 100644
  	struct wlr_drm_syncobj_timeline *wait_timeline = NULL;
  	uint64_t wait_point = 0;
  	if (state->base->committed & WLR_OUTPUT_STATE_WAIT_TIMELINE) {
-@@ -773,6 +806,15 @@ static bool drm_connector_state_update_primary_fb(struct wlr_drm_connector *conn
+@@ -773,6 +809,15 @@ static bool drm_connector_state_update_primary_fb(struct wlr_drm_connector *conn
  
  	output_state_get_buffer_src_box(state->base, &state->primary_viewport.src_box);
  	output_state_get_buffer_dst_box(state->base, &state->primary_viewport.dst_box);
@@ -150,7 +174,7 @@ index e9e4c6db..f676a5f7 100644
  
  	return true;
  }
-@@ -879,9 +921,17 @@ static bool drm_connector_prepare(struct wlr_drm_connector_state *conn_state, bo
+@@ -879,9 +924,17 @@ static bool drm_connector_prepare(struct wlr_drm_connector_state *conn_state, bo
  	}
  
  	if (conn_state->active && !conn_state->primary_fb) {
@@ -171,7 +195,7 @@ index e9e4c6db..f676a5f7 100644
  	}
  
  	return true;
-@@ -1028,6 +1078,18 @@ static bool drm_connector_alloc_crtc(struct wlr_drm_connector *conn) {
+@@ -1028,6 +1081,18 @@ static bool drm_connector_alloc_crtc(struct wlr_drm_connector *conn) {
  	return ok;
  }
  
@@ -190,7 +214,7 @@ index e9e4c6db..f676a5f7 100644
  static struct wlr_drm_mode *drm_mode_create(const drmModeModeInfo *modeinfo) {
  	struct wlr_drm_mode *mode = calloc(1, sizeof(*mode));
  	if (!mode) {
-@@ -1066,6 +1128,7 @@ struct wlr_output_mode *wlr_drm_connector_add_mode(struct wlr_output *output,
+@@ -1066,6 +1131,7 @@ struct wlr_output_mode *wlr_drm_connector_add_mode(struct wlr_output *output,
  	if (!mode) {
  		return NULL;
  	}
@@ -198,7 +222,7 @@ index e9e4c6db..f676a5f7 100644
  
  	wl_list_insert(&conn->output.modes, &mode->wlr_mode.link);
  
-@@ -1097,6 +1160,12 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
+@@ -1097,6 +1163,12 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
  		return false;
  	}
  
@@ -211,7 +235,7 @@ index e9e4c6db..f676a5f7 100644
  	if (conn->cursor_hotspot_x != hotspot_x ||
  			conn->cursor_hotspot_y != hotspot_y) {
  		// Update cursor hotspot
-@@ -1170,6 +1239,9 @@ static bool drm_connector_move_cursor(struct wlr_output *output,
+@@ -1170,6 +1242,9 @@ static bool drm_connector_move_cursor(struct wlr_output *output,
  	if (!plane) {
  		return false;
  	}
@@ -221,7 +245,20 @@ index e9e4c6db..f676a5f7 100644
  
  	struct wlr_box box = { .x = x, .y = y };
  
-@@ -1293,6 +1365,105 @@ uint32_t wlr_drm_connector_get_id(struct wlr_output *output) {
+@@ -1222,6 +1297,12 @@ static void drm_connector_destroy_output(struct wlr_output *output) {
+ 	}
+ 
+ 	conn->output = (struct wlr_output){0};
++
++	// The next output on this connector starts unrotated, the compositor opts
++	// in again
++	conn->hw_rotation = 0;
++	conn->hw_swap = false;
++	conn->copy_type = false;
+ }
+ 
+ static const struct wlr_drm_format_set *drm_connector_get_cursor_formats(
+@@ -1293,6 +1374,105 @@ uint32_t wlr_drm_connector_get_id(struct wlr_output *output) {
  	return conn->id;
  }
  
@@ -327,7 +364,7 @@ index e9e4c6db..f676a5f7 100644
  enum wl_output_transform wlr_drm_connector_get_panel_orientation(
  		struct wlr_output *output) {
  	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
-@@ -1622,6 +1793,7 @@ static bool connect_drm_connector(struct wlr_drm_connector *wlr_conn,
+@@ -1622,6 +1802,7 @@ static bool connect_drm_connector(struct wlr_drm_connector *wlr_conn,
  			wlr_output_state_finish(&state);
  			return false;
  		}
@@ -335,7 +372,7 @@ index e9e4c6db..f676a5f7 100644
  
  		// If this is the current mode set on the conn's crtc,
  		// then set it as the conn's output current mode.
-@@ -2000,6 +2172,11 @@ static void handle_page_flip(int fd, unsigned seq,
+@@ -2000,6 +2181,11 @@ static void handle_page_flip(int fd, unsigned seq,
  	if (plane->queued_fb) {
  		drm_fb_move(&plane->current_fb, &plane->queued_fb);
  	}
