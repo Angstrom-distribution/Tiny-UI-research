@@ -13,7 +13,7 @@ static void print_help(const char *prog)
 	printf("Options:\n");
 	printf("  -c CONFIG    Configuration file path (default: /etc/picowl.ini)\n");
 	printf("  -s CMD       Startup command to append to autostart\n");
-	printf("  -d LEVEL     Debug log level (0-7, default: 1 for WLR_INFO)\n");
+	printf("  -d LEVEL     Debug log level: 0=silent, 1=error, 2=info (default), 3=debug\n");
 	printf("  -h           Show this help message\n");
 	printf("  -v           Show version\n");
 }
@@ -42,8 +42,8 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			debug_level = atoi(optarg);
-			if (debug_level < 0 || debug_level > 7) {
-				fprintf(stderr, "Invalid debug level: %s (must be 0-7)\n", optarg);
+			if (debug_level < 0 || debug_level > 3) {
+				fprintf(stderr, "Invalid debug level: %s (must be 0-3)\n", optarg);
 				return 1;
 			}
 			break;
