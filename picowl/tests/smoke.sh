@@ -33,6 +33,11 @@ OUT=$("$CLIENT" --zerocopy 2>&1) || fail "zerocopy client failed: $OUT"
 echo "$OUT"
 case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy degradation message" ;; esac
 case "$OUT" in *mapped*) ;; *) fail "zerocopy client did not report mapped" ;; esac
+# Headless has no picowl-buffer global: the count request degrades the same way.
+OUT=$("$CLIENT" --zerocopy-count 7 --app-id mediaplayer 2>&1) || fail "zerocopy-count client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"zerocopy unavailable, using wl_shm"*) ;; *) fail "no zerocopy-count degradation message" ;; esac
+case "$OUT" in *mapped*) ;; *) fail "zerocopy-count client did not report mapped" ;; esac
 if grep -q 'Failed to upload buffer' "$DIR/picowl.log"; then
 	fail "picowl log has 'Failed to upload buffer'"
 fi

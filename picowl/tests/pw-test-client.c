@@ -1,4 +1,7 @@
-/* pw-test-client - minimal wl_shm + xdg-shell client used by the smoke test. */
+/* pw-test-client - minimal wl_shm + xdg-shell client used by the smoke test.
+ *   --zerocopy            commit dmabuf frames from picowl-buffer-v1
+ *   --zerocopy-count N    request N buffers, print how many were granted
+ *   --app-id ID           xdg_toplevel app_id (default picowl-test-client) */
 #define _GNU_SOURCE
 #include <stdbool.h>
 #include <stdint.h>
@@ -341,12 +344,45 @@ static int run_zerocopy(struct wl_display *dpy, int w, int h)
 	return 0;
 }
 
+/* Request n buffers, stop at the first failure and report how many the
+ * compositor granted (its per-client and pool limits). -1 = unavailable. */
+static int run_zerocopy_count(struct wl_display *dpy, int w, int h, int n)
+{
+	if (!dmabuf || !pbm || !pb_fmt_565)
+		return -1;
+	struct zbuf *zb = calloc(n, sizeof(*zb));
+	if (!zb)
+		return -1;
+	int granted = 0;
+	for (int i = 0; i < n; i++) {
+		if (!zc_create(dpy, &zb[i], w, h)) {
+			zc_destroy(&zb[i]);
+			break;
+		}
+		granted++;
+	}
+	printf("picowl-test-client: zerocopy-count requested %d granted %d\n", n, granted);
+	fflush(stdout);
+	for (int i = 0; i < granted; i++)
+		zc_destroy(&zb[i]);
+	free(zb);
+	wl_display_roundtrip(dpy);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
-	for (int i = 1; i < argc; i++)
+	int zc_count = 0;
+	const char *app_id = "picowl-test-client";
+	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--zerocopy"))
 			want_zc = true;
+		else if (!strcmp(argv[i], "--zerocopy-count") && i + 1 < argc)
+			zc_count = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--app-id") && i + 1 < argc)
+			app_id = argv[++i];
+	}
 
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
@@ -371,7 +407,7 @@ int main(int argc, char **argv)
 	struct xdg_toplevel *tl = xdg_surface_get_toplevel(xdg_surface);
 	xdg_toplevel_add_listener(tl, &tl_listener, NULL);
 	xdg_toplevel_set_title(tl, "picowl-test");
-	xdg_toplevel_set_app_id(tl, "picowl-test-client");
+	xdg_toplevel_set_app_id(tl, app_id);
 	wl_surface_commit(surface);
 
 	while (!configured)
@@ -379,7 +415,12 @@ int main(int argc, char **argv)
 			return timeout_exit();
 
 	int w = cfg_w > 0 ? cfg_w : 64, h = cfg_h > 0 ? cfg_h : 64;
-	if (want_zc) {
+	if (zc_count > 0) {
+		if (run_zerocopy_count(dpy, w, h, zc_count) == 0)
+			return 0;
+		printf("picowl-test-client: zerocopy unavailable, using wl_shm\n");
+		fflush(stdout);
+	} else if (want_zc) {
 		int rc = run_zerocopy(dpy, w, h);
 		if (rc > 0)
 			return 1;
