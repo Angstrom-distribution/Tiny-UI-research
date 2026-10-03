@@ -13,7 +13,18 @@ add_project_arguments(
   language: 'c'
 )
 
-wlroots = dependency('wlroots-0.19', fallback: ['wlroots', 'wlroots_dep'])
+cc = meson.get_compiler('c')
+
+wlroots = dependency('wlroots-0.19', fallback: ['wlroots', 'wlroots_dep'],
+  default_options: ['renderers=', 'allocators=', 'backends=drm,libinput',
+    'xwayland=disabled', 'examples=false'])
+
+# Verify that wlroots has the picowl patches (checks for wlr_drm_connector_set_copy_type from patch 0003)
+if not cc.has_header_symbol('wlr/backend/drm.h', 'wlr_drm_connector_set_copy_type',
+    dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
+  error('wlroots-0.19 lacks the picowl patches (0001-pixman, 0002-memcpy, 0003-rotation). ' +
+        'Use --force-fallback-for=wlroots or install the patched build.')
+endif
 wayland_server = dependency('wayland-server')
 wayland_protos = dependency('wayland-protocols', version: '>=1.32')
 xkbcommon = dependency('xkbcommon')
