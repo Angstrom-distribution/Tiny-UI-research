@@ -532,6 +532,12 @@ static void focus(bool keep)
 	open_win(&o, "other");
 	expect_kfocus("other mapped", &o);
 
+	/* the partner maps while a third app holds it: the rule picks the app */
+	close_win(&b);
+	expect_kfocus("b closed under other", &o);
+	open_win(&b, "tile-b");
+	expect_kfocus("b mapped over other", keep ? &a : &b);
+
 	close_win(&o);
 	close_win(&b);
 	close_win(&a);

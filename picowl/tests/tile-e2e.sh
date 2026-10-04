@@ -104,7 +104,19 @@ stack = tile-a, tile-b
 focus = tile-a
 EOF
 run focus-keep "$DIR/focus.ini"
+# one INFO line per change of the focused window, none for a re-focus of the
+# window which has it (b mapping while a has it is no change)
+logged() { grep -c "focus: app_id=$1 ($2)" "$DIR/picowl.log"; }
+[ "$(logged tile-a map)" -eq 1 ] || fail "focus-keep: expected one 'tile-a (map)' log line"
+[ "$(logged tile-b cycle)" -eq 1 ] || fail "focus-keep: expected one 'tile-b (cycle)' log line"
+[ "$(logged tile-a cycle)" -eq 1 ] || fail "focus-keep: expected one 'tile-a (cycle)' log line"
+[ "$(logged other map)" -eq 1 ] || fail "focus-keep: expected one 'other (map)' log line"
+[ "$(logged tile-a rule)" -eq 1 ] || fail "focus-keep: expected one 'tile-a (rule)' log line"
+[ "$(grep -c 'focus: app_id=tile-b (\(map\|rule\|pair\))' "$DIR/picowl.log")" -eq 0 ] ||
+	fail "focus-keep: tile-b took the focus on map"
 run focus-default "$DIR/pan.ini"
+[ "$(logged tile-b pair)" -ge 1 ] || fail "focus-default: expected a 'tile-b (pair)' log line"
+[ "$(logged tile-a rule)" -eq 0 ] || fail "focus-default: the rule fired without the key"
 
 rm -rf "$DIR"
 echo "tile-e2e: ok"

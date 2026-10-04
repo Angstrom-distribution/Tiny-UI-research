@@ -265,7 +265,7 @@ static void focus_keyboard(struct pw_server *server, struct pw_view *view)
 
 /* restack false: only the keyboard focus and activation move (tiled windows
  * do not overlap, so there is nothing to raise). */
-static void view_focus(struct pw_view *view, bool restack)
+static void view_focus(struct pw_view *view, bool restack, const char *reason)
 {
 	struct pw_server *server;
 	struct pw_view *prev;
@@ -303,17 +303,23 @@ static void view_focus(struct pw_view *view, bool restack)
 		}
 	}
 	server->focused_view = view;
-	if (prev != view)
+	if (prev != view) {
 		server->panel_forced_visible = false;
+		/* one line per change, to tell from the journal which window took
+		 * the keyboard and why */
+		pw_log(WLR_INFO, "focus: app_id=%s (%s)",
+			view->xdg_toplevel->app_id ? view->xdg_toplevel->app_id : "", reason);
+	}
 
 	view_set_activated(view, true);
 	focus_keyboard(server, view);
 	pw_panel_update(server);
 }
 
+/* The callers are a touch (or a request from a foreign-toplevel client). */
 void pw_view_focus(struct pw_view *view)
 {
-	view_focus(view, true);
+	view_focus(view, true, "touch");
 }
 
 void pw_view_cycle(struct pw_server *server)
@@ -325,7 +331,7 @@ void pw_view_cycle(struct pw_server *server)
 	 * them; both stay where they are. */
 	if (server->focused_view && tile_active(server, &first, &second, slots, NULL) &&
 			(server->focused_view == first || server->focused_view == second)) {
-		view_focus(server->focused_view == first ? second : first, false);
+		view_focus(server->focused_view == first ? second : first, false, "cycle");
 		return;
 	}
 
@@ -338,7 +344,7 @@ void pw_view_cycle(struct pw_server *server)
 	wl_list_remove(&front->link);
 	wl_list_insert(server->views.prev, &front->link);
 	wlr_scene_node_lower_to_bottom(&front->scene_tree->node);
-	pw_view_focus(next);
+	view_focus(next, true, "cycle");
 }
 
 void pw_view_close_focused(struct pw_server *server)
@@ -449,7 +455,19 @@ static void view_map(struct wl_listener *l, void *data)
 		pw_view_arrange_all(view->server);
 	else
 		view_arrange(view);
-	pw_view_focus(map_focus_target(view->server, view));
+	{
+		struct pw_view *target = map_focus_target(view->server, view);
+		struct pw_view *first, *second;
+		struct wlr_box slots[2];
+		const char *reason = "map";
+
+		if (target != view)
+			reason = "rule";
+		else if (view_stack_index(view) >= 0 &&
+				tile_active(view->server, &first, &second, slots, NULL))
+			reason = "pair";
+		view_focus(target, true, reason);
+	}
 
 	/* The hint is double-buffered state, so it is current once the surface
 	 * maps; later changes are not tracked until something acts on them. */
@@ -481,7 +499,7 @@ static void view_unmap(struct wl_listener *l, void *data)
 		server->focused_view = NULL;
 		if (!wl_list_empty(&server->views)) {
 			struct pw_view *next = wl_container_of(server->views.next, next, link);
-			pw_view_focus(next);
+			view_focus(next, true, "unmap");
 		} else if (server->seat) {
 			wlr_seat_keyboard_notify_clear_focus(server->seat);
 		}
