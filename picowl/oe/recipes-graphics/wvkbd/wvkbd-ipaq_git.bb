@@ -72,6 +72,7 @@ SRC_URI += " \
     file://0007-Repaint-only-the-keys-that-changed-on-a-shift-or-lay.patch \
     file://0008-Add-the-ipaq-layout-for-240x320-handhelds.patch \
     file://0009-Add-a-persistent-label-mask-cache-for-the-pango-back.patch \
+    file://0010-Take-the-pointer-position-from-wl_pointer.enter.patch \
 "
 SRCREV = "e14b53aff4fd1f471add6b21b3885c2cff945509"
 PV = "0.21+git"

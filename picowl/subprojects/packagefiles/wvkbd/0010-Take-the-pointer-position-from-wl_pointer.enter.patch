@@ -1,0 +1,361 @@
+From 10efccd68f854a761ab9e4c6d73a924d7d8a9e27 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 16:47:11 +0200
+Subject: [PATCH 10/10] Take the pointer position from wl_pointer.enter
+
+The enter handler was empty, so cur_x/cur_y were only set by motion. A
+stylus or touchscreen driving wl_pointer makes the compositor jump the
+pointer onto the surface, so a tap arrives as enter, button press,
+button release with no motion in between. The press then saw
+cur_x < 0 and was dropped. A real iPAQ session shows it: enter(83.9, 57.5)
+followed by a press and release, and no key sent.
+
+Move the position bookkeeping (enter, leave, motion, whether a position
+is known, and the target of a press) into pointer.c, which has no
+Wayland in it, and record the position from enter. Enter is ignored
+while the keyboard is not mapped, like motion. An enter while the button
+is held hands the held key over the way motion does.
+
+tests/test-pointer.c covers the tap after enter, after leave, a press
+with no position, motion, leave and a held button.
+---
+ main.c               |  38 ++++++++++-----
+ meson.build          |   1 +
+ pointer.c            |  50 ++++++++++++++++++++
+ pointer.h            |  34 ++++++++++++++
+ tests/meson.build    |   5 ++
+ tests/test-pointer.c | 107 +++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 223 insertions(+), 12 deletions(-)
+ create mode 100644 pointer.c
+ create mode 100644 pointer.h
+ create mode 100644 tests/test-pointer.c
+
+diff --git a/main.c b/main.c
+index 65e5d5f..3e138d9 100644
+--- a/main.c
++++ b/main.c
+@@ -19,6 +19,7 @@
+ #include <wchar.h>
+ 
+ #include "keyboard.h"
++#include "pointer.h"
+ #include "prerender.h"
+ #include "text.h"
+ #include "visibility.h"
+@@ -91,8 +92,7 @@ static uint32_t anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+ 
+ /* application state */
+ static bool run_display = true;
+-static int cur_x = -1, cur_y = -1;
+-static bool cur_press = false;
++static struct ptr cur = {-1, -1, false};
+ static struct kbd keyboard;
+ static uint32_t height, normal_height, landscape_height;
+ /* Set when the user gave the height, which a layout's own default never
+@@ -360,13 +360,27 @@ wl_pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
+                  struct wl_surface *surface, wl_fixed_t surface_x,
+                  wl_fixed_t surface_y)
+ {
++    if (!input_ready()) {
++        return;
++    }
++
++    /* A stylus or touchscreen taps with no motion after the enter, so this is
++     * the only position the press that follows will get. */
++    if (ptr_enter(&cur, wl_fixed_to_int(surface_x),
++                  wl_fixed_to_int(surface_y))) {
++        /* enter carries no timestamp, so take the one a release of the held
++         * key would have had */
++        kbd_motion_key(&keyboard,
++                       (uint32_t) (monotime() + keyboard.last_press_offset),
++                       cur.x, cur.y);
++    }
+ }
+ 
+ void
+ wl_pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
+                  struct wl_surface *surface)
+ {
+-    cur_x = cur_y = -1;
++    ptr_leave(&cur);
+ }
+ 
+ void
+@@ -377,11 +391,9 @@ wl_pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time,
+         return;
+     }
+ 
+-    cur_x = wl_fixed_to_int(surface_x);
+-    cur_y = wl_fixed_to_int(surface_y);
+-
+-    if (cur_press) {
+-        kbd_motion_key(&keyboard, time, cur_x, cur_y);
++    if (ptr_motion(&cur, wl_fixed_to_int(surface_x),
++                   wl_fixed_to_int(surface_y))) {
++        kbd_motion_key(&keyboard, time, cur.x, cur.y);
+     }
+ }
+ 
+@@ -394,16 +406,18 @@ wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
+     }
+ 
+     struct key *next_key;
+-    cur_press = state == WL_POINTER_BUTTON_STATE_PRESSED;
++    bool pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
++    ptr_button(&cur, pressed);
+ 
+-    if (cur_press) {
++    if (pressed) {
+         kbd_unpress_key(&keyboard, time);
+     } else {
+         kbd_release_key(&keyboard, time);
+     }
+ 
+-    if (cur_press && cur_x >= 0 && cur_y >= 0) {
+-        next_key = kbd_get_key(&keyboard, cur_x, cur_y);
++    int x, y;
++    if (pressed && ptr_target(&cur, &x, &y)) {
++        next_key = kbd_get_key(&keyboard, x, y);
+         if (next_key) {
+             kbd_press_key(&keyboard, next_key, time);
+         } else if (keyboard.compose) {
+diff --git a/meson.build b/meson.build
+index 851c546..05631b6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -84,6 +84,7 @@ sources = files(
+   'main.c',
+   'mask.c',
+   'os-compatibility.c',
++  'pointer.c',
+   'prerender.c',
+   'shm_open.c',
+   'visibility.c',
+diff --git a/pointer.c b/pointer.c
+new file mode 100644
+index 0000000..0609a35
+--- /dev/null
++++ b/pointer.c
+@@ -0,0 +1,50 @@
++#include "pointer.h"
++
++void
++ptr_init(struct ptr *p)
++{
++    p->x = p->y = -1;
++    p->pressed = false;
++}
++
++bool
++ptr_enter(struct ptr *p, int x, int y)
++{
++    return ptr_motion(p, x, y);
++}
++
++bool
++ptr_motion(struct ptr *p, int x, int y)
++{
++    p->x = x;
++    p->y = y;
++    return p->pressed;
++}
++
++void
++ptr_leave(struct ptr *p)
++{
++    p->x = p->y = -1;
++}
++
++void
++ptr_button(struct ptr *p, bool pressed)
++{
++    p->pressed = pressed;
++}
++
++bool
++ptr_known(const struct ptr *p)
++{
++    return p->x >= 0 && p->y >= 0;
++}
++
++bool
++ptr_target(const struct ptr *p, int *x, int *y)
++{
++    if (!p->pressed || !ptr_known(p))
++        return false;
++    *x = p->x;
++    *y = p->y;
++    return true;
++}
+diff --git a/pointer.h b/pointer.h
+new file mode 100644
+index 0000000..8ba172e
+--- /dev/null
++++ b/pointer.h
+@@ -0,0 +1,34 @@
++#ifndef POINTER_H
++#define POINTER_H
++
++#include <stdbool.h>
++
++/* Where the pointer is on the keyboard surface and whether its button is
++ * down, kept free of Wayland calls so the event sequences can be tested
++ * without a compositor.
++ *
++ * A stylus or touchscreen that drives wl_pointer makes the compositor jump the
++ * pointer onto the surface: a tap arrives as enter, button press, button
++ * release with no motion in between. The position therefore has to come from
++ * the enter event as well as from motion, or the first press after the
++ * pointer was elsewhere has no position and is dropped. */
++struct ptr {
++    int x, y;    /* surface coordinates, -1 while unknown */
++    bool pressed; /* the button is down */
++};
++
++void ptr_init(struct ptr *p);
++/* Each of these returns true when a button is held, that is when the caller
++ * has to let the key under the new position take over from the held one. */
++bool ptr_enter(struct ptr *p, int x, int y);
++bool ptr_motion(struct ptr *p, int x, int y);
++/* The pointer left the surface. A held button stays held: its release can
++ * still arrive. */
++void ptr_leave(struct ptr *p);
++void ptr_button(struct ptr *p, bool pressed);
++bool ptr_known(const struct ptr *p);
++/* The position a press lands on; false when none is known, in which case
++ * there is no key to look up. */
++bool ptr_target(const struct ptr *p, int *x, int *y);
++
++#endif
+diff --git a/tests/meson.build b/tests/meson.build
+index cdd548c..6ed4176 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -59,6 +59,11 @@ test('visibility', executable('test-visibility',
+   'test-visibility.c', '../visibility.c',
+   include_directories: test_inc))
+ 
++# The pointer position bookkeeping is pure too.
++test('pointer', executable('test-pointer',
++  'test-pointer.c', '../pointer.c',
++  include_directories: test_inc))
++
+ # Replaces allocate_shm_file to force the failures of a resize, so it links
+ # drw.c without shm_open.c.
+ test('buffer-failure', executable('test-buffer',
+diff --git a/tests/test-pointer.c b/tests/test-pointer.c
+new file mode 100644
+index 0000000..44f26df
+--- /dev/null
++++ b/tests/test-pointer.c
+@@ -0,0 +1,107 @@
++/* The pointer bookkeeping without a compositor. The sequences are the ones a
++ * stylus produces: the pointer jumps onto the keyboard, so a tap is enter,
++ * press, release with no motion. */
++#include "check.h"
++#include "pointer.h"
++
++static struct ptr
++fresh(void)
++{
++    struct ptr p;
++    ptr_init(&p);
++    return p;
++}
++
++static void
++test_tap_after_enter(void)
++{
++    /* the position seen on a real iPAQ: enter(83.9, 57.5), press, release */
++    struct ptr p = fresh();
++    int x = 0, y = 0;
++    ptr_enter(&p, 83, 57);
++    ptr_button(&p, true);
++    CHECK(ptr_target(&p, &x, &y), "a press right after enter has a target");
++    CHECK(x == 83 && y == 57, "target is the enter position, got %d,%d", x, y);
++    ptr_button(&p, false);
++    CHECK(!ptr_target(&p, &x, &y), "a release has no target");
++}
++
++static void
++test_tap_after_leave(void)
++{
++    struct ptr p = fresh();
++    int x = 0, y = 0;
++    ptr_motion(&p, 10, 10);
++    ptr_leave(&p);
++    ptr_enter(&p, 120, 200);
++    ptr_button(&p, true);
++    CHECK(ptr_target(&p, &x, &y) && x == 120 && y == 200,
++          "leave then enter then press resolves to the enter position");
++}
++
++static void
++test_no_position(void)
++{
++    struct ptr p = fresh();
++    int x = 7, y = 7;
++    CHECK(!ptr_known(&p), "nothing is known at start");
++    ptr_button(&p, true);
++    CHECK(!ptr_target(&p, &x, &y), "press with no enter and no motion");
++    CHECK(x == 7 && y == 7, "and the outputs are untouched");
++}
++
++static void
++test_motion_updates(void)
++{
++    struct ptr p = fresh();
++    int x = 0, y = 0;
++    ptr_enter(&p, 5, 5);
++    ptr_motion(&p, 90, 40);
++    ptr_button(&p, true);
++    CHECK(ptr_target(&p, &x, &y) && x == 90 && y == 40,
++          "motion after enter moves the target");
++}
++
++static void
++test_leave_clears(void)
++{
++    struct ptr p = fresh();
++    int x, y;
++    ptr_enter(&p, 5, 5);
++    ptr_leave(&p);
++    CHECK(!ptr_known(&p), "leave forgets the position");
++    ptr_button(&p, true);
++    CHECK(!ptr_target(&p, &x, &y), "so a press after leave finds nothing");
++}
++
++static void
++test_held_button(void)
++{
++    struct ptr p = fresh();
++    ptr_enter(&p, 5, 5);
++    CHECK(!ptr_enter(&p, 6, 6), "enter without a held button does not track");
++    CHECK(!ptr_motion(&p, 7, 7), "nor does motion");
++    ptr_button(&p, true);
++    /* motion hands the held key over to the one under the pointer; an enter
++     * while the button is held is the same jump */
++    CHECK(ptr_motion(&p, 8, 8), "motion with a held button tracks");
++    CHECK(ptr_enter(&p, 100, 100), "enter with a held button tracks too");
++    ptr_leave(&p);
++    CHECK(ptr_enter(&p, 20, 30), "so does enter after a leave");
++    int x = 0, y = 0;
++    CHECK(ptr_target(&p, &x, &y) && x == 20 && y == 30, "at the new position");
++}
++
++int
++main(void)
++{
++    test_tap_after_enter();
++    test_tap_after_leave();
++    test_no_position();
++    test_motion_updates();
++    test_leave_clears();
++    test_held_button();
++    if (failures)
++        fprintf(stderr, "%d checks failed\n", failures);
++    return failures != 0;
++}
+-- 
+2.51.0
+
