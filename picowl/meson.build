@@ -41,6 +41,8 @@ xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 libdrm = dependency('libdrm')
 libinput = dependency('libinput', required: false)
+# Touch calibration reads the ABS ranges from the device node libinput found.
+libudev = dependency('libudev', required: libinput.found())
 if libinput.found()
   add_project_arguments('-DPW_HAVE_LIBINPUT', language: 'c')
 endif
@@ -132,7 +134,7 @@ picowl_exe = executable(
   'picowl',
   sources, protocol_headers, picowl_buffer_code,
   link_with: pwcursorfit,
-  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput,
+  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput, libudev,
     cc.find_library('m', required: false)],
   include_directories: include_directories('src'),
   install: true,

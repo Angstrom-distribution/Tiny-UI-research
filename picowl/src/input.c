@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <errno.h>
 #include <string.h>
 #include <linux/input-event-codes.h>
 #include <wlr/types/wlr_input_device.h>
@@ -22,8 +23,14 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <xkbcommon/xkbcommon.h>
 #ifdef PW_HAVE_LIBINPUT
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/input.h>
+#include <libudev.h>
 #include <wlr/backend/libinput.h>
 #include <libinput.h>
+#include "pointercal.h"
 #endif
 
 #include "power.h"
@@ -70,8 +77,10 @@ struct pw_touch_dev {
 	struct wl_list link;           /* touch_devs */
 	struct wlr_input_device *dev;
 	struct wl_listener destroy;
-	float def_matrix[6];           /* device default calibration (udev) */
-	bool have_default;
+	float base[6];                 /* calibration, composed with rotation */
+	bool have_cal;                 /* base is valid */
+	bool blocked;                  /* uncalibrated touch device: disabled and never
+	                                * attached to the cursor */
 	bool tablet;                   /* a tablet shares the mapping, not the touch state */
 	bool tablet_mapped;            /* tablet: rotation can be applied (tablet.c) */
 };
@@ -466,23 +475,146 @@ static void pointer_dev_destroy(struct wl_listener *l, void *data)
 /* ---- touch ------------------------------------------------------------ */
 
 #ifdef PW_HAVE_LIBINPUT
-/* Remember the device's default calibration (e.g. LIBINPUT_CALIBRATION_MATRIX
- * from udev on resistive panels); rotation is composed with it. */
-static void touch_read_default(struct pw_touch_dev *t)
+static bool abs_range(int fd, int code, int32_t *min, int32_t *max)
 {
-	t->have_default = false;
+	struct input_absinfo ai;
+	if (ioctl(fd, EVIOCGABS(code), &ai) < 0 || ai.maximum <= ai.minimum)
+		return false;
+	*min = ai.minimum;
+	*max = ai.maximum;
+	return true;
+}
+
+/* The ranges libinput normalizes with, read from the device node because the
+ * public libinput API does not expose them: ABS_MT_POSITION_* on multitouch
+ * panels, ABS_X/ABS_Y otherwise (the same choice as libinput's evdev.c). */
+static bool touch_read_ranges(struct libinput_device *h, int32_t *minx,
+	int32_t *maxx, int32_t *miny, int32_t *maxy)
+{
+	struct udev_device *ud = libinput_device_get_udev_device(h);
+	if (!ud)
+		return false;
+	const char *node = udev_device_get_devnode(ud);
+	int fd = node ? open(node, O_RDONLY | O_CLOEXEC | O_NONBLOCK) : -1;
+	bool ok = false;
+	if (fd >= 0) {
+		ok = (abs_range(fd, ABS_MT_POSITION_X, minx, maxx) &&
+			abs_range(fd, ABS_MT_POSITION_Y, miny, maxy)) ||
+			(abs_range(fd, ABS_X, minx, maxx) &&
+			abs_range(fd, ABS_Y, miny, maxy));
+		close(fd);
+	}
+	udev_device_unref(ud);
+	return ok;
+}
+
+/* Raw axes of a resistive panel are wrong (inverted, offset), so a touch
+ * device without calibration is switched off instead of used. libinput stops
+ * delivering its events, and it is never attached to the cursor, so nothing
+ * can reach a client even if disabling fails. */
+static void touch_block(struct pw_touch_dev *t, struct libinput_device *h,
+	const char *why)
+{
+	const struct pw_config *cfg = st.server->config;
+	t->blocked = true;
+	t->have_cal = false;
+	pw_log(WLR_ERROR, "touch '%s': %s; the device is disabled because raw "
+		"axes are never used. Fix: create %s with tslib's ts_calibrate, or "
+		"set [touch] calibration = a b c d e f in picowl.ini (an explicit "
+		"identity '1 0 0 0 1 0' if the panel is already calibrated), or "
+		"provide LIBINPUT_CALIBRATION_MATRIX from udev", t->dev->name, why,
+		cfg->pointercal && *cfg->pointercal ? cfg->pointercal : "/etc/pointercal");
+	if (h && libinput_device_config_send_events_set_mode(h,
+			LIBINPUT_CONFIG_SEND_EVENTS_DISABLED) != LIBINPUT_CONFIG_STATUS_SUCCESS)
+		pw_log(WLR_ERROR, "touch '%s': libinput could not disable it; it "
+			"stays detached from the cursor", t->dev->name);
+}
+
+/* Find the base matrix of a libinput device. Touch devices: [touch]
+ * calibration, then the tslib pointercal, then a non-identity libinput default
+ * (udev LIBINPUT_CALIBRATION_MATRIX), else the device is blocked. A tablet is
+ * not a resistive panel and never takes the pointercal or [touch] calibration
+ * (they describe a touchscreen): its base is the libinput default, identity
+ * included, as before. Not a libinput device (nested or headless backend):
+ * there are no raw ADC axes, nothing to calibrate. */
+static void touch_calibrate(struct pw_touch_dev *t)
+{
+	const struct pw_config *cfg = st.server->config;
+	t->have_cal = false;
 	if (!wlr_input_device_is_libinput(t->dev))
 		return;
 	struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
-	if (!h || !libinput_device_config_calibration_has_matrix(h))
+	bool has_matrix = h && libinput_device_config_calibration_has_matrix(h);
+	if (!has_matrix) {
+		if (!t->tablet)
+			touch_block(t, h, "no absolute axes that can be calibrated");
 		return;
-	libinput_device_config_calibration_get_default_matrix(h, t->def_matrix);
-	t->have_default = true;
+	}
+
+	const char *src = NULL;
+	if (t->tablet) {
+		/* Identity counts too: a tablet is right with raw axes, and rotation
+		 * composes with the identity as well as with any other base. */
+		libinput_device_config_calibration_get_default_matrix(h, t->base);
+		src = "libinput default";
+	}
+	if (!src && cfg->have_calibration) {
+		memcpy(t->base, cfg->calibration, sizeof(t->base));
+		src = "[touch] calibration";
+	}
+	if (!src && cfg->pointercal && *cfg->pointercal) {
+		const char *path = cfg->pointercal;
+		struct pw_pointercal pc;
+		char err[256];
+		if (access(path, R_OK) < 0 && errno == ENOENT) {
+			pw_log(WLR_DEBUG, "touch '%s': no pointercal %s", t->dev->name, path);
+		} else if (!pw_pointercal_load(path, &pc, err, sizeof(err))) {
+			pw_log(WLR_ERROR, "touch '%s': pointercal %s: %s", t->dev->name,
+				path, err);
+		} else {
+			int32_t minx, maxx, miny, maxy;
+			/* Without the ranges the normalization is unknown; do not fall
+			 * back to another source behind the operator's pointercal. */
+			if (!touch_read_ranges(h, &minx, &maxx, &miny, &maxy)) {
+				touch_block(t, h, "cannot read the ABS ranges needed to apply "
+					"the pointercal");
+				return;
+			}
+			if (!pw_pointercal_to_matrix(&pc, minx, maxx, miny, maxy, t->base,
+					err, sizeof(err)))
+				pw_log(WLR_ERROR, "touch '%s': pointercal %s: %s", t->dev->name,
+					path, err);
+			else
+				src = "pointercal";
+		}
+	}
+	if (!src && libinput_device_config_calibration_get_default_matrix(h, t->base)) {
+		/* returns non-zero only for a non-identity default; an identity one
+		 * cannot be told from "none" */
+		src = "libinput default (udev)";
+	}
+	if (!src) {
+		touch_block(t, h, "no calibration found");
+		return;
+	}
+	/* Apply it now so the first event is already right; rotation composes
+	 * with it later. */
+	if (libinput_device_config_calibration_set_matrix(h, t->base) !=
+			LIBINPUT_CONFIG_STATUS_SUCCESS) {
+		if (t->tablet)
+			return;
+		touch_block(t, h, "libinput refused the calibration matrix");
+		return;
+	}
+	t->have_cal = true;
+	pw_log(WLR_INFO, "%s '%s': calibration from %s: %f %f %f %f %f %f",
+		t->tablet ? "tablet" : "touch", t->dev->name, src, t->base[0],
+		t->base[1], t->base[2], t->base[3], t->base[4], t->base[5]);
 }
 
 static void apply_touch_matrix(struct pw_touch_dev *t, struct pw_output *o)
 {
-	if (!t->have_default)
+	if (!t->have_cal)
 		return;
 	struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
 	if (!h)
@@ -491,11 +623,11 @@ static void apply_touch_matrix(struct pw_touch_dev *t, struct pw_output *o)
 	if (o->hw_rotation) {
 		float r[6];
 		pw_rot_touch_matrix(o->rotation, r);
-		pw_rot_matrix_mul(r, t->def_matrix, m);
+		pw_rot_matrix_mul(r, t->base, m);
 	} else {
 		/* software rotation is done by wlroots (device mapped to the
-		 * output); restore the default exactly */
-		memcpy(m, t->def_matrix, sizeof(m));
+		 * output); restore the calibration exactly */
+		memcpy(m, t->base, sizeof(m));
 	}
 	libinput_device_config_calibration_set_matrix(h, m);
 }
@@ -507,7 +639,7 @@ static void apply_touch_matrix(struct pw_touch_dev *t, struct pw_output *o)
 static void tablet_check_mapping(struct pw_touch_dev *t, struct pw_output *o)
 {
 	bool ok = !o->hw_rotation || o->rotation == WL_OUTPUT_TRANSFORM_NORMAL ||
-		t->have_default;
+		t->have_cal;
 	if (ok != t->tablet_mapped)
 		pw_log(ok ? WLR_INFO : WLR_ERROR, "tablet '%s': %s", t->dev->name,
 			ok ? "mapped to the output" : "cannot follow the hardware "
@@ -520,6 +652,8 @@ void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
 {
 	struct pw_touch_dev *t;
 	wl_list_for_each(t, &touch_devs, link) {
+		if (t->blocked)
+			continue; /* not attached to the cursor */
 		/* wlr_cursor applies the output transform to touch and tablet
 		 * coordinates of devices mapped to an output (software rotation) */
 		wlr_cursor_map_input_to_output(server->cursor, t->dev, o->wlr_output);
@@ -542,14 +676,16 @@ void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
  * wins over its output, so the output mapping can stay as it is. */
 static void touch_lease_apply(struct pw_touch_dev *t)
 {
+	if (t->blocked)
+		return;
 	wlr_cursor_map_input_to_region(st.server->cursor, t->dev,
 		wlr_box_empty(&st.lease_box) ? NULL : &st.lease_box);
 #ifdef PW_HAVE_LIBINPUT
 	/* The lessee renders in the panel's native frame: no rotation matrix. */
-	if (t->have_default && !wlr_box_empty(&st.lease_box)) {
+	if (t->have_cal && !wlr_box_empty(&st.lease_box)) {
 		struct libinput_device *h = wlr_libinput_get_device_handle(t->dev);
 		if (h)
-			libinput_device_config_calibration_set_matrix(h, t->def_matrix);
+			libinput_device_config_calibration_set_matrix(h, t->base);
 	}
 #endif
 }
@@ -574,7 +710,8 @@ void pw_input_output_removed(struct pw_server *server, struct pw_output *gone)
 		return;
 	struct pw_touch_dev *t;
 	wl_list_for_each(t, &touch_devs, link)
-		wlr_cursor_map_input_to_output(server->cursor, t->dev, NULL);
+		if (!t->blocked)
+			wlr_cursor_map_input_to_output(server->cursor, t->dev, NULL);
 
 	struct pw_output *o;
 	wl_list_for_each(o, &server->outputs, link) {
@@ -807,11 +944,11 @@ static void touch_dev_destroy(struct wl_listener *l, void *data)
 {
 	(void)data;
 	struct pw_touch_dev *t = wl_container_of(l, t, destroy);
-	bool tablet = t->tablet;
+	bool skip = t->tablet || t->blocked; /* not counted in n_touch */
 	wl_list_remove(&t->destroy.link);
 	wl_list_remove(&t->link);
 	free(t);
-	if (tablet)
+	if (skip)
 		return;
 	if (--st.n_touch == 0) {
 		if (st.touch_id != PW_NO_TOUCH && !st.touch_swallowed)
@@ -838,11 +975,13 @@ static struct pw_touch_dev *absolute_dev_add(struct pw_server *server,
 	t->tablet = tablet;
 	t->tablet_mapped = true;
 #ifdef PW_HAVE_LIBINPUT
-	touch_read_default(t);
+	touch_calibrate(t);
 #endif
 	wl_list_insert(&touch_devs, &t->link);
 	t->destroy.notify = touch_dev_destroy;
 	wl_signal_add(&dev->events.destroy, &t->destroy);
+	if (t->blocked)
+		return t; /* never attached: no event can reach the cursor or a client */
 	wlr_cursor_attach_input_device(server->cursor, dev);
 	if (pw_lease_active(server))
 		touch_lease_apply(t);
@@ -874,12 +1013,14 @@ static void handle_new_input(struct wl_listener *l, void *data)
 		update_capabilities(server);
 		break;
 	}
-	case WLR_INPUT_DEVICE_TOUCH:
-		if (!absolute_dev_add(server, dev, false))
+	case WLR_INPUT_DEVICE_TOUCH: {
+		struct pw_touch_dev *t = absolute_dev_add(server, dev, false);
+		if (!t || t->blocked)
 			break;
 		st.n_touch++;
 		update_capabilities(server);
 		break;
+	}
 	case WLR_INPUT_DEVICE_TABLET:
 		if (!pw_tablet_add(server, dev)) {
 			pw_log(WLR_ERROR, "tablet '%s': not usable, ignored", dev->name);

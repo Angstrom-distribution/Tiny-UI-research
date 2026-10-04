@@ -5,7 +5,8 @@ test_config_exe = executable(
   '../src/rotate.c',
   '../src/copytype.c',
   protocol_headers,
-  dependencies: [wlroots, wayland_server, xkbcommon, libdrm],
+  dependencies: [wlroots, wayland_server, xkbcommon, libdrm,
+    cc.find_library('m', required: false)],
   include_directories: include_directories('../src'),
 )
 

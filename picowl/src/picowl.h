@@ -143,6 +143,13 @@ struct pw_config {
 	int hold_ms;               /* right click fires after this, measured from
 	                            * touch-down (default 900) */
 	int slop_px;               /* movement tolerance (default 8) */
+	/* [touch] calibration: a libinput normalized matrix overriding every other
+	 * source, valid only if have_calibration (an explicit identity is how a
+	 * device that really is calibrated opts out of the pointercal). */
+	float calibration[6];
+	bool have_calibration;
+	char *pointercal;          /* [touch] pointercal: tslib file, "" = none
+	                            * (default /etc/pointercal) */
 	struct wl_list app_rules;   /* struct pw_app_rule */
 
 	/* [cursor] */

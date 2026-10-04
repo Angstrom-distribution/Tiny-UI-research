@@ -51,6 +51,21 @@ color = #101010
 # hold_ms = 900
 # slop_px = 8
 
+# Touch calibration. picowl never uses raw touch axes: every touch device needs
+# one, taken from the first source that gives it:
+#   1. calibration (below), 2. the tslib pointercal file, 3. a non-identity
+#   udev LIBINPUT_CALIBRATION_MATRIX, else the device is disabled and an error
+#   is logged once.
+# calibration: six numbers 'a b c d e f', a libinput normalized matrix (x' =
+#   a*x + b*y + c, y' = d*x + e*y + f, all in 0..1). Overrides everything. An
+#   explicit identity '1 0 0 0 1 0' marks a panel that really is calibrated.
+# pointercal: tslib file written by ts_calibrate (default /etc/pointercal,
+#   empty = do not use one). Format: a b c d e f scale xres yres rotation, e.g.
+#   22841 -68 -3658260 -491 -28324 25242144 65536 240 320 0
+#   xres and yres are required and rotation must be 0.
+# calibration = 1.487044 -0.004427 -0.232586 -0.023975 -1.383008 1.203639
+# pointercal = /etc/pointercal
+
 # Per-app tap-and-hold overrides: [app.<app_id>] (xdg toplevels, exact match)
 # and per-layer overrides: [layer.<namespace>] (layer-shell surfaces).
 # Keys are the same as [touch]; unset keys are inherited from [touch], wherever

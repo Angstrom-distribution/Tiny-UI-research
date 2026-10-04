@@ -224,10 +224,11 @@ rotated image is produced by the display controller, not by the CPU.
   `hardware` logs an error when unsupported and falls back.
 - Touch calibration: `pw_input_apply_rotation` (`src/input.c`, needs libinput)
   sets the libinput calibration matrix from `pw_rot_touch_matrix` when hardware
-  rotation is in effect, composed with the device's default calibration (`libinput_device_config_
-  calibration_get_default_matrix`, e.g. the udev `LIBINPUT_CALIBRATION_MATRIX`
-  of resistive panels, read once when the device is added). Without hardware
-  rotation the default matrix is restored exactly. Touch devices are mapped to
+  rotation is in effect, composed with the device's base calibration (a
+  `[touch] calibration`, a tslib pointercal or the udev
+  `LIBINPUT_CALIBRATION_MATRIX`, chosen once when the device is added; a touch
+  device with none is disabled, see "Touch calibration" in the README). Without hardware
+  rotation the base matrix is restored exactly. Touch devices are mapped to
   the output with `wlr_cursor_map_input_to_output`, so for software rotation
   wlr_cursor applies the output transform to the touch coordinates.
 

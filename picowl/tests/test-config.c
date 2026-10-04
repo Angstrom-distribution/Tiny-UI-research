@@ -36,6 +36,8 @@ static int test_default_config(void)
 	assert(c->hold_delay_ms == 300);
 	assert(c->hold_ms == 900);
 	assert(c->slop_px == 8);
+	assert(!c->have_calibration);
+	assert(c->pointercal && strcmp(c->pointercal, "/etc/pointercal") == 0);
 	assert(c->hold_animation == NULL);
 	assert(c->cursor_fill == 0x2050c0);
 	assert(c->cursor_outline == 0xffffff);
@@ -714,6 +716,32 @@ static int test_capture_config(void)
 	return 0;
 }
 
+static int test_touch_calibration(void)
+{
+	struct pw_config *c = pw_config_load("tests/test-config-cal.ini");
+	assert(c);
+	assert(c->have_calibration);
+	assert(c->calibration[0] == 1.487044f && c->calibration[5] == 1.203639f);
+	assert(strcmp(c->pointercal, "/run/pointercal") == 0);
+	pw_config_free(c);
+
+	/* five numbers: ignored, the other key still applies */
+	c = pw_config_load("tests/test-config-calbad.ini");
+	assert(c);
+	assert(!c->have_calibration);
+	assert(strcmp(c->pointercal, "/etc/other-pointercal") == 0);
+	pw_config_free(c);
+
+	/* seven numbers: ignored */
+	c = pw_config_load("tests/test-config-calbad2.ini");
+	assert(c);
+	assert(!c->have_calibration);
+	pw_config_free(c);
+
+	printf("✓ test_touch_calibration\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -743,6 +771,7 @@ int main(int argc, char *argv[])
 	failed += test_legacy_idle_timeout();
 	failed += test_lease_config();
 	failed += test_capture_config();
+	failed += test_touch_calibration();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

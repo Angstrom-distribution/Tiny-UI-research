@@ -22,10 +22,10 @@ ninja -C build
 
 **Dependencies:**
 - `wlroots 0.19` (fetched as meson subproject fallback if not installed)
-- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`; `libinput` is optional (see below)
+- `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`; `libinput` and `libudev` go together and are optional (see below)
 - C11 compiler, meson >= 1.3
 
-picowl carries four wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput is linked directly when found (touch calibration matrix for hardware rotation); without it that code is compiled out.
+picowl carries four wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput (with libudev) is linked directly when found (touch calibration and its matrix for hardware rotation); without it that code is compiled out.
 
 `wlroots 0.19` is configured minimally: DRM/libinput backends, pixman renderer only, no GLES2/Vulkan/GBM. On OpenEmbedded systems (wrynose/blacksail), see `oe/README.md` for a prebuilt wlroots recipe.
 
@@ -224,6 +224,27 @@ code:116 = blank
 logo+Return = spawn foot
 ```
 
+## Touch calibration
+
+picowl never uses the raw axes of a touch device. Resistive panels such as the iPAQ ones report raw ADC values that are inverted and offset, so every touch device (a libinput device with the touch capability; not tablets) needs a calibration, taken from the first of these sources that gives one:
+
+1. `[touch] calibration = a b c d e f` in the config: six numbers, a libinput normalized matrix (`x' = a*x + b*y + c`, `y' = d*x + e*y + f`, with x, y, x', y' in 0..1 over the panel). It overrides everything, also when the device has a udev matrix or a pointercal exists.
+2. A tslib pointercal file, `[touch] pointercal = PATH` (default `/etc/pointercal`, an empty value disables this source). A missing file is skipped quietly; an unreadable or invalid one is logged as an error and the next source is tried.
+3. A non-identity default matrix from libinput, which comes from the udev property `LIBINPUT_CALIBRATION_MATRIX`. libinput cannot tell an identity default from "none", so an identity default counts as none.
+4. None: the device is disabled (libinput send-events mode `disabled`), never attached to the cursor, and an error naming the device and the fixes is logged once. It stays disabled.
+
+The pointercal file is what tslib's `ts_calibrate` writes: ten whitespace-separated integers `a b c d e f scale xres yres rotation`, where the screen position is `x' = (a*x + b*y + c) / scale`, `y' = (d*x + e*y + f) / scale` for raw x, y, on a screen of `xres` by `yres` pixels. Example (a 240x320 panel, no trailing newline needed):
+
+```
+22841 -68 -3658260 -491 -28324 25242144 65536 240 320 0
+```
+
+Parsing is strict: 7 to 10 numeric fields, non-zero positive scale, sane magnitudes. `xres` and `yres` must be present and non-zero (older files with 7 fields are refused, recreate them), and a non-zero `rotation` is refused rather than guessed. picowl converts the file to a libinput matrix using the ABS_X/ABS_Y range of the device (ABS_MT_POSITION_X/Y on multitouch panels) read from its device node, normalized the way libinput does it, with `max - min + 1`. For the example above and a 0..1023 panel the matrix is `1.487044 -0.004427 -0.232586 -0.023975 -1.383008 1.203639`, the same as `xinput_calibrator` gives for it. If the ranges cannot be read, the device is disabled instead of falling back to another source.
+
+Create the file on the device with tslib's `ts_calibrate`, in the native orientation of the panel and with picowl not running (it needs the screen and the touch device for itself). The calibration is applied when the device appears and is the base that hardware rotation composes with; software rotation restores it exactly. Tablets are not touchscreens: they never take a pointercal or `[touch] calibration`, only the libinput default matrix as before.
+
+Escape hatch: a panel that really is calibrated already (for example a capacitive touchscreen with correct axes) is used by saying so explicitly with an identity matrix, `calibration = 1 0 0 0 1 0`. It is never assumed.
+
 ## Tap-and-hold and Cursor
 
 ### Tap-and-Hold Behaviour
@@ -394,7 +415,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `cursorfit`, `cursor-builtin`, `cursorshape` (shape mapping), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
+Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `pointercal` (tslib parsing and matrix conversion), `cursorfit`, `cursor-builtin`, `cursorshape` (shape mapping), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 
@@ -403,6 +424,7 @@ Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--ze
 DRM paths (rotation, copy-type, swapchain, direct scanout) cannot run in the build container (no /dev/dri, no vkms); they are compiled and unit-tested only. On a real device, verify:
 
 - Hardware rotation: the hardware rotation commit succeeds, touch calibration correct, no "hw rotation commit failed" log
+- Touch calibration: touch the four corners of the screen and expect the pointer at the matching corners, in all four rotations, with software rotation and with hardware rotation; with no pointercal, no `[touch] calibration` and no udev matrix, expect the one-time error and a dead touchscreen
 - Copy-type single-buffer: swapchain stays at 1 slot, no "degraded to 2 slots" log
 - Direct scanout: scene logs it, render list is 1 entry, no composition
 - Damage clipping: only changed regions copied to VRAM

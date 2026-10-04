@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <wayland-util.h>
 #include <drm_fourcc.h>
 #include "picowl.h"
@@ -162,6 +163,25 @@ static bool parse_bool_log(const char *str, const char *key, bool *out)
 	return false;
 }
 
+/* Exactly six finite numbers separated by whitespace. Magnitudes beyond 1e3 are
+ * refused: normalized matrices are of order one. */
+static bool parse_matrix6(const char *str, float out[6])
+{
+	const char *p = str;
+	for (int i = 0; i < 6; i++) {
+		char *end;
+		errno = 0;
+		double v = strtod(p, &end);
+		if (end == p || errno == ERANGE || !isfinite(v) || fabs(v) > 1e3)
+			return false;
+		out[i] = (float)v;
+		p = end;
+	}
+	while (isspace((unsigned char)*p))
+		p++;
+	return *p == '\0';
+}
+
 static bool parse_hex_color(const char *str, uint32_t *out)
 {
 	/* Parse #RRGGBB as 0xRRGGBB */
@@ -250,6 +270,7 @@ struct pw_config *pw_config_default(void)
 	c->hold_delay_ms = 300;
 	c->hold_ms = 900;
 	c->slop_px = 8;
+	c->pointercal = strdup("/etc/pointercal");
 	wl_list_init(&c->app_rules);
 	c->hold_animation = NULL;
 	c->cursor_fill = 0x2050c0;
@@ -496,6 +517,21 @@ struct pw_config *pw_config_load(const char *path)
 				c->hold_ms = atoi(val);
 			} else if (strcmp(key, "slop_px") == 0) {
 				c->slop_px = atoi(val);
+			} else if (strcmp(key, "calibration") == 0) {
+				float m[6];
+				if (parse_matrix6(val, m)) {
+					memcpy(c->calibration, m, sizeof(m));
+					c->have_calibration = true;
+				} else {
+					pw_log(WLR_ERROR, "Bad [touch] calibration: '%s' (need six "
+						"numbers: a b c d e f); ignored", val);
+				}
+			} else if (strcmp(key, "pointercal") == 0) {
+				char *dup = strdup(val);
+				if (dup) {
+					free(c->pointercal);
+					c->pointercal = dup;
+				}
 			}
 		} else if (strcmp(section, "cursor") == 0) {
 			/* Cursor (hold animation) configuration */
@@ -885,6 +921,7 @@ void pw_config_free(struct pw_config *config)
 
 	free(config->backlight);
 	free(config->lease_allow);
+	free(config->pointercal);
 
 	struct pw_output_transform *t, *t_tmp;
 	wl_list_for_each_safe(t, t_tmp, &config->transforms, link) {
