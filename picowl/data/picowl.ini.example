@@ -25,7 +25,11 @@ color = #101010
 
 [autostart]
 # One shell command per line, run once at startup.
+# The panel: clock, battery, backlight and volume sliders. It is hidden while an
+# app has the focus, and with it the sliders, unless [zerocopy] panel_autohide
+# is false. Options: --height N (40..120), --bottom, --scale N.
 # cmd = picowl-panel
+# cmd = picowl-panel --bottom --height 64
 
 [osk]
 # The on-screen keyboard: picowl starts it, restarts it when it dies and shows or
@@ -146,7 +150,8 @@ code:155 = rotate
 # enable: advertise picowl-buffer-v1 and DMA-BUF feedback (default true).
 # single_buffer: allow single-buffer (non-double-buffered) clients on
 #   copy-type outputs where they are safe (default true).
-# panel_autohide: hide the panel while an app is fullscreen (default true).
+# panel_autohide: hide the panel while an app is focused (default true). The panel's
+#   sliders are hidden with it; set false to keep picowl-panel visible next to apps.
 # max_buffers_per_client: buffers one client may hold. Range 1..32 (default 3).
 # budget_kb: memory shared by all clients without an [app.*] buffer rule.
 #   Range 0..65536 (default 2048); 0 = none of them may allocate.

@@ -4,7 +4,7 @@ A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ
 
 ## Status
 
-- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is focused, on-screen keyboard input (virtual-keyboard protocol) with the keyboard process started, supervised and toggled by picowl (`[osk]`, `osk` key action), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking (held off while a visible client holds an idle inhibitor), DRM lease of the output to the media player (`wp_drm_lease_device_v1`, `doc/lease.md`), per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
+- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is focused, on-screen keyboard input (virtual-keyboard protocol) with the keyboard process started, supervised and toggled by picowl (`[osk]`, `osk` key action), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking (held off while a visible client holds an idle inhibitor), DRM lease of the output to the media player (`wp_drm_lease_device_v1`, `doc/lease.md`), per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection. An optional touch panel client, `picowl-panel` (clock, battery, backlight and volume sliders), is built next to the compositor (see Panel).
 - **Planned**: video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths), C8 (8-bpp palettised) output on MediaQ (design and options documented in `doc/zero-copy.md`), fixing the per-commit `wlr_client_buffer` allocation in wlroots core. Hardware rotation, copy-type swapchain, and direct scanout are compiled and unit tested; the hardware paths still need the checklist in `doc/zero-copy.md` run on a device.
 - **Known constraints**: no general cursor theme (only the tap-and-hold wait animation is drawn by picowl), no window animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
 
@@ -23,6 +23,7 @@ ninja -C build
 **Dependencies:**
 - `wlroots 0.19` (fetched as meson subproject fallback if not installed)
 - `wayland-server`, `wayland-protocols >= 1.32`, `xkbcommon`, `pixman-1`, `libdrm`; `libinput` and `libudev` go together and are optional (see below)
+- for `picowl-panel` only: `wayland-client` and `alsa-lib` (meson option `panel`, default `auto`: built when both are found, `-Dpanel=disabled` to skip it)
 - C11 compiler, meson >= 1.3
 
 picowl carries four wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput (with libudev) is linked directly when found (touch calibration and its matrix for hardware rotation); without it that code is compiled out.
@@ -247,6 +248,62 @@ code:116 = blank
 logo+Return = spawn foot
 code:397 = osk toggle
 ```
+
+## Panel
+
+`picowl-panel` is a layer-shell client in C for a 240x320 handheld: a clock, the battery and two touch sliders, for the backlight and the volume. It is drawn with wl_shm from primitives (a built-in 5x7 font, no font files, no toolkit), is a single process with one poll loop, and keeps one 240x56 RGB565 buffer (27 KB). Measured on arm64 with glibc, headless: VmRSS 2.2 MB, of which 196 KB anonymous and the rest the mapped program and libraries.
+
+### What it shows
+
+The surface is 56 px high by default (`--height`), two rows of 28 px, as wide as the output:
+
+- **Row 1, left: the clock**, `HH:MM`, 24 h, local time, no seconds. A timerfd on the realtime clock fires at the start of every minute and is cancelled when the system time is set, so a change of the time or the date is shown at once.
+- **Row 1, right: the battery.** The first power supply of type `Battery` with a readable `capacity` (a battery with `scope` `Device`, as input devices have, is not the system's) is shown as a battery icon and `NN%`; the bar is green above 30 percent, amber above 15 and red at 15 and below, and a lightning bolt over it means the status is `Charging`. Without a battery, a `Mains` or `USB*` supply that is online shows `AC`, and nothing at all shows `--`. The supplies are read again every 30 s; there is no uevent code, so a plug event shows up at the next read.
+- **Row 2, left: the backlight slider** (a sun) and **right: the volume slider** (a speaker). Each is an icon, a track whose filled part is blue and a thumb that is 20 px wide at scale 1. A slider without a device is greyed out (no thumb) and ignores touches.
+
+The text is drawn at twice the size of the 5x7 font (14 px high) so that it is readable on the panel; `--scale N` multiplies the text and the thumb by N, as far as the row height and the width of the track allow.
+
+### Touch
+
+picowl turns the stylus into pointer events: a press is `BTN_LEFT`, a drag is motion. A press inside the whole 28 px cell of a slider (not only on the thin track) sets the value from the x position, motion while pressed keeps setting it and the release ends the drag; a drag keeps its slider when the stylus leaves the cell. A press anywhere else does nothing, and a drag that starts outside a slider does nothing even when it moves over one. The redraw is immediate; the value is written to the system at most every 50 ms during a drag and always at the release.
+
+- **Backlight:** `/sys/class/backlight/<dev>/brightness` and `max_brightness` of the first device (by name) with a `max_brightness` of at least 1; the sysfs root honours `PICOWL_SYSFS_ROOT` as in picowl. The percent maps linearly onto the raw range, rounded to nearest, with a floor of 5 percent, so the screen cannot be turned black by accident. The level is read once at start. `brightness` must be writable by the user the panel runs as (the udev rule installed by picowl gives the `video` group write access). If the board has several backlight devices, give picowl and the panel the same one: picowl prefers `firmware`, `platform`, `raw` (`[power] backlight`), the panel takes the first name.
+- **Volume:** alsa-lib's simple mixer on the card `default`. The element is the first of `Master`, `PCM`, `Headphone`, `Speaker` that has a playback volume, else the first element with one. 0..100 percent maps linearly onto the element's raw range (not onto decibels), and raising the volume above 0 also switches the playback on (it is never switched off). Changes made by other programs are followed: the mixer's descriptors are in the poll loop, so there is no timer, and the thumb moves while nobody touches it (not during the panel's own drag, where the quantized value would make it jump). With no mixer or no element the slider is greyed out and ignores touches. The user needs access to the sound device (the `audio` group; picowl's unit runs as root).
+
+### Backlight and picowl's dimming
+
+picowl dims the backlight after `dim_after_s` and restores the user level on the next input. It used to take the user level from the device once, at startup, so a level set by the panel was undone by the next dim. It now compares the level the device shows with the one it left it at just before it writes a reduced level (the dim, and the `[power.low]` cap when the profile changes) and adopts a different level as the user level, so a slider change survives dim and undim (`doc/power.md`, "Changes by Another Process"). The touch that undoes a dim restores the user level first and the slider write follows it, so dragging a dimmed screen works and is picked up at the next dim.
+
+### Starting it and panel_autohide
+
+Start it from picowl:
+
+```ini
+[autostart]
+cmd = picowl-panel
+```
+
+picowl does not restart it when it exits. The panel exits with status 0 when the compositor goes away or on SIGTERM, and with status 1 and one message on stderr when it cannot connect, the compositor has no `zwlr_layer_shell_v1` or no output.
+
+The panel is a normal layer-shell panel: `[zerocopy] panel_autohide` (default `true`) hides it while an app has the focus, and with it the sliders. With the default, the sliders are only visible on an empty desktop, or after the `panel` key action forced it to show. To keep them on screen with an app open set `panel_autohide = false`; the exclusive zone then makes toplevels use the rest of the output, 240x264 below a 56 px panel on a 240x320 output. The panel follows a rotation: picowl sends the new width and the panel lays itself out and allocates a new buffer.
+
+### Options
+
+- `--height N`: surface height, clamped to 40..120 (default 56); the rows are half of it each.
+- `--bottom`: anchor at the bottom edge (default: top).
+- `--scale N`: integer scale of the text and the thumb, 1 to 4 (default 1).
+- `--dump-state`: print the widget values and geometry as `key=value` lines on stdout after the first frame and exit 0 (for tests).
+- `--exit-after-frame`: exit 0 after the first frame.
+- `--help`.
+- Test only: `--watch` is `--dump-state` that does not exit and prints the state again after every redraw, naming the widgets that were redrawn; `--inject SPEC` feeds pointer events through the same handlers as `wl_pointer` (`p X,Y` press, `m X,Y` motion, `r` release, separated by `;`) after the first frame; `PICOWL_PANEL_BATTERY_POLL_S` shortens the 30 s battery interval.
+
+### Redraws and wake-ups
+
+A redraw happens only when a value changes or the stylus drags, and only the changed widget rectangles are damaged (a clock update is 120x28 px, 6.7 KB in RGB565). The program wakes up for the Wayland socket, once a minute for the clock, every 30 s for the battery, for the mixer, and, only while a drag has a value waiting, for a deadline of at most 50 ms. The buffer is a single wl_shm buffer in RGB565 when the compositor offers it (XRGB8888 otherwise), marked opaque, and nothing is allocated per frame. A resize (rotation) lays out again and allocates a new buffer.
+
+### Not implemented
+
+Everything else in `doc/panel.md`: popups and tap-and-hold menus, the app list, the network and the other widgets, and brightness through a picowl protocol instead of sysfs.
 
 ## Touch calibration
 

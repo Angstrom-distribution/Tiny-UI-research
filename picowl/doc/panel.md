@@ -1,6 +1,6 @@
 # picowl panel: widget design
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** the clock, battery, backlight and volume widgets are implemented as `picowl-panel`, a plain C layer-shell client without a toolkit; the README section "Panel" describes what it does. The brightness slider writes sysfs directly and picowl adopts the level it left (`doc/power.md`), not through the `picowl-control-v1` protocol of §4, and the clock, battery and sliders have no tap or tap-and-hold actions yet. The rest of this document (the app list, the network and other widgets, popups and menus, the control protocol, the LVGL plan) is design and not implemented.
 
 The panel is a layer-shell client that picowl starts at session start, at the top or bottom edge. It replaces the matchbox panel from the X/GPE stack. Everything here assumes the iPAQ constraints:
 - about 50 MiB of usable RAM;
