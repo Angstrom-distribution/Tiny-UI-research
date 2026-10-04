@@ -174,20 +174,27 @@ echo "panel-e2e: A ok"
 
 # ---- B: touch ----
 # Backlight cell: track x 28..116, thumb 20 wide. x=100 is 91 percent.
-"$PANEL" --dump-state --inject "p10,40;m60,40;m100,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+"$PANEL" --dump-state --inject "p30,40;m60,40;m100,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^backlight available=1 value=91 raw=931 ' "B drag to x=100"
 [ "$(cat "$BL/brightness")" = 931 ] || fail "B: brightness is $(cat "$BL/brightness"), wanted 931"
-# Left of the track: the floor, 5 percent (51), never black.
-"$PANEL" --dump-state --inject "p2,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+# Left end of the track: the floor, 5 percent (51), never black.
+"$PANEL" --dump-state --inject "p28,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^backlight available=1 value=5 raw=51 ' "B floor"
 [ "$(cat "$BL/brightness")" = 51 ] || fail "B: the floor wrote $(cat "$BL/brightness"), wanted 51"
-# The whole row cell is the target: top and bottom edge of row 2, on the icon.
+# The track is the target up to the top and bottom edge of row 2.
 echo 600 >"$BL/brightness"
 for y in 28 55; do
 	"$PANEL" --dump-state --inject "p100,$y;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 	has "$DIR/b.out" '^backlight available=1 value=91 raw=931 ' "B press at y=$y"
 	echo 600 >"$BL/brightness"
 done
+# The icon is inert: a tap or a drag from it neither sets the floor nor mutes.
+echo 600 >"$BL/brightness"
+"$PANEL" --dump-state --inject "p10,40;r;p2,40;m60,40;m100,40;r;p125,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B icon is inert"
+has "$DIR/b.out" '^volume available=1 value=20 ' "B speaker is inert"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press on the icon wrote the brightness"
+grep -q '^volume 8$' "$CTL" || fail "B: a press on the speaker reached the mixer"
 # A drag that starts outside a slider, or a press elsewhere, does nothing.
 "$PANEL" --dump-state --inject "p60,10;m100,40;m100,45;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B drag from outside"
@@ -199,7 +206,7 @@ has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B press elsewhere"
 "$PANEL" --dump-state --inject "p200,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^volume available=1 value=62 ' "B volume"
 [ "$(cat "$CTL")" = "$(printf 'volume 25\nswitch 1')" ] || fail "B: the mixer holds '$(cat "$CTL" | tr '\n' ' ')', wanted volume 25 switch 1"
-"$PANEL" --dump-state --inject "p125,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+"$PANEL" --dump-state --inject "p148,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^volume available=1 value=0 ' "B volume to 0"
 grep -q '^volume 0$' "$CTL" || fail "B: the mixer holds '$(cat "$CTL" | tr '\n' ' ')', wanted volume 0"
 # A drag across both cells moves only the slider it started on.

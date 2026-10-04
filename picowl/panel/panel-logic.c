@@ -184,6 +184,10 @@ int pl_touch_press(struct pl_touch *t, const struct pl_layout *l,
 	int s = pl_slider_at(l, x, y);
 	if (s == PL_SLIDER_NONE || !enabled[s])
 		return PL_SLIDER_NONE;
+	/* The icon strip is inert: a stray tap on the sun would set the floor
+	 * (a dark screen) and one on the speaker would mute. */
+	if (x < l->slider[s].track.x)
+		return PL_SLIDER_NONE;
 	t->slider = s;
 	*value = slider_value(l, s, x);
 	return s;

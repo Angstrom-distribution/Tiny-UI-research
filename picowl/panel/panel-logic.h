@@ -110,9 +110,9 @@ int pl_slider_at(const struct pl_layout *l, int x, int y);
 
 /* ---- touch ---- */
 
-/* A press inside a slider cell starts a drag of that slider; motion keeps
- * setting its value, release ends it. A press anywhere else, or on a disabled
- * slider, starts nothing and motion is ignored until the release. */
+/* A press inside a slider cell, right of its icon, starts a drag of that
+ * slider; motion keeps setting its value, release ends it. A press anywhere
+ * else (the icon included), or on a disabled slider, starts nothing and motion is ignored until the release. */
 struct pl_touch {
 	bool down;
 	int slider;		/* dragged slider, PL_SLIDER_NONE if none */

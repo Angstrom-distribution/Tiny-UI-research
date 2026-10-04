@@ -250,21 +250,41 @@ static void test_touch(void)
 	CHECK_EQ(pl_touch_motion(&t, &l, x, &v), PL_SLIDER_NONE, "motion after the release is ignored");
 	CHECK_EQ(pl_touch_release(&t), PL_SLIDER_NONE, "a second release changes nothing");
 
-	/* The whole row cell is the target, not only the thin track. */
+	/* The track and its margins up to the cell edges are the target, not
+	 * only the thin bar. */
 	CHECK_EQ(pl_touch_press(&t, &l, both, x, bl->cell.y, &v), PL_SLIDER_BACKLIGHT,
 		"press at the top edge of the cell");
 	pl_touch_release(&t);
 	CHECK_EQ(pl_touch_press(&t, &l, both, x, bl->cell.y + bl->cell.h - 1, &v),
 		PL_SLIDER_BACKLIGHT, "press at the bottom edge of the cell");
 	pl_touch_release(&t);
-	CHECK_EQ(pl_touch_press(&t, &l, both, bl->icon.x + 2, bl->icon.y + 2, &v),
-		PL_SLIDER_BACKLIGHT, "press on the icon");
-	CHECK_EQ(v, PL_BL_FLOOR_PCT, "the icon is left of the track: the floor");
+	CHECK_EQ(pl_touch_press(&t, &l, both, bl->track.x + bl->track.w - 1, 40, &v),
+		PL_SLIDER_BACKLIGHT, "press at the right end of the track");
+	pl_touch_release(&t);
+	CHECK_EQ(pl_touch_press(&t, &l, both, bl->track.x, 40, &v), PL_SLIDER_BACKLIGHT,
+		"press at the left end of the track");
+	CHECK_EQ(v, PL_BL_FLOOR_PCT, "the left end is the floor");
 	pl_touch_release(&t);
 
-	/* Volume goes down to 0. */
-	CHECK_EQ(pl_touch_press(&t, &l, both, vol->icon.x + 2, vol->icon.y + 2, &v),
-		PL_SLIDER_VOLUME, "press on the speaker");
+	/* The icon is inert: no value, no drag, also not when the stylus then
+	 * moves onto the track. */
+	CHECK_EQ(pl_touch_press(&t, &l, both, bl->icon.x + 2, bl->icon.y + 2, &v), PL_SLIDER_NONE,
+		"press on the sun does nothing");
+	CHECK_EQ(pl_touch_motion(&t, &l, x, &v), PL_SLIDER_NONE, "and starts no drag");
+	CHECK_EQ(pl_touch_release(&t), PL_SLIDER_NONE, "release of the ignored press");
+	CHECK_EQ(pl_touch_press(&t, &l, both, bl->cell.x, 40, &v), PL_SLIDER_NONE,
+		"press at the left edge of the cell (icon strip)");
+	pl_touch_release(&t);
+	CHECK_EQ(pl_touch_press(&t, &l, both, bl->track.x - 1, 40, &v), PL_SLIDER_NONE,
+		"press just left of the track");
+	pl_touch_release(&t);
+	CHECK_EQ(pl_touch_press(&t, &l, both, vol->icon.x + 2, vol->icon.y + 2, &v), PL_SLIDER_NONE,
+		"press on the speaker does nothing");
+	pl_touch_release(&t);
+
+	/* Volume goes down to 0 from the left end of its track. */
+	CHECK_EQ(pl_touch_press(&t, &l, both, vol->track.x, 40, &v), PL_SLIDER_VOLUME,
+		"press at the left end of the volume track");
 	CHECK_EQ(v, 0, "volume reaches 0");
 	pl_touch_release(&t);
 
