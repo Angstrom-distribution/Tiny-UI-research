@@ -63,6 +63,8 @@ protocol_xmls = {
   'wlr-output-power-management-unstable-v1': files('protocols/wlr-output-power-management-unstable-v1.xml'),
   'picowl-buffer-v1': files('protocols/picowl-buffer-v1.xml'),
 }
+# wlr-screencopy-unstable-v1 is not listed: wlr_screencopy_v1.h includes no
+# generated header and libwlroots provides the interface.
 
 protocol_headers = []
 foreach name, xml : protocol_xmls

@@ -1,6 +1,6 @@
 # picowl
 
-A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman. Designed for embedded developers working with extreme constraints: read `compositor.md` and `hardware.md` in the [ipaq-ui research](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui) (Tiny-UI-research, branch `docs/ipaq-ui-research`) for the architecture, hardware rotation, memory optimization, and device profiles. Implementation details in `doc/buffers.md`, `doc/zero-copy.md`, `doc/lease.md`, and `subprojects/packagefiles/wlroots/README.md`.
+A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ PDAs (SA-1110/PXA25x/PXA270, no GPU, no FPU, 64 MiB RAM) with 240×320/320×240/480×640 RGB565 panels on slow display buses. Single-threaded, damage-driven software rendering via pixman. Designed for embedded developers working with extreme constraints: read `compositor.md` and `hardware.md` in the [ipaq-ui research](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui) (Tiny-UI-research, branch `docs/ipaq-ui-research`) for the architecture, hardware rotation, memory optimization, and device profiles. Implementation details in `doc/buffers.md`, `doc/zero-copy.md`, `doc/lease.md`, `doc/capture.md`, and `subprojects/packagefiles/wlroots/README.md`.
 
 ## Status
 
@@ -148,6 +148,13 @@ DRM lease: the media player (`--vo drm:lease`) drives KMS on the output without 
 
 - `enable = true|false`: offer `wp_drm_lease_device_v1` (default true). `false` creates no global. The global also needs the DRM backend and a user who can open the card as non-master (the `video` group).
 - `allow = <app_id>[, <app_id>...]`: which clients may lease (default `mediaplayer`). The requester must own the focused toplevel and its `app_id` must be in the list. `*` accepts any focused client; an empty value rejects every request.
+
+### [capture] section
+
+Screen capture for screenshot and recording tools. See **[doc/capture.md](doc/capture.md)**.
+
+- `enabled = true|false`: offer `zwlr_screencopy_manager_v1` (default false). `false` creates no global.
+- Security: with capture on, any client that can connect to the Wayland socket can read the whole screen, including other applications. Enable it on development images only.
 
 ### [memory] section
 
@@ -364,6 +371,9 @@ Picowl advertises and implements (via wlroots 0.19):
 **DRM lease:**
 - `wp_drm_lease_device_v1` (version 1): offered with the DRM backend only; see `doc/lease.md` and `[lease]` above.
 
+**Screen capture:**
+- `zwlr_screencopy_manager_v1` (version 3): only with `[capture] enabled = true`; see `doc/capture.md`. `ext_image_copy_capture_v1` is not implemented.
+
 **Power & Idle:**
 - `zwlr_output_power_management_v1`: screen blanking requests (on/off).
 - `ext_idle_notifier_v1` (ext-idle-notify-v1): idle/resume notifications for clients such as screen lockers.
@@ -379,7 +389,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count` and `--probe`), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
+Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count` and `--probe`), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 

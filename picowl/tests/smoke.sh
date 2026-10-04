@@ -1,8 +1,9 @@
 #!/bin/sh
 # Headless smoke test: picowl + wl_shm xdg-shell client.
-# usage: smoke.sh PICOWL PW_TEST_CLIENT
+# usage: smoke.sh PICOWL PW_TEST_CLIENT PW_CAPTURE_CLIENT
 PICOWL=$1
 CLIENT=$2
+CAPTURE=$3
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
@@ -57,6 +58,11 @@ grep -q 'idle inhibit off' "$DIR/picowl.log" || fail "no 'idle inhibit off' in p
 grep -q 'lease: no DRM backend, disabled' "$DIR/picowl.log" || fail "no 'lease: no DRM backend' in picowl log"
 OUT=$("$CLIENT" --expect-no-global wp_drm_lease_device_v1 2>&1) || fail "lease global advertised: $OUT"
 
+# [capture] is off by default: no screencopy global.
+OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"no screencopy"*) ;; *) fail "default config advertises screencopy: $OUT" ;; esac
+
 kill -TERM "$PID"
 i=0
 while kill -0 "$PID" 2>/dev/null; do
@@ -65,5 +71,50 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 wait "$PID"; RC=$?
 [ "$RC" -eq 0 ] || fail "picowl exit status $RC"
+
+# Second run with [capture] enabled: the capture must be the background colour.
+# XRGB8888 keeps the expected pixel value exact.
+cat >"$DIR/capture.ini" <<EOF
+[render]
+format = XRGB8888
+
+[capture]
+enabled = true
+
+[background]
+color = #204060
+EOF
+rm -f "$DIR"/wayland-*
+export WAYLAND_DISPLAY=wayland-smoke
+"$PICOWL" -d 2 -c "$DIR/capture.ini" >"$DIR/picowl.log" 2>&1 &
+PID=$!
+i=0
+while ! ls "$DIR"/wayland-* >/dev/null 2>&1; do
+	kill -0 "$PID" 2>/dev/null || fail "capture picowl exited early"
+	i=$((i + 1)); [ $i -gt 100 ] && fail "capture socket never appeared"
+	sleep 0.05
+done
+SOCK=$(ls "$DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1)
+export WAYLAND_DISPLAY=$(basename "$SOCK")
+grep -q 'capture: zwlr_screencopy_manager_v1 enabled' "$DIR/picowl.log" || fail "no capture INFO line in picowl log"
+OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *captured*) ;; *) fail "capture client did not report captured" ;; esac
+case "$OUT" in *"identical=yes"*) ;; *) fail "captured pixels are not uniform: $OUT" ;; esac
+# wl_shm format 0 is ARGB8888, 1 is XRGB8888: the low 24 bits are the colour.
+case "$OUT" in
+*"format=0 "*|*"format=1 "*)
+	case "$OUT" in *"pixel="??204060) ;; *) fail "captured pixel is not the background colour: $OUT" ;; esac ;;
+*) fail "unexpected capture format, the colour check would be skipped: $OUT" ;;
+esac
+
+kill -TERM "$PID"
+i=0
+while kill -0 "$PID" 2>/dev/null; do
+	i=$((i + 1)); [ $i -gt 40 ] && fail "capture picowl did not exit within 2 s"
+	sleep 0.05
+done
+wait "$PID"; RC=$?
+[ "$RC" -eq 0 ] || fail "capture picowl exit status $RC"
 rm -rf "$DIR"
 echo "smoke: ok"

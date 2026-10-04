@@ -691,6 +691,29 @@ static int test_lease_config(void)
 	return 0;
 }
 
+static int test_capture_config(void)
+{
+	/* Off unless asked for: any client could read the screen. */
+	struct pw_config *c = pw_config_default();
+	assert(c != NULL && c->capture_enable == false);
+	pw_config_free(c);
+
+	const char *path = write_tmp_ini("picowl-test-capture.ini",
+		"[capture]\nenabled = true\nbogus = 1\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->capture_enable == true);
+	pw_config_free(c);
+
+	path = write_tmp_ini("picowl-test-capture2.ini", "[capture]\nenabled = maybe\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->capture_enable == false);
+	pw_config_free(c);
+	printf("✓ test_capture_config\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -719,6 +742,7 @@ int main(int argc, char *argv[])
 	failed += test_power_validation();
 	failed += test_legacy_idle_timeout();
 	failed += test_lease_config();
+	failed += test_capture_config();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

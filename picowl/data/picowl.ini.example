@@ -151,6 +151,13 @@ color = #101010
 # enable = true
 # allow = mediaplayer
 
+[capture]
+# Screen capture through zwlr_screencopy_manager_v1 (grim, wf-recorder).
+# Off by default: any client of the session can read the whole screen, including
+# other applications. Enabled here so development images can take screenshots;
+# leave it off on production images. See doc/capture.md.
+enabled = true
+
 [memory]
 # Memory allocator tuning (M_* malloc() environment variables).
 # arena_max: M_ARENA_MAX, number of malloc arenas. Range: 1..8 (default 1).

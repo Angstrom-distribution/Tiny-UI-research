@@ -59,6 +59,18 @@ pw_test_client = executable('pw-test-client',
   inhibit_client_h, inhibit_client_c,
   dependencies: [wayland_client])
 
+sc_xml = files('../protocols/wlr-screencopy-unstable-v1.xml')
+sc_client_h = custom_target('wlr-screencopy-client-header',
+  input: sc_xml, output: 'wlr-screencopy-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+sc_client_c = custom_target('wlr-screencopy-client-code',
+  input: sc_xml, output: 'wlr-screencopy-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
+pw_capture_client = executable('pw-capture-client',
+  'pw-capture-client.c', sc_client_h, sc_client_c,
+  dependencies: [wayland_client])
+
 # Opt-in (PW_LEASE_VKMS=1), needs root, the vkms module and /dev/dri; skips
 # (exit 77) otherwise.
 pw_lease_client = executable('pw-lease-client',
@@ -67,7 +79,7 @@ pw_lease_client = executable('pw-lease-client',
   dependencies: [wayland_client, libdrm])
 
 test('smoke', find_program('sh'),
-  args: [files('smoke.sh'), picowl_exe, pw_test_client],
+  args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client],
   timeout: 30)
 
 test_touchhold_exe = executable('test-touchhold',

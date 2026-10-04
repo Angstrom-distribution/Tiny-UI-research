@@ -13,6 +13,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_presentation_time.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_viewporter.h>
@@ -253,6 +254,14 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	wlr_presentation_create(server->display, server->backend, 2);
 	wlr_viewporter_create(server->display);
 	wlr_single_pixel_buffer_manager_v1_create(server->display);
+
+	/* Opt-in: any client that can connect could otherwise read the screen. */
+	if (server->config->capture_enable) {
+		if (wlr_screencopy_manager_v1_create(server->display))
+			pw_log(WLR_INFO, "capture: zwlr_screencopy_manager_v1 enabled");
+		else
+			pw_log(WLR_ERROR, "capture: cannot create the screencopy manager");
+	}
 
 	S.activation = wlr_xdg_activation_v1_create(server->display);
 	S.decoration_mgr = wlr_xdg_decoration_manager_v1_create(server->display);

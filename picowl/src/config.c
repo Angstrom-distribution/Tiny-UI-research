@@ -281,6 +281,7 @@ struct pw_config *pw_config_default(void)
 	c->low_max_brightness_pct = 40;
 	c->lease_enable = true;
 	c->lease_allow = strdup("mediaplayer");
+	c->capture_enable = false;
 	add_default_keybindings(c);
 	return c;
 }
@@ -577,6 +578,12 @@ struct pw_config *pw_config_load(const char *path)
 				}
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [lease]: %s", key);
+			}
+		} else if (strcmp(section, "capture") == 0) {
+			if (strcmp(key, "enabled") == 0) {
+				parse_bool_log(val, "capture.enabled", &c->capture_enable);
+			} else {
+				pw_log(WLR_ERROR, "Unknown key in [capture]: %s", key);
 			}
 		} else if (strcmp(section, "memory") == 0) {
 			/* Memory configuration */

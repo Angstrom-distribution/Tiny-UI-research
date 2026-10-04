@@ -178,6 +178,9 @@ struct pw_config {
 	/* [lease] */
 	bool lease_enable;         /* offer wp_drm_lease_device_v1 (default true) */
 	char *lease_allow;         /* comma-separated app_ids, "*" = any (default "mediaplayer") */
+
+	/* [capture] */
+	bool capture_enable;       /* offer zwlr_screencopy_manager_v1 (default false) */
 };
 
 /*
