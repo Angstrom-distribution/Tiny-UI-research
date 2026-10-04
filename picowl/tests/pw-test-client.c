@@ -39,6 +39,9 @@ static struct xdg_surface *xdg_surface;
 static struct wl_callback *frame_cb;
 static bool have_565, configured, done;
 static uint32_t format = WL_SHM_FORMAT_XRGB8888;
+/* --pattern: a gradient with a checkerboard instead of one colour, so that
+ * what a translucent surface lets through can be seen. */
+static bool pattern;
 static int32_t cfg_w, cfg_h;
 static struct zwp_linux_dmabuf_v1 *dmabuf;
 static struct picowl_buffer_manager_v1 *pbm;
@@ -514,6 +517,8 @@ int main(int argc, char **argv)
 			want_inhibit = true;
 		else if (!strcmp(argv[i], "--expect-keymap"))
 			want_keymap = true;
+		else if (!strcmp(argv[i], "--pattern"))
+			pattern = true;
 		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
 			linger = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
@@ -617,15 +622,20 @@ int main(int argc, char **argv)
 		perror("mmap");
 		return 1;
 	}
-	if (bpp == 2) {
-		uint16_t *p = map;
-		for (size_t i = 0; i < size / 2; i++)
-			p[i] = 0x07e0; /* green */
-	} else {
-		uint32_t *p = map;
-		for (size_t i = 0; i < size / 4; i++)
-			p[i] = 0xff00ff00;
-	}
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			uint32_t r = 0, g = 255, b = 0;
+			if (pattern) {
+				r = (uint32_t)x * 255 / (uint32_t)w;
+				g = (uint32_t)y * 255 / (uint32_t)h;
+				b = ((x / 6 + y / 6) & 1) ? 235 : 40;
+			}
+			if (bpp == 2)
+				((uint16_t *)map)[(size_t)y * w + x] =
+					(uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+			else
+				((uint32_t *)map)[(size_t)y * w + x] = 0xff000000u | (r << 16) | (g << 8) | b;
+		}
 	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
 	struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride, format);
 	wl_shm_pool_destroy(pool);

@@ -4,20 +4,23 @@
 # 600, a battery at 73 percent) and a fake sound card (pw-fake-ctl, an alsa-lib
 # plugin whose state is a file).
 #  A: the first frame: widget values and geometry (--dump-state).
-#  B: touch (--inject, the same handlers as wl_pointer events): the backlight
-#     and volume values reach sysfs and the mixer, the floor, a drag that
-#     starts outside a slider, a slider without a mixer.
-#  C: the layer surface shrinks the usable area for a second client, top and
-#     bottom, with --height, and gives it back when the panel exits.
+#  B: touch (--inject, the same handlers as wl_pointer events): the buttons
+#     open and close the slider row and set nothing, the row sets the backlight
+#     and volume values that reach sysfs and the mixer, the floor, a drag that
+#     starts outside the row, a slider without a device, the 3 s auto-close.
+#  C: the layer surface: the exclusive zone is the bar and stays so while the
+#     row is open (a second client's usable area does not change), the input
+#     region is the bar and the row, the protocol sequence on the wire.
 #  D: no redraw and no wake-up while nothing changes; the battery and an
 #     external volume change are followed.
 #  E: rotation: the panel is laid out again for the new width.
 #  F: errors and exit codes: no compositor, no layer shell, no output, SIGTERM,
-#     the compositor going away.
+#     the compositor going away; a font that is not there.
+#  G: a translucent row lets the window behind it show through (capture).
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
-# usage: panel-e2e.sh PICOWL PANEL PW_TEST_CLIENT PW_KEY_CLIENT PW_FAKE_CTL PW_BARE_SERVER
+# usage: panel-e2e.sh PICOWL PANEL PW_TEST_CLIENT PW_KEY_CLIENT PW_FAKE_CTL PW_BARE_SERVER PW_CAPTURE_CLIENT
 PICOWL=$1
 PANEL=$2
 CLIENT=$3
@@ -26,6 +29,7 @@ KEYS=$4
 # the directory the test runs in.
 FAKECTL=$(cd "$(dirname "$5")" && pwd)/$(basename "$5")
 BARE=$6
+CAPTURE=$7
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
@@ -34,6 +38,7 @@ export PICOWL_HEADLESS_SIZE=240x320
 unset DISPLAY WAYLAND_DISPLAY
 PID=
 PANELPID=
+CLIENTPID=
 CLOCK_T0=
 CLOCK_U0=
 uptime_s() { cut -d. -f1 /proc/uptime; }
@@ -46,13 +51,14 @@ restore_clock() {
 cleanup() {
 	restore_clock
 	[ -n "$PANELPID" ] && kill -9 "$PANELPID" 2>/dev/null
+	[ -n "$CLIENTPID" ] && kill -9 "$CLIENTPID" 2>/dev/null
 	[ -n "$PID" ] && kill -9 "$PID" 2>/dev/null
 	rm -rf "$DIR"
 }
 fail() {
 	echo "panel-e2e: FAIL: $*"
 	cat "$DIR/picowl.log" 2>/dev/null
-	for f in "$DIR"/*.out "$DIR"/*.err; do [ -f "$f" ] && { echo "--- $f"; cat "$f"; }; done
+	for f in "$DIR"/*.out "$DIR"/*.err "$DIR"/*.cap; do [ -f "$f" ] && { echo "--- $f"; cat "$f"; }; done
 	cleanup
 	exit 1
 }
@@ -85,6 +91,13 @@ export PW_FAKECTL_STATE=$CTL
 cat >"$DIR/picowl.ini" <<EOF
 [zerocopy]
 panel_autohide = false
+
+[background]
+color = #ff00ff
+
+# the captures of the pixel checks
+[capture]
+enabled = true
 
 [keybindings]
 code:397 = rotate
@@ -126,6 +139,14 @@ wait_for() {
 
 # has FILE PATTERN WHAT: the pattern must match a line.
 has() { grep -q "$2" "$1" || fail "$3: no line matches '$2' in $1"; }
+hasnt() { grep -q "$2" "$1" && fail "$3: a line matches '$2' in $1"; return 0; }
+
+# val FILE LINE KEY: the value of KEY=... on the (last) line that starts with LINE.
+val() {
+	awk -v pre="$2" -v key="$3" '$1 == pre { for (i = 2; i <= NF; i++) { split($i, a, "="); if (a[1] == key) v = a[2] } } END { print v }' "$1"
+}
+# comp STRING N: the Nth comma separated number.
+comp() { echo "$1" | cut -d, -f"$2"; }
 
 # start_panel NAME ARGS...: --watch panel in the background, ready after its
 # first frame. Output in $DIR/NAME.out.
@@ -150,6 +171,12 @@ stop_panel() {
 	[ "$RC" -eq 0 ] || fail "$1: the panel exited with status $RC"
 }
 
+# dump OUT ARGS...: run the panel with --dump-state and its output in $DIR/OUT.
+dump() {
+	o=$1; shift
+	"$PANEL" --dump-state "$@" >"$DIR/$o" 2>"$DIR/$o.err" || fail "$o: the panel failed: $(cat "$DIR/$o.err")"
+}
+
 mapped() { "$CLIENT" 2>&1 | sed -n 's/.*mapped \([0-9]*x[0-9]*\) .*/\1/p'; }
 
 start_picowl
@@ -159,112 +186,252 @@ T0=$(date +%H:%M)
 "$PANEL" --dump-state >"$DIR/a.out" 2>"$DIR/a.err" || fail "A: --dump-state failed"
 T1=$(date +%H:%M)
 cat "$DIR/a.out"
-has "$DIR/a.out" '^panel width=240 height=56 row=28 format=RGB565 anchor=top ' "A geometry"
+has "$DIR/a.out" '^panel width=240 height=20 bar=20 row=0 format=RGB565 anchor=top popup=none$' "A geometry"
+has "$DIR/a.out" '^surface exclusive=20 input=0,0,240,20$' "A exclusive zone and input region are the bar"
 CLOCK=$(sed -n 's/^clock text=\([0-9:]*\) .*/\1/p' "$DIR/a.out")
 [ "$CLOCK" = "$T0" ] || [ "$CLOCK" = "$T1" ] || fail "A: the clock shows '$CLOCK', the time is $T0"
-has "$DIR/a.out" '^clock text=[0-2][0-9]:[0-5][0-9] rect=0,0,120,28$' "A clock rect"
-has "$DIR/a.out" '^battery text=73% status=discharging percent=73 rect=120,0,120,28$' "A battery"
-has "$DIR/a.out" '^backlight available=1 value=59 raw=600 max=1023 cell=0,28,120,28 ' "A backlight"
-has "$DIR/a.out" '^volume available=1 value=20 cell=120,28,120,28 ' "A volume (8 of 0..40)"
-THUMB_W=$(sed -n 's/^backlight .* thumb=[0-9]*,[0-9]*,\([0-9]*\),[0-9]*$/\1/p' "$DIR/a.out")
-[ "${THUMB_W:-0}" -ge 20 ] || fail "A: the thumb is $THUMB_W px wide"
+has "$DIR/a.out" '^clock text=[0-2][0-9]:[0-5][0-9] rect=0,0,[0-9]*,19$' "A clock rect"
+has "$DIR/a.out" '^battery text=73% status=discharging percent=73 rect=[0-9]*,0,[0-9]*,19$' "A battery"
+BATR=$(val "$DIR/a.out" battery rect)
+[ $(($(comp "$BATR" 1) + $(comp "$BATR" 3))) -eq 240 ] || fail "A: the battery rectangle does not reach the edge: $BATR"
+has "$DIR/a.out" '^backlight available=1 value=59 raw=600 max=1023 button=[0-9]*,0,[0-9]*,20$' "A backlight button"
+has "$DIR/a.out" '^volume available=1 value=20 button=[0-9]*,0,[0-9]*,20$' "A volume button (8 of 0..40)"
+for k in backlight volume; do
+	B=$(val "$DIR/a.out" $k button)
+	[ "$(comp "$B" 3)" -ge 36 ] || fail "A: the $k button is only $(comp "$B" 3) px wide"
+	[ "$(comp "$B" 4)" -eq 20 ] || fail "A: the $k button is not the whole bar high"
+	[ $(($(comp "$B" 1) + $(comp "$B" 3))) -le "$(comp "$BATR" 1)" ] || fail "A: the $k button overlaps the battery"
+done
+has "$DIR/a.out" '^style font=' "A style line"
+hasnt "$DIR/a.out" '^row ' "A no row while closed"
 [ "$(cat "$BL/brightness")" = 600 ] || fail "A: the panel changed the brightness by looking"
 [ "$(cat "$CTL")" = "$(printf 'volume 8\nswitch 0')" ] || fail "A: the panel changed the volume by looking"
+BLB=$(val "$DIR/a.out" backlight button)
+VOLB=$(val "$DIR/a.out" volume button)
 echo "panel-e2e: A ok"
 
 # ---- B: touch ----
-# Backlight cell: track x 28..116, thumb 20 wide. x=100 is 91 percent.
-"$PANEL" --dump-state --inject "p30,40;m60,40;m100,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-has "$DIR/b.out" '^backlight available=1 value=91 raw=931 ' "B drag to x=100"
-[ "$(cat "$BL/brightness")" = 931 ] || fail "B: brightness is $(cat "$BL/brightness"), wanted 931"
+# The row's geometry, read from a panel that has the backlight row open.
+dump geo.out --inject "ibl"
+has "$DIR/geo.out" '^panel width=240 height=56 bar=20 row=36 format=ARGB8888 anchor=top popup=backlight$' "B open: surface of bar and row, ARGB8888 for the translucent row"
+has "$DIR/geo.out" '^surface exclusive=20 input=0,0,240,56$' "B open: the exclusive zone stays the bar, the input region is bar and row"
+has "$DIR/geo.out" '^row slider=backlight rect=0,20,240,36 ' "B row rect"
+TRACK=$(val "$DIR/geo.out" row track)
+THUMB=$(val "$DIR/geo.out" row thumb)
+TX=$(comp "$TRACK" 1); TW=$(comp "$TRACK" 3); TD=$(comp "$THUMB" 3)
+[ "$TD" -ge 22 ] || fail "B: the thumb is $TD px"
+CELL=$(val "$DIR/geo.out" row cell)
+CX=$(comp "$CELL" 1)
+CXR=$((CX + $(comp "$CELL" 3) - 1))
+# x for a thumb centred at PCT percent of the travel
+xat() { echo $((TX + TD / 2 + (TW - TD) * $1 / 100)); }
+Y=38
+echo 600 >"$BL/brightness"
+
+# A tap on a button opens the row and sets nothing; the same button closes it.
+dump b.out --inject "ibl"
+has "$DIR/b.out" 'popup=backlight$' "B tap opens the backlight row"
+has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B tap on the sun sets nothing"
+dump b.out --inject "ibl;ibl"
+has "$DIR/b.out" '^panel width=240 height=20 .*popup=none$' "B the same button closes the row and the surface shrinks"
+dump b.out --inject "ibl;ivol"
+has "$DIR/b.out" 'popup=volume$' "B the other button switches the row"
+has "$DIR/b.out" '^row slider=volume ' "B the row shows the volume"
+has "$DIR/b.out" '^volume available=1 value=20 ' "B tap on the speaker sets nothing"
+dump b.out --inject "ivol;ivol;ivol"
+has "$DIR/b.out" 'popup=volume$' "B open, close, open"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "B: a tap wrote the brightness"
+grep -q '^volume 8$' "$CTL" || fail "B: a tap reached the mixer"
+grep -q '^switch 0$' "$CTL" || fail "B: a tap switched the playback on"
+
+# Drag in the backlight row: from 30 to 91 percent.
+X0=$(xat 30); X1=$(xat 60); X2=$(xat 91)
+dump b.out --inject "ibl;p$X0,$Y;m$X1,$Y;m$X2,$Y;r"
+V=$(val "$DIR/b.out" backlight value)
+[ "$V" -ge 90 ] && [ "$V" -le 92 ] || fail "B: the drag ended at $V percent, wanted 91"
+RAW=$(( (V * 1023 + 50) / 100 ))
+[ "$(cat "$BL/brightness")" = "$RAW" ] || fail "B: brightness is $(cat "$BL/brightness"), wanted $RAW for $V percent"
+has "$DIR/b.out" 'popup=backlight$' "B a drag keeps the row open"
 # Left end of the track: the floor, 5 percent (51), never black.
-"$PANEL" --dump-state --inject "p28,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+echo 600 >"$BL/brightness"
+dump b.out --inject "ibl;p$CX,$Y;r"
 has "$DIR/b.out" '^backlight available=1 value=5 raw=51 ' "B floor"
 [ "$(cat "$BL/brightness")" = 51 ] || fail "B: the floor wrote $(cat "$BL/brightness"), wanted 51"
-# The track is the target up to the top and bottom edge of row 2.
-echo 600 >"$BL/brightness"
-for y in 28 55; do
-	"$PANEL" --dump-state --inject "p100,$y;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-	has "$DIR/b.out" '^backlight available=1 value=91 raw=931 ' "B press at y=$y"
+# The whole height of the row is the target, and the area past the track.
+for yy in 20 55; do
 	echo 600 >"$BL/brightness"
+	dump b.out --inject "ibl;p$X2,$yy;r"
+	V=$(val "$DIR/b.out" backlight value)
+	[ "$V" -ge 90 ] && [ "$V" -le 92 ] || fail "B: a press at y=$yy gave $V"
 done
-# The icon is inert: a tap or a drag from it neither sets the floor nor mutes.
 echo 600 >"$BL/brightness"
-"$PANEL" --dump-state --inject "p10,40;r;p2,40;m60,40;m100,40;r;p125,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B icon is inert"
-has "$DIR/b.out" '^volume available=1 value=20 ' "B speaker is inert"
-[ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press on the icon wrote the brightness"
-grep -q '^volume 8$' "$CTL" || fail "B: a press on the speaker reached the mixer"
+dump b.out --inject "ibl;p$CXR,$Y;r"
+has "$DIR/b.out" '^backlight available=1 value=100 raw=1023 ' "B a press right of the track is 100"
+# The icon and the value text of the row are inert.
+echo 600 >"$BL/brightness"
+dump b.out --inject "ibl;p10,$Y;m$X2,$Y;r"
+has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B the row's icon is inert"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press on the row's icon wrote the brightness"
+has "$DIR/b.out" 'popup=backlight$' "B and does not close the row"
+# Without the row, the area where it would be does nothing.
+dump b.out --inject "p$X2,$Y;r;p$X2,$Y;m$X0,$Y;r"
+has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B a press where the closed row would be"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press on the closed bar wrote the brightness"
 # The panel read the level at start; a change made since by another process
 # (picowl dimming, a script) is shown when the pointer enters, and a press
-# must not take the stale level for the shown one: x=78 is 59 percent.
-"$PANEL" --dump-state --inject "b300;e100,40" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+# must not take the stale level for the shown one.
+dump b.out --inject "b300;e100,5"
 has "$DIR/b.out" '^backlight available=1 value=29 raw=300 ' "B pointer enter re-reads the backlight"
 echo 600 >"$BL/brightness"
-"$PANEL" --dump-state --inject "b300;p78,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-has "$DIR/b.out" '^backlight available=1 value=59 ' "B press after an external change"
+XS=$(xat 59)
+dump b.out --inject "b300;ibl;p$XS,$Y;r"
+V=$(val "$DIR/b.out" backlight value)
+[ "$V" -ge 58 ] && [ "$V" -le 60 ] || fail "B: a press after an external change gave $V"
 [ "$(cat "$BL/brightness")" != 300 ] || fail "B: a press equal to the stale value was dropped"
 echo 600 >"$BL/brightness"
-# A drag that starts outside a slider, or a press elsewhere, does nothing.
-"$PANEL" --dump-state --inject "p60,10;m100,40;m100,45;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+# A drag that starts on the clock, or a press elsewhere, does nothing.
+dump b.out --inject "ibl;p20,5;m$X2,$Y;m$X2,45;r"
 has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B drag from outside"
-"$PANEL" --dump-state --inject "p300,40;r;p100,56;r;p230,10;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+dump b.out --inject "ibl;p300,$Y;r;p230,5;r"
 has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B press elsewhere"
 [ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press elsewhere wrote the brightness"
-# Volume cell: track x 148..236. x=200 is 62 percent of 0..40: 25. Raising it
-# above 0 switches the playback on.
-"$PANEL" --dump-state --inject "p200,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-has "$DIR/b.out" '^volume available=1 value=62 ' "B volume"
-[ "$(cat "$CTL")" = "$(printf 'volume 25\nswitch 1')" ] || fail "B: the mixer holds '$(cat "$CTL" | tr '\n' ' ')', wanted volume 25 switch 1"
-"$PANEL" --dump-state --inject "p148,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+# Volume row: a drag to about 62 percent of 0..40; raising it above 0
+# switches the playback on.
+XV=$(xat 62)
+dump b.out --inject "ivol;p$XV,$Y;r"
+V=$(val "$DIR/b.out" volume value)
+[ "$V" -ge 61 ] && [ "$V" -le 63 ] || fail "B: the volume row gave $V"
+RAW=$(( (40 * V + 50) / 100 ))
+[ "$(cat "$CTL")" = "$(printf 'volume %s\nswitch 1' $RAW)" ] || fail "B: the mixer holds '$(cat "$CTL" | tr '\n' ' ')', wanted volume $RAW switch 1"
+has "$DIR/b.out" '^row slider=volume ' "B the volume row"
+dump b.out --inject "ivol;p$CX,$Y;r"
 has "$DIR/b.out" '^volume available=1 value=0 ' "B volume to 0"
 grep -q '^volume 0$' "$CTL" || fail "B: the mixer holds '$(cat "$CTL" | tr '\n' ' ')', wanted volume 0"
-# A drag across both cells moves only the slider it started on.
+# A drag in the volume row moves the volume only, the backlight stays.
 printf 'volume 8\nswitch 0\n' >"$CTL"
 echo 600 >"$BL/brightness"
-"$PANEL" --dump-state --inject "p100,40;m200,40;m230,50;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
-has "$DIR/b.out" '^backlight available=1 value=100 raw=1023 ' "B drag across the cells"
-has "$DIR/b.out" '^volume available=1 value=20 ' "B the other slider stays"
-grep -q '^volume 8$' "$CTL" || fail "B: the volume changed under a backlight drag"
-# Without a mixer the slider is greyed out and ignores touches.
-echo 600 >"$BL/brightness"
-ALSA_CONFIG_PATH=/nonexistent "$PANEL" --dump-state --inject "p200,40;r;p100,40;m110,40;r" >"$DIR/b.out" 2>"$DIR/b.err" || fail "B: no mixer: the panel failed"
+dump b.out --inject "ivol;p$X0,$Y;m239,$Y;m239,55;r"
+has "$DIR/b.out" '^volume available=1 value=100 ' "B drag across to the end"
+has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B the other slider stays"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "B: the backlight changed under a volume drag"
+# Without a mixer the button is greyed out and ignores taps.
+printf 'volume 8\nswitch 0\n' >"$CTL"
+ALSA_CONFIG_PATH=/nonexistent "$PANEL" --dump-state --inject "ivol;p$XV,$Y;r;ibl;p$X0,$Y;m$X1,$Y;r" >"$DIR/b.out" 2>"$DIR/b.err" || fail "B: no mixer: the panel failed"
 has "$DIR/b.out" '^volume available=0 value=-1 ' "B no mixer"
+has "$DIR/b.out" 'popup=backlight$' "B no mixer: the speaker opened nothing, the sun still does"
 has "$DIR/b.out" '^backlight available=1 value=' "B no mixer: the backlight works"
 grep -q 'volume slider is disabled' "$DIR/b.err" || fail "B: no message about the missing mixer"
 grep -q '^volume 8$' "$CTL" || fail "B: a touch on the disabled slider reached the mixer"
-# No backlight device: that slider is greyed out too.
-PICOWL_SYSFS_ROOT=$DIR/nosys "$PANEL" --dump-state >"$DIR/b.out" 2>"$DIR/b.err" || fail "B: no sysfs: the panel failed"
+# No backlight device: that button is greyed out too.
+PICOWL_SYSFS_ROOT=$DIR/nosys "$PANEL" --dump-state --inject "ibl" >"$DIR/b.out" 2>"$DIR/b.err" || fail "B: no sysfs: the panel failed"
 has "$DIR/b.out" '^backlight available=0 value=-1 ' "B no backlight"
+has "$DIR/b.out" 'popup=none$' "B no backlight: the sun opens nothing"
 has "$DIR/b.out" '^battery text=-- status=none percent=-1 ' "B no battery"
+
+# The auto-close: 3 s after the last touch, and a touch moves it. The waits
+# run the panel's own event loop.
+echo 600 >"$BL/brightness"
+dump b.out --inject "ibl;w2500"
+has "$DIR/b.out" 'popup=backlight$' "B still open after 2.5 s"
+dump b.out --inject "ibl;w2500;w800"
+has "$DIR/b.out" '^panel width=240 height=20 .*popup=none$' "B closed after 3.3 s, the surface is the bar again"
+dump b.out --inject "ibl;w2000;p$X0,$Y;r;w2000"
+has "$DIR/b.out" 'popup=backlight$' "B a touch 2 s in keeps it open at 4 s"
+dump b.out --inject "ibl;w2000;p$X0,$Y;r;w2000;w1300"
+has "$DIR/b.out" 'popup=none$' "B and it closes 3 s after that touch"
+dump b.out --inject "ibl;p$X0,$Y;w3500"
+has "$DIR/b.out" 'popup=backlight$' "B a stylus held down keeps it open"
+dump b.out --inject "ibl;p$X0,$Y;w3500;r;w3300"
+has "$DIR/b.out" 'popup=none$' "B and it closes 3 s after the release"
+dump b.out --inject "ibl;w1500;ivol;w2000"
+has "$DIR/b.out" 'popup=volume$' "B a tap on the other button is a touch too"
 echo "panel-e2e: B ok"
 
-# ---- C: the usable area ----
+# ---- C: the layer surface ----
 [ "$(mapped)" = 240x320 ] || fail "C: without the panel a toplevel is not 240x320: $(mapped)"
 start_panel c
 M=$(mapped)
-[ "$M" = 240x264 ] || fail "C: with the panel a toplevel is $M, wanted 240x264"
+[ "$M" = 240x300 ] || fail "C: with the panel a toplevel is $M, wanted 240x300"
 stop_panel C
 [ "$(mapped)" = 240x320 ] || fail "C: the area did not come back after the panel exited"
+# With the row open the usable area is the same: the row covers windows. The
+# stylus stays down, so the row stays open while the client is asked.
+start_panel c --inject "ibl;p$X0,$Y"
+has "$DIR/c.out" 'popup=backlight$' "C the row is open"
+M=$(mapped)
+[ "$M" = 240x300 ] || fail "C: with the row open a toplevel is $M, wanted 240x300 as without"
+has "$DIR/c.out" '^surface exclusive=20 input=0,0,240,56$' "C open: exclusive zone and input region"
+stop_panel C
 start_panel c --bottom
 has "$DIR/c.out" 'anchor=bottom' "C bottom"
 M=$(mapped)
-[ "$M" = 240x264 ] || fail "C: with the panel at the bottom a toplevel is $M, wanted 240x264"
+[ "$M" = 240x300 ] || fail "C: with the panel at the bottom a toplevel is $M, wanted 240x300"
+stop_panel C
+# At the bottom the row opens above the bar: the bar stays at the edge.
+start_panel c --bottom --inject "ivol;p$X0,15"
+has "$DIR/c.out" '^panel width=240 height=56 bar=20 row=36 .*anchor=bottom popup=volume$' "C bottom: row open"
+has "$DIR/c.out" '^row slider=volume rect=0,0,240,36 ' "C bottom: the row is the top of the surface"
+has "$DIR/c.out" '^backlight available=1 value=[0-9]* raw=.* button=[0-9]*,36,[0-9]*,20$' "C bottom: the bar is at the bottom of the surface"
+M=$(mapped)
+[ "$M" = 240x300 ] || fail "C: with the panel at the bottom and the row open a toplevel is $M, wanted 240x300"
 stop_panel C
 start_panel c --height 80
-has "$DIR/c.out" '^panel width=240 height=80 row=40 ' "C height 80"
+has "$DIR/c.out" '^panel width=240 height=80 bar=80 row=0 ' "C height 80"
 M=$(mapped)
-[ "$M" = 240x240 ] || fail "C: with a panel of 80 a toplevel is $M, wanted 240x240"
+[ "$M" = 240x240 ] || fail "C: with a bar of 80 a toplevel is $M, wanted 240x240"
+stop_panel C
+start_panel c --height 80 --inject "ibl;p$X0,100"
+has "$DIR/c.out" 'popup=backlight$' "C row under a tall bar"
+M=$(mapped)
+[ "$M" = 240x240 ] || fail "C: with a bar of 80 and the row open a toplevel is $M, wanted 240x240"
 stop_panel C
 start_panel c --height 5
-has "$DIR/c.out" 'height=40 ' "C height clamped up"
+has "$DIR/c.out" 'height=18 bar=18 ' "C height clamped up"
 stop_panel C
 start_panel c --height 500
-has "$DIR/c.out" 'height=120 ' "C height clamped down"
+has "$DIR/c.out" 'height=80 bar=80 ' "C height clamped down"
 stop_panel C
-start_panel c --scale 2
-has "$DIR/c.out" 'scale=2 ' "C scale"
+start_panel c --font-size 18
+has "$DIR/c.out" 'size=18 ' "C font size"
 stop_panel C
+# --scale is gone.
+"$PANEL" --scale 2 >"$DIR/c.out" 2>"$DIR/c.err"
+[ $? -eq 2 ] || fail "C: the removed --scale does not exit 2"
+
+# What goes over the wire: the layer surface is configured once with the bar's
+# exclusive zone and only its size changes; the region requests; the buffers.
+WAYLAND_DEBUG=1 "$PANEL" --dump-state --inject "ibl;p$X0,$Y;m$X1,$Y;m$X2,$Y;r;ibl" >"$DIR/w.out" 2>"$DIR/w.err" || fail "C: the panel failed with WAYLAND_DEBUG"
+grep -q 'protocol error' "$DIR/w.err" && fail "C: protocol error"
+EZ=$(grep -c 'set_exclusive_zone' "$DIR/w.err")
+[ "$EZ" = 1 ] || fail "C: the exclusive zone was set $EZ times, wanted once"
+grep -q 'set_exclusive_zone(20)' "$DIR/w.err" || fail "C: the exclusive zone is not the bar"
+grep 'set_size' "$DIR/w.err" | sed 's/.*set_size/set_size/' | tr '\n' ' ' >"$DIR/w.sizes"
+[ "$(cat "$DIR/w.sizes")" = "set_size(0, 20) set_size(0, 56) set_size(0, 20) " ] || fail "C: the sizes asked for: $(cat "$DIR/w.sizes")"
+grep -q 'set_anchor(13)' "$DIR/w.err" || fail "C: the anchor is not top|left|right"
+# Buffers: RGB565 for the bar, ARGB8888 for the surface with the translucent row.
+grep 'create_buffer' "$DIR/w.err" | sed 's/.*create_buffer/create_buffer/' | tr '\n' ' ' >"$DIR/w.bufs"
+echo "$(sed 's/new id wl_buffer[#@][0-9]*, //g' "$DIR/w.bufs")" | grep -q '^create_buffer(0, 240, 20, 480, 909199186) create_buffer(0, 240, 56, 960, 0) create_buffer(0, 240, 20, 480, 909199186) $' ||
+	fail "C: the buffers are not RGB565 bar, ARGB8888 bar and row, RGB565 bar: $(cat "$DIR/w.bufs")"
+# The input region: the bar, then the bar and the row; never more. Each
+# set_input_region names a region that was filled by add calls just before.
+awk '
+	/wl_region[#@][0-9]+\.add\(/ { s = $0; sub(/.*wl_region[#@]/, "", s); id = s; sub(/\..*/, "", id); r = s; sub(/^[0-9]+\.add\(/, "", r); sub(/\).*/, "", r); gsub(/ /, "", r); reg[id] = reg[id] " " r; next }
+	/wl_region[#@][0-9]+\.destroy\(/ { s = $0; sub(/.*wl_region[#@]/, "", s); sub(/\..*/, "", s); reg[s] = ""; next }
+	/set_input_region\(/ { s = $0; sub(/.*set_input_region\(wl_region[#@]/, "", s); sub(/\).*/, "", s); print "input" reg[s]; next }
+	/set_opaque_region\(/ { s = $0; sub(/.*set_opaque_region\(wl_region[#@]/, "", s); sub(/\).*/, "", s); print "opaque" reg[s]; next }
+' "$DIR/w.err" >"$DIR/w.regions"
+cat "$DIR/w.regions"
+[ "$(grep -c '^input' "$DIR/w.regions")" -ge 3 ] || fail "C: no input regions on the wire"
+grep '^input' "$DIR/w.regions" | sort -u | tr '\n' ';' >"$DIR/w.in"
+[ "$(cat "$DIR/w.in")" = "input 0,0,240,20;input 0,0,240,56;" ] || fail "C: input regions on the wire: $(cat "$DIR/w.in")"
+# The opaque region of the translucent row's surface is the bar only.
+grep '^opaque' "$DIR/w.regions" | sort -u | tr '\n' ';' >"$DIR/w.op"
+[ "$(cat "$DIR/w.op")" = "opaque 0,0,240,20;" ] || fail "C: opaque regions on the wire: $(cat "$DIR/w.op"), wanted the bar only, closed and open"
+# Damage: after the surface grew, a drag damages the value rectangle of the row
+# and not the whole surface; opening damages everything once.
+awk '/set_size\(0, 56\)/ { open = 1 } open && /damage_buffer/ { sub(/.*damage_buffer\(/, ""); sub(/\).*/, ""); gsub(/ /, ""); print }' "$DIR/w.err" >"$DIR/w.damage"
+[ "$(grep -c '^0,0,240,56$' "$DIR/w.damage")" = 1 ] || fail "C: the full surface was damaged $(grep -c '^0,0,240,56$' "$DIR/w.damage") times after opening: $(tr '\n' ' ' <"$DIR/w.damage")"
+grep -q '^[0-9]*,2[0-9],' "$DIR/w.damage" || fail "C: a drag damaged nothing in the row: $(tr '\n' ' ' <"$DIR/w.damage")"
 echo "panel-e2e: C ok"
 
 # ---- D: nothing happens while nothing changes ----
@@ -282,7 +449,7 @@ sleep 3
 echo 20 >"$BAT/capacity"
 echo Charging >"$BAT/status"
 wait_for "$DIR/d.out" '^redraw battery' 4 "D battery"
-tail -n 6 "$DIR/d.out" | grep -q '^battery text=20% status=charging percent=20 ' || fail "D: the battery is not shown as 20% charging"
+tail -n 8 "$DIR/d.out" | grep -q '^battery text=20% status=charging percent=20 ' || fail "D: the battery is not shown as 20% charging"
 echo Full >"$BAT/status"
 echo 100 >"$BAT/capacity"
 wait_for "$DIR/d.out" '^battery text=100% status=full percent=100 ' 4 "D battery full"
@@ -301,6 +468,24 @@ wait_for "$DIR/d.out" '^volume available=1 value=80 ' 3 "D external volume"
 printf 'volume 0\nswitch 1\n' >"$CTL"
 wait_for "$DIR/d.out" '^volume available=1 value=0 ' 3 "D external volume 0"
 stop_panel D
+
+# With the row open, an external change moves the thumb (the whole row is
+# redrawn only for the value, not the icon).
+printf 'volume 8\nswitch 1\n' >"$CTL"
+start_panel d --inject "ivol"
+has "$DIR/d.out" 'popup=volume$' "D volume row open"
+printf 'volume 32\nswitch 1\n' >"$CTL"
+wait_for "$DIR/d.out" '^redraw volume,row$' 2 "D external volume redraws the open row"
+tail -n 8 "$DIR/d.out" | grep -q '^volume available=1 value=80 ' || fail "D: the row does not show the new volume"
+# And the row closes by itself, event driven: the surface shrinks again.
+N=$(grep -c '^redraw resize' "$DIR/d.out")
+i=0
+while [ "$(grep -c '^redraw resize' "$DIR/d.out")" -le "$N" ]; do
+	i=$((i + 1)); [ $i -gt 100 ] && fail "D: the row did not close by itself"
+	sleep 0.05
+done
+tail -n 8 "$DIR/d.out" | grep -q '^panel width=240 height=20 .*popup=none$' || fail "D: the surface did not shrink to the bar"
+stop_panel D
 echo "panel-e2e: D ok"
 
 # No busy loop: an idle panel with the 30 s battery timer sleeps.
@@ -315,20 +500,43 @@ T1=$(awk '{print $14 + $15}' "/proc/$PANELPID/stat")
 [ $((T1 - T0)) -le 1 ] || fail "D: $((T1 - T0)) ticks of CPU in 4 idle seconds"
 stop_panel idle
 echo "panel-e2e: D idle ok ($((V1 - V0)) switches)"
+# After a row has closed again, too: its timer is disarmed and nothing wakes it.
+start_panel idle --inject "ibl;ibl"
+sleep 1
+V0=$(awk '/^(non)?voluntary_ctxt_switches/ {s += $2} END {print s}' "/proc/$PANELPID/status")
+sleep 4
+V1=$(awk '/^(non)?voluntary_ctxt_switches/ {s += $2} END {print s}' "/proc/$PANELPID/status")
+[ $((V1 - V0)) -le 3 ] || fail "D: $((V1 - V0)) context switches in 4 seconds after a row was closed"
+stop_panel idle
+echo "panel-e2e: D idle after a row ok ($((V1 - V0)) switches)"
 
 # ---- E: rotation ----
 start_panel e
-has "$DIR/e.out" '^panel width=240 height=56 ' "E start"
+has "$DIR/e.out" '^panel width=240 height=20 ' "E start"
 "$KEYS" 397 || fail "E: key client failed"
-wait_for "$DIR/e.out" '^panel width=320 height=56 row=28 ' 5 "E rotated"
+wait_for "$DIR/e.out" '^panel width=320 height=20 bar=20 ' 5 "E rotated"
 has "$DIR/e.out" '^redraw resize' "E resize"
-tail -n 6 "$DIR/e.out" | grep -q '^backlight available=1 value=59 .* cell=0,28,160,28 ' || fail "E: the sliders are not laid out for 320"
+BLX=$(comp "$(tail -n 8 "$DIR/e.out" | awk '$1 == "backlight" { for (i = 2; i <= NF; i++) { split($i, a, "="); if (a[1] == "button") print a[2] } }')" 1)
+[ "$BLX" -gt "$(comp "$BLB" 1)" ] || fail "E: the buttons are not laid out for 320 (x=$BLX)"
+tail -n 8 "$DIR/e.out" | grep -q '^surface exclusive=20 input=0,0,320,20$' || fail "E: the input region is not the new bar"
 M=$(mapped)
-[ "$M" = 320x184 ] || fail "E: a toplevel after the rotation is $M, wanted 320x184"
+[ "$M" = 320x220 ] || fail "E: a toplevel after the rotation is $M, wanted 320x220"
 "$KEYS" 397 || fail "E: key client failed"
 i=0
 while [ "$(grep -c '^panel width=240' "$DIR/e.out")" -lt 2 ]; do
 	i=$((i + 1)); [ $i -gt 100 ] && fail "E: no 240 wide layout after the second rotation"
+	sleep 0.05
+done
+stop_panel E
+# With the row open while the output turns: the row follows the new width.
+start_panel e --inject "ibl;p$X0,$Y"
+"$KEYS" 397 || fail "E: key client failed"
+wait_for "$DIR/e.out" '^panel width=320 height=56 bar=20 row=36 ' 5 "E rotated with the row open"
+tail -n 8 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,20,320,36 ' || fail "E: the row is not 320 wide"
+"$KEYS" 397 || fail "E: key client failed"
+i=0
+while [ "$(grep -c '^panel width=240 height=56' "$DIR/e.out")" -lt 2 ]; do
+	i=$((i + 1)); [ $i -gt 100 ] && fail "E: no 240 wide layout with the row after the second rotation"
 	sleep 0.05
 done
 stop_panel E
@@ -343,8 +551,44 @@ grep -q 'cannot connect' "$DIR/f.err" || fail "F: no compositor: unclear message
 [ $? -eq 2 ] || fail "F: a bad option does not exit 2"
 "$PANEL" --height abc >"$DIR/f.out" 2>"$DIR/f.err"
 [ $? -eq 2 ] || fail "F: a bad height does not exit 2"
+"$PANEL" --popup-alpha x >"$DIR/f.out" 2>"$DIR/f.err"
+[ $? -eq 2 ] || fail "F: a bad alpha does not exit 2"
+"$PANEL" --font >"$DIR/f.out" 2>"$DIR/f.err"
+[ $? -eq 2 ] || fail "F: --font without a path does not exit 2"
 "$PANEL" --help >"$DIR/f.out" 2>"$DIR/f.err" || fail "F: --help failed"
-grep -q -e '--bottom' -e '--dump-state' "$DIR/f.out" || fail "F: --help does not list the options"
+for o in --bottom --dump-state --font --font-size --height --popup-alpha --bar-alpha; do
+	grep -q -e "$o" "$DIR/f.out" || fail "F: --help does not list $o"
+done
+
+# A font that is not there: the built-in bitmap font, one message, and the
+# panel still draws (the clock rectangle of the capture has text pixels).
+dump f.out --font /nonexistent/font.ttf
+has "$DIR/f.out" '^style font=bitmap ' "F a missing font falls back"
+grep -q "cannot use the font '/nonexistent/font.ttf'" "$DIR/f.out.err" || fail "F: no message about the missing font: $(cat "$DIR/f.out.err")"
+echo "not a font" >"$DIR/notafont.ttf"
+dump f.out --font "$DIR/notafont.ttf"
+has "$DIR/f.out" '^style font=bitmap ' "F a file that is not a font falls back"
+dump f.out --font "$DIR"
+has "$DIR/f.out" '^style font=bitmap ' "F a directory falls back"
+start_panel fb --font /nonexistent/font.ttf
+sleep 0.3
+"$CAPTURE" --distinct 8,2,60,16 >"$DIR/f.cap" 2>&1 || fail "F: capture failed: $(cat "$DIR/f.cap")"
+D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/f.cap")
+[ "${D:-0}" -ge 2 ] || fail "F: the fallback font drew nothing ($D colours where the clock is)"
+stop_panel fb
+# A real font gives an anti-aliased clock: more than two colours.
+if [ -n "$(sed -n 's/^style font=ttf.*/ttf/p' "$DIR/a.out")" ]; then
+	start_panel tt
+	sleep 0.3
+	"$CAPTURE" --distinct 8,2,40,16 >"$DIR/f.cap" 2>&1 || fail "F: capture failed"
+	D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/f.cap")
+	[ "${D:-0}" -ge 5 ] || fail "F: the TrueType clock has only $D colours, not anti-aliased"
+	stop_panel tt
+	dump f.out --font-size 20
+	has "$DIR/f.out" '^style font=ttf:.* size=20 ' "F font size"
+else
+	echo "panel-e2e: no default font installed, the TrueType capture checks are skipped"
+fi
 
 # The compositor going away: exit 0.
 start_panel g
@@ -393,6 +637,64 @@ export WAYLAND_DISPLAY=$(basename "$SOCK")
 grep -q 'no output' "$DIR/f.err" || fail "F: no output: unclear message: $(cat "$DIR/f.err")"
 stop_picowl
 echo "panel-e2e: F errors ok"
+
+# ---- G: a translucent row lets the window behind it show through ----
+# The desktop background is magenta, the window green. The window is mapped
+# after the panel, so that it is laid out for the bar's strip as a window of a
+# running session is.
+start_picowl
+# g_case ARGS...: the panel with ARGS, then the window
+g_case() {
+	start_panel g "$@"
+	"$CLIENT" --linger 30 >"$DIR/client.out" 2>&1 &
+	CLIENTPID=$!
+	wait_for "$DIR/client.out" 'mapped' 5 "G client"
+	sleep 0.5
+}
+g_pixel() {
+	"$CAPTURE" --at "$1" >"$DIR/g.cap" 2>&1 || fail "G: capture failed: $(cat "$DIR/g.cap")"
+	RGB=$(sed -n 's/.*rgb=\(.*\)/\1/p' "$DIR/g.cap" | head -n1)
+	[ -n "$RGB" ] || fail "G: no pixel in the capture"
+	R=$((0x$(echo "$RGB" | cut -c1-2))); G=$((0x$(echo "$RGB" | cut -c3-4))); B=$((0x$(echo "$RGB" | cut -c5-6)))
+}
+g_end() {
+	kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=
+	stop_panel g
+}
+RY=$((20 + 3))
+# Row ground #252930 (37,41,48) at 224/255 over green (0,255,0): about (32,67,42).
+g_case --inject "ibl;p$X0,$Y"
+has "$DIR/g.out" '^panel width=240 height=56 .*format=ARGB8888 ' "G the surface is ARGB8888 for a translucent row"
+g_pixel 3,$RY
+[ "$G" -gt 55 ] && [ "$G" -lt 85 ] || fail "G: the pixel under the row is #$RGB: not a blend of the row ground and the window (green is $G)"
+[ "$R" -lt 50 ] && [ "$B" -lt 60 ] || fail "G: the pixel under the row is #$RGB"
+echo "panel-e2e: G row pixel #$RGB is a blend of the window and the row ground"
+g_pixel 80,3
+[ "$G" -lt 50 ] || fail "G: the opaque bar shows the window through it (#$RGB)"
+g_end
+# Opaque: the same pixel is the row ground, the window does not show.
+g_case --popup-alpha 255 --inject "ibl;p$X0,$Y"
+has "$DIR/g.out" '^panel width=240 height=56 .*format=RGB565 ' "G an opaque row needs no alpha: RGB565 again"
+g_pixel 3,$RY
+[ "$G" -lt 50 ] || fail "G: an opaque row shows the window through it (#$RGB)"
+g_end
+# A translucent bar shows the background behind it, closed as well.
+g_case --bar-alpha 128
+has "$DIR/g.out" '^panel width=240 height=20 .*format=ARGB8888 ' "G a translucent bar is ARGB8888 even when closed"
+g_pixel 80,3
+[ "$R" -gt 100 ] || fail "G: the translucent bar shows no background through it (#$RGB)"
+g_end
+# Closing the row leaves nothing of it on screen: the window is there again.
+start_panel g --inject "ibl;w3500"
+"$CLIENT" --linger 30 >"$DIR/client.out" 2>&1 &
+CLIENTPID=$!
+wait_for "$DIR/client.out" 'mapped' 5 "G client"
+sleep 0.5
+g_pixel 3,$RY
+[ "$G" -gt 200 ] || fail "G: after the row closed the window does not show where it was (#$RGB)"
+g_end
+stop_picowl
+echo "panel-e2e: G ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

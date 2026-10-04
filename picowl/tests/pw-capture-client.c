@@ -6,7 +6,10 @@
  * where F is the wl_shm format code and pixel the first pixel (16 bits wide
  * for the 16 bpp formats). Prints "pw-capture-client: no screencopy" and exits
  * 0 when the compositor does not advertise zwlr_screencopy_manager_v1.
- * Exit status 1 on a failed capture, a timeout or a missing output/shm.
+ * --at X,Y also prints "pw-capture-client: at X,Y rgb=RRGGBB" (the pixel
+ * converted to 8 bits per channel), --distinct X,Y,W,H prints
+ * "pw-capture-client: distinct N" for the rectangle. Exit status 1 on a
+ * failed capture, a timeout or a missing output/shm.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -110,8 +113,29 @@ static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
 	on_buffer, on_flags, on_ready, on_failed, on_damage, on_dmabuf, on_buffer_done
 };
 
-int main(void)
+/* A pixel as 0xRRGGBB. RGB565 and the 32 bit formats are the ones picowl has. */
+static uint32_t rgb_at(int x, int y, size_t bpp)
 {
+	const uint8_t *p = (const uint8_t *)pixels + (size_t)y * stride + (size_t)x * bpp;
+	uint32_t v = 0;
+
+	memcpy(&v, p, bpp);
+	if (bpp == 2) {
+		uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+		return (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((b << 3) | (b >> 2));
+	}
+	return v & 0xffffff;
+}
+
+int main(int argc, char **argv)
+{
+	int at_x = -1, at_y = -1, dx = -1, dy = 0, dw = 0, dh = 0;
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--at") && i + 1 < argc)
+			sscanf(argv[++i], "%d,%d", &at_x, &at_y);
+		else if (!strcmp(argv[i], "--distinct") && i + 1 < argc)
+			sscanf(argv[++i], "%d,%d,%d,%d", &dx, &dy, &dw, &dh);
+	}
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
 	if (!dpy) {
@@ -159,6 +183,23 @@ int main(void)
 	memcpy(&px, first, bpp);
 	printf("pw-capture-client: captured %ux%u format=%u identical=%s pixel=%08x\n",
 		width, height, fmt, same ? "yes" : "no", px);
+	fflush(stdout);
+	if (at_x >= 0 && (uint32_t)at_x < width && (uint32_t)at_y < height)
+		printf("pw-capture-client: at %d,%d rgb=%06x\n", at_x, at_y, rgb_at(at_x, at_y, bpp));
+	if (dx >= 0) {
+		static uint32_t seen[64];
+		int n = 0;
+		for (int y = dy; y < dy + dh && (uint32_t)y < height; y++)
+			for (int x = dx; x < dx + dw && (uint32_t)x < width; x++) {
+				uint32_t v = rgb_at(x, y, bpp);
+				int k = 0;
+				while (k < n && seen[k] != v)
+					k++;
+				if (k == n && n < 64)
+					seen[n++] = v;
+			}
+		printf("pw-capture-client: distinct %d\n", n);
+	}
 	fflush(stdout);
 	return 0;
 }
