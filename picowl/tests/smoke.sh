@@ -133,5 +133,24 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 wait "$PID"; RC=$?
 [ "$RC" -eq 0 ] || fail "capture picowl exit status $RC"
+# PICOWL_HEADLESS_SIZE sets the size of the headless output: a maximized
+# toplevel gets all of it.
+rm -f "$DIR"/wayland-*
+PICOWL_HEADLESS_SIZE=240x320 "$PICOWL" -d 2 >"$DIR/picowl.log" 2>&1 &
+PID=$!
+i=0
+while ! ls "$DIR"/wayland-* >/dev/null 2>&1; do
+	kill -0 "$PID" 2>/dev/null || fail "sized picowl exited early"
+	i=$((i + 1)); [ $i -gt 100 ] && fail "sized socket never appeared"
+	sleep 0.05
+done
+SOCK=$(ls "$DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1)
+export WAYLAND_DISPLAY=$(basename "$SOCK")
+OUT=$("$CLIENT" 2>&1) || fail "sized client failed: $OUT"
+case "$OUT" in *"mapped 240x320 "*) ;; *) fail "output is not 240x320: $OUT" ;; esac
+kill -TERM "$PID"
+wait "$PID" || fail "sized picowl exit status $?"
+PID=
+
 rm -rf "$DIR"
 echo "smoke: ok"

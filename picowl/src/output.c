@@ -7,6 +7,7 @@
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <wlr/backend/drm.h>
+#include <wlr/backend/headless.h>
 #include <wlr/backend/session.h>
 #include <wlr/render/drm_format_set.h>
 #include <wlr/render/swapchain.h>
@@ -50,6 +51,22 @@ void pw_output_update_geometry(struct pw_output *output)
 
 /* ---- enabling commits, rotation and the copy-type swapchain ----------- */
 
+/* PICOWL_HEADLESS_SIZE=WxH: size of a headless output, so a screenshot of a
+ * client can be taken at the panel's native size. Anything else keeps the
+ * backend default. */
+static bool headless_size(int *w, int *h)
+{
+	const char *e = getenv("PICOWL_HEADLESS_SIZE");
+	char x;
+	if (!e || sscanf(e, "%dx%d%c", w, h, &x) != 2 || *w < 16 || *w > 8192 ||
+			*h < 16 || *h > 8192) {
+		if (e && *e)
+			pw_log(WLR_ERROR, "PICOWL_HEADLESS_SIZE '%s' ignored: want WxH", e);
+		return false;
+	}
+	return true;
+}
+
 /* Fill state with "enabled + mode + transform + render format", testing the
  * configured render format and falling back to XRGB8888 if rejected. */
 static void output_build_enable(struct pw_output *o, struct wlr_output_state *state,
@@ -58,8 +75,11 @@ static void output_build_enable(struct pw_output *o, struct wlr_output_state *st
 	struct wlr_output *wo = o->wlr_output;
 
 	wlr_output_state_set_enabled(state, true);
+	int hw, hh;
 	if (mode)
 		wlr_output_state_set_mode(state, mode);
+	else if (wlr_output_is_headless(wo) && headless_size(&hw, &hh))
+		wlr_output_state_set_custom_mode(state, hw, hh, 0);
 	wlr_output_state_set_transform(state, transform);
 
 	uint32_t fmt = o->server->config->render_format

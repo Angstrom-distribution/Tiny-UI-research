@@ -62,6 +62,8 @@ export WAYLAND_DISPLAY=wayland-0          # if multiple headless instances
 picowl -d 2
 ```
 
+`PICOWL_HEADLESS_SIZE=WxH` (for example `240x320`) sets the size of the headless output, which is 1280x720 otherwise, so that a client or a screenshot can be tried at the size of a handheld panel. It applies to headless outputs only, and the `[output]` transform is applied on top of it.
+
 Log output goes to stderr; use `-d 0` for silent, `-d 1` for errors only, `-d 2` for info (default), `-d 3` for debug.
 
 ## Configuration
