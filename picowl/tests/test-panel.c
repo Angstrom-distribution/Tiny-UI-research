@@ -137,8 +137,13 @@ static bool overlap(struct pl_rect a, struct pl_rect b)
 	return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-/* What the 12 px Liberation Sans Bold gives, near enough. */
+/* What the 11 px Liberation Sans Bold gives, near enough. */
 static const struct pl_metrics M15 = { 33, 27, 24 };
+
+/* The default bar, the row under it and the surface with both. */
+#define BAR PL_HEIGHT_DEFAULT
+#define ROW 36
+#define SURF (BAR + ROW)
 
 static void test_layout(void)
 {
@@ -149,47 +154,47 @@ static void test_layout(void)
 	CHECK_EQ(pl_clamp_height(500), PL_HEIGHT_MAX, "height clamps down to 80");
 	CHECK_EQ(PL_HEIGHT_MAX, 80, "the largest bar is 80");
 	CHECK_EQ(pl_clamp_height(28), 28, "height in range");
-	CHECK_EQ(PL_HEIGHT_DEFAULT, 20, "the bar is 20 px by default");
+	CHECK_EQ(PL_HEIGHT_DEFAULT, 18, "the bar is 18 px by default");
 	CHECK_EQ(pl_clamp_alpha(-5), 0, "alpha clamps up");
 	CHECK_EQ(pl_clamp_alpha(900), 255, "alpha clamps down");
-	CHECK_EQ(pl_default_font_px(20), 12, "12 px text on the 20 px bar");
-	CHECK(pl_default_font_px(80) > 12 && pl_default_font_px(80) <= 40, "bigger bar, bigger text");
-	CHECK(pl_default_font_px(18) < 12 && pl_default_font_px(18) >= 8, "smaller bar, smaller text");
+	CHECK_EQ(pl_default_font_px(PL_HEIGHT_DEFAULT), 11, "11 px text on the default bar");
+	CHECK(pl_default_font_px(80) > 11 && pl_default_font_px(80) <= 40, "bigger bar, bigger text");
+	CHECK(pl_default_font_px(PL_HEIGHT_MIN) >= 8, "the smallest bar still gets text");
 
-	CHECK_EQ(pl_row_height(20), 36, "the row is 36 px under the 20 px bar");
+	CHECK_EQ(pl_row_height(BAR), ROW, "the row is 36 px under the default bar");
 	CHECK_EQ(pl_row_height(80), 88, "a tall bar gets a taller row");
-	CHECK_EQ(pl_surface_height(20, false), 20, "closed: the bar");
-	CHECK_EQ(pl_surface_height(20, true), 56, "open: the bar and the row");
+	CHECK_EQ(pl_surface_height(BAR, false), BAR, "closed: the bar");
+	CHECK_EQ(pl_surface_height(BAR, true), SURF, "open: the bar and the row");
 	CHECK_EQ(pl_surface_height(5, true), 18 + 36, "the height is clamped first");
 
-	pl_layout_compute(&l, 240, 20, false, false, &M15);
-	pl_layout_compute(&o, 240, 20, true, false, &M15);
-	CHECK_EQ(l.h, 20, "closed surface is the bar");
-	CHECK_EQ(o.h, 56, "open surface is the bar and the row");
+	pl_layout_compute(&l, 240, BAR, false, false, &M15);
+	pl_layout_compute(&o, 240, BAR, true, false, &M15);
+	CHECK_EQ(l.h, BAR, "closed surface is the bar");
+	CHECK_EQ(o.h, SURF, "open surface is the bar and the row");
 	CHECK(!l.row_shown && o.row_shown, "row_shown follows the argument");
-	CHECK_EQ(o.row.y, 20, "the row is right under the bar");
-	CHECK_EQ(o.row.h, 36, "row height");
+	CHECK_EQ(o.row.y, BAR, "the row is right under the bar");
+	CHECK_EQ(o.row.h, ROW, "row height");
 	CHECK_EQ(o.row.w, 240, "the row is as wide as the surface");
-	CHECK_EQ(l.bar_h, 20, "bar height");
+	CHECK_EQ(l.bar_h, BAR, "bar height");
 	CHECK(memcmp(l.button, o.button, sizeof(l.button)) == 0,
 		"opening the row does not move the buttons");
 	CHECK(memcmp(&l.clock, &o.clock, sizeof(l.clock)) == 0 &&
 		memcmp(&l.battery, &o.battery, sizeof(l.battery)) == 0,
 		"nor the clock and the battery");
 
-	struct pl_rect bar = { 0, 0, 240, 20 };
+	struct pl_rect bar = { 0, 0, 240, BAR };
 	CHECK_EQ(l.clock.x, 0, "the clock rectangle starts at the edge");
 	CHECK(l.clock.x + l.clock.w >= PL_MARGIN + M15.clock_w, "the clock has room for its text");
-	CHECK_EQ(l.clock.h, 19, "drawing rectangles stop above the line");
+	CHECK_EQ(l.clock.h, BAR - 1, "drawing rectangles stop above the line");
 	CHECK(inside(l.clock, bar) && inside(l.battery, bar), "clock and battery are in the bar");
 	CHECK_EQ(l.battery.x + l.battery.w, 240, "the battery rectangle reaches the right edge");
 	CHECK(l.battery.w >= PL_MARGIN + l.bat_icon_w + PL_GAP + M15.bat_text_w,
 		"the battery has room for the icon and '100%'");
 	CHECK(l.bat_icon_w >= 16 && l.bat_icon_h * 2 <= l.bat_icon_w + 1 && l.bat_icon_h <= 12, "the battery icon is wide and fits the slim bar");
-	CHECK(l.bar_icon >= 12 && l.bar_icon <= 16, "the button icons are about 14 px");
+	CHECK(l.bar_icon >= 12 && l.bar_icon <= 14, "the button icons are about 12 px");
 	for (int i = 0; i < PL_SLIDERS; i++) {
 		CHECK(l.button[i].w >= 36, "a button is at least 36 px wide");
-		CHECK_EQ(l.button[i].h, 20, "a button is the whole bar height");
+		CHECK_EQ(l.button[i].h, BAR, "a button is the whole bar height");
 		CHECK_EQ(l.button[i].y, 0, "a button starts at the top");
 		CHECK(inside(l.button[i], bar), "a button is in the bar");
 		CHECK(inside(l.hl[i], l.button[i]), "the highlight is inside its button");
@@ -220,26 +225,26 @@ static void test_layout(void)
 
 	/* The input region is the bar and, if shown, the row; never more than the
 	 * surface, and never the whole of a surface that is larger. */
-	struct pl_rect in = pl_input_rect(&l, 240, 20);
-	CHECK(in.x == 0 && in.y == 0 && in.w == 240 && in.h == 20, "closed: the input region is the bar");
-	in = pl_input_rect(&o, 240, 56);
-	CHECK(in.x == 0 && in.y == 0 && in.w == 240 && in.h == 56, "open: the bar and the row");
+	struct pl_rect in = pl_input_rect(&l, 240, BAR);
+	CHECK(in.x == 0 && in.y == 0 && in.w == 240 && in.h == BAR, "closed: the input region is the bar");
+	in = pl_input_rect(&o, 240, SURF);
+	CHECK(in.x == 0 && in.y == 0 && in.w == 240 && in.h == SURF, "open: the bar and the row");
 	in = pl_input_rect(&o, 240, 300);
-	CHECK_EQ(in.h, 56, "a larger surface does not take touches below the row");
-	in = pl_input_rect(&l, 240, 56);
-	CHECK_EQ(in.h, 20, "a row on its way out does not take touches");
+	CHECK_EQ(in.h, SURF, "a larger surface does not take touches below the row");
+	in = pl_input_rect(&l, 240, SURF);
+	CHECK_EQ(in.h, BAR, "a row on its way out does not take touches");
 	in = pl_input_rect(&o, 200, 40);
 	CHECK(in.w == 200 && in.h == 40, "a smaller surface limits it");
 
 	struct pl_rect op[2];
 	CHECK_EQ(pl_opaque_rects(&l, 255, 224, op), 1, "closed, opaque bar: one rectangle");
-	CHECK(op[0].h == 20 && op[0].w == 240, "that is the bar");
+	CHECK(op[0].h == BAR && op[0].w == 240, "that is the bar");
 	CHECK_EQ(pl_opaque_rects(&o, 255, 224, op), 1, "open, translucent row: only the bar is opaque");
-	CHECK_EQ(op[0].h, 20, "the bar");
+	CHECK_EQ(op[0].h, BAR, "the bar");
 	CHECK_EQ(pl_opaque_rects(&o, 255, 255, op), 2, "open, opaque row: the bar and the row");
-	CHECK(op[1].y == 20 && op[1].h == 36, "the second is the row");
+	CHECK(op[1].y == BAR && op[1].h == ROW, "the second is the row");
 	CHECK_EQ(pl_opaque_rects(&o, 200, 255, op), 1, "translucent bar, opaque row: the row");
-	CHECK_EQ(op[0].y, 20, "the row");
+	CHECK_EQ(op[0].y, BAR, "the row");
 	CHECK_EQ(pl_opaque_rects(&o, 200, 200, op), 0, "all translucent: nothing is opaque");
 	CHECK_EQ(pl_opaque_rects(&l, 254, 255, op), 0, "a bar at 254 is not opaque");
 
@@ -275,7 +280,7 @@ static void test_layout(void)
 	CHECK(l.w >= 2 && l.h >= 18, "a degenerate surface does not divide by zero");
 
 	/* Slider mapping. */
-	pl_layout_compute(&l, 240, 20, true, false, &M15);
+	pl_layout_compute(&l, 240, BAR, true, false, &M15);
 	const struct pl_slider *s = &l.slider;
 	CHECK_EQ(pl_slider_value(s, s->track.x - 50), 0, "left of the track is 0");
 	CHECK_EQ(pl_slider_value(s, s->track.x), 0, "the start of the track is 0");
@@ -313,35 +318,35 @@ static void test_layout_bottom(void)
 {
 	struct pl_layout t, b, bc;
 
-	pl_layout_compute(&t, 240, 20, true, false, &M15);
-	pl_layout_compute(&b, 240, 20, true, true, &M15);
-	pl_layout_compute(&bc, 240, 20, false, true, &M15);
+	pl_layout_compute(&t, 240, BAR, true, false, &M15);
+	pl_layout_compute(&b, 240, BAR, true, true, &M15);
+	pl_layout_compute(&bc, 240, BAR, false, true, &M15);
 	CHECK(b.bottom && !t.bottom, "the bottom flag");
-	CHECK_EQ(b.h, 56, "the same surface");
+	CHECK_EQ(b.h, SURF, "the same surface");
 	CHECK_EQ(b.row.y, 0, "the row is at the top of the surface");
-	CHECK_EQ(b.row.h, 36, "and is as high as at the top");
-	CHECK_EQ(b.bar_y, 36, "the bar is at the bottom of it");
-	CHECK_EQ(b.button[0].y, 36, "its buttons too");
+	CHECK_EQ(b.row.h, ROW, "and is as high as at the top");
+	CHECK_EQ(b.bar_y, ROW, "the bar is at the bottom of it");
+	CHECK_EQ(b.button[0].y, ROW, "its buttons too");
 	CHECK_EQ(b.button[0].y + b.button[0].h, b.h, "and end at the edge of the screen");
 	CHECK_EQ(bc.bar_y, 0, "closed, the bar is the surface");
 	CHECK_EQ(bc.button[0].y, 0, "closed, a button starts at the top");
-	CHECK_EQ(b.bar_line_y, 36, "the bar's line is on its top, the side of the windows");
-	CHECK_EQ(t.bar_line_y, 19, "at the top of the screen it is at the bottom of the bar");
+	CHECK_EQ(b.bar_line_y, ROW, "the bar's line is on its top, the side of the windows");
+	CHECK_EQ(t.bar_line_y, BAR - 1, "at the top of the screen it is at the bottom of the bar");
 	CHECK_EQ(bc.bar_line_y, 0, "a closed bottom bar has it on top, too");
 	CHECK_EQ(b.row_line_y, 0, "the row's line is on its top edge");
-	CHECK_EQ(t.row_line_y, 55, "at the top of the screen on its bottom edge");
-	CHECK(b.clock.y == 37 && b.clock.h == 19, "the clock rectangle starts under the line");
-	CHECK(b.row_in.y == 1 && b.row_in.h == 35, "the row without its line");
+	CHECK_EQ(t.row_line_y, SURF - 1, "at the top of the screen on its bottom edge");
+	CHECK(b.clock.y == ROW + 1 && b.clock.h == BAR - 1, "the clock rectangle starts under the line");
+	CHECK(b.row_in.y == 1 && b.row_in.h == ROW - 1, "the row without its line");
 	CHECK_EQ(b.slider.cell.y, 0, "the touch area is the whole row");
-	CHECK_EQ(b.slider.cell.h, 36, "of its height");
+	CHECK_EQ(b.slider.cell.h, ROW, "of its height");
 	CHECK(b.hl[0].y >= b.clock.y && b.hl[0].y + b.hl[0].h <= b.clock.y + b.clock.h, "the highlight is inside the bar");
 	struct pl_rect th = pl_slider_thumb(&b, 50);
-	CHECK(th.y >= 1 && th.y + th.h <= 35, "the thumb is in the row, not on its line");
-	struct pl_rect in = pl_input_rect(&b, 240, 56);
-	CHECK(in.y == 0 && in.h == 56, "the input region is the whole surface of bar and row");
+	CHECK(th.y >= 1 && th.y + th.h <= ROW - 1, "the thumb is in the row, not on its line");
+	struct pl_rect in = pl_input_rect(&b, 240, SURF);
+	CHECK(in.y == 0 && in.h == SURF, "the input region is the whole surface of bar and row");
 	struct pl_rect op[2];
 	CHECK_EQ(pl_opaque_rects(&b, 255, 224, op), 1, "opaque: the bar");
-	CHECK(op[0].y == 36 && op[0].h == 20, "at the bottom");
+	CHECK(op[0].y == ROW && op[0].h == BAR, "at the bottom");
 	struct pl_hit h = pl_hit_test(&b, b.button[0].x + 5, 40);
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_SLIDER_BACKLIGHT, "hit: a button at the bottom");
 	h = pl_hit_test(&b, b.button[0].x + 5, 10);
@@ -362,8 +367,8 @@ static void test_touch(void)
 	const bool no_vol[PL_SLIDERS] = { true, false };
 	struct pl_touch_out o;
 
-	pl_layout_compute(&l, 240, 20, true, false, &M15);
-	pl_layout_compute(&c, 240, 20, false, false, &M15);
+	pl_layout_compute(&l, 240, BAR, true, false, &M15);
+	pl_layout_compute(&c, 240, BAR, false, false, &M15);
 	const struct pl_rect *b0 = &l.button[0], *b1 = &l.button[1];
 	struct pl_hit h;
 
@@ -374,7 +379,7 @@ static void test_touch(void)
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_SLIDER_VOLUME, "hit: the volume button");
 	h = pl_hit_test(&l, b0->x, 0);
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_SLIDER_BACKLIGHT, "hit: the corner of a button");
-	h = pl_hit_test(&l, b0->x + b0->w - 1, 19);
+	h = pl_hit_test(&l, b0->x + b0->w - 1, BAR - 1);
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_SLIDER_BACKLIGHT,
 		"hit: the last pixel of a button, on the bar's line");
 	h = pl_hit_test(&l, b0->x - 1, 10);
@@ -390,11 +395,11 @@ static void test_touch(void)
 	h = pl_hit_test(&l, 3, 30);
 	CHECK_EQ(h.kind, PL_HIT_NONE, "no hit in the row outside the touch area");
 	int mx = l.slider.track.x + l.slider.track.w / 2;
-	h = pl_hit_test(&l, mx, 20);
+	h = pl_hit_test(&l, mx, BAR);
 	CHECK_EQ(h.kind, PL_HIT_TRACK, "hit: the track area, top of the row");
-	h = pl_hit_test(&l, mx, 55);
+	h = pl_hit_test(&l, mx, SURF - 1);
 	CHECK_EQ(h.kind, PL_HIT_TRACK, "hit: the track area, bottom of the row");
-	h = pl_hit_test(&l, mx, 56);
+	h = pl_hit_test(&l, mx, SURF);
 	CHECK_EQ(h.kind, PL_HIT_NONE, "no hit below the row");
 	h = pl_hit_test(&l, l.slider.cell.x, 40);
 	CHECK_EQ(h.kind, PL_HIT_TRACK, "hit: the left edge of the touch area");
@@ -454,10 +459,10 @@ static void test_touch(void)
 	pl_touch_press(&t, &l, PL_SLIDER_BACKLIGHT, both, l.slider.cell.x, 45, &o);
 	CHECK(o.slider == PL_SLIDER_BACKLIGHT && o.value == PL_BL_FLOOR_PCT, "the floor at the left edge");
 	pl_touch_release(&t);
-	pl_touch_press(&t, &l, PL_SLIDER_VOLUME, both, l.slider.cell.x + l.slider.cell.w - 1, 55, &o);
+	pl_touch_press(&t, &l, PL_SLIDER_VOLUME, both, l.slider.cell.x + l.slider.cell.w - 1, SURF - 1, &o);
 	CHECK(o.slider == PL_SLIDER_VOLUME && o.value == 100, "the margin right of the track, bottom row");
 	pl_touch_release(&t);
-	pl_touch_press(&t, &l, PL_SLIDER_VOLUME, both, mx, 20, &o);
+	pl_touch_press(&t, &l, PL_SLIDER_VOLUME, both, mx, BAR, &o);
 	CHECK(o.slider == PL_SLIDER_VOLUME, "top edge of the row");
 	pl_touch_release(&t);
 
@@ -863,7 +868,7 @@ static void env_init(struct env *e, enum pl_fmt fmt, int bar_alpha, int popup_al
 
 	pl_assets_init(&e->a, font, 12, bar_alpha, popup_alpha);
 	pl_assets_metrics(&e->a, &m);
-	pl_layout_compute(&e->l, 240, 20, row, false, &m);
+	pl_layout_compute(&e->l, 240, BAR, row, false, &m);
 	CHECK(pl_assets_prepare(&e->a, &e->l), "the masks are built");
 	canvas_init(&e->b, 240, e->l.h, fmt);
 	e->st = (struct pl_state){ .hour = 12, .min = 34, .bat = PL_BAT_DISCHARGING,
@@ -892,8 +897,8 @@ static void test_render(enum pl_fmt fmt, int bar_alpha, int popup_alpha)
 
 	snprintf(msg, sizeof(msg), "%s a%d/a%d: bar background", fn, bar_alpha, popup_alpha);
 	CHECK_EQ(px(&e.b, 80, 2), pl_pixel(c, PL_COL_BG, bar_alpha), msg);
-	CHECK_EQ(px(&e.b, 80, 19), pl_pixel(c, PL_COL_LINE, bar_alpha), "the bar's line, 1 px, at the bottom");
-	CHECK_EQ(px(&e.b, 80, 18), pl_pixel(c, PL_COL_BG, bar_alpha), "and the bar above it");
+	CHECK_EQ(px(&e.b, 80, BAR - 1), pl_pixel(c, PL_COL_LINE, bar_alpha), "the bar's line, 1 px, at the bottom");
+	CHECK_EQ(px(&e.b, 80, BAR - 2), pl_pixel(c, PL_COL_BG, bar_alpha), "and the bar above it");
 	CHECK_EQ(px(&e.b, 3, l->row.y + 2), pl_pixel(c, PL_COL_ROW, popup_alpha), "row background");
 	CHECK_EQ(px(&e.b, 3, l->row.y + l->row_h - 1), pl_pixel(c, PL_COL_ROW_LINE, popup_alpha),
 		"the row's last line");
@@ -923,7 +928,9 @@ static void test_render(enum pl_fmt fmt, int bar_alpha, int popup_alpha)
 		"the other button has not");
 	CHECK(count_color(&e.b, b0, PL_COL_ACCENT) > 15, "the open icon is drawn in the accent");
 	CHECK_EQ(count_color(&e.b, b1, PL_COL_ACCENT), 0, "the other icon is not");
-	CHECK(count_color(&e.b, b1, PL_COL_FG) > 15, "the other icon is in the text colour");
+	/* The icon is 12 px at the default bar: the solid centre of the speaker is
+	 * about 10 pixels, the rest is anti-aliased. */
+	CHECK(count_color(&e.b, b1, PL_COL_FG) > 8, "the other icon is in the text colour");
 	CHECK(count_color(&e.b, l->clock, PL_COL_FG) > 30, "the clock text is drawn");
 	CHECK_EQ(count_color(&e.b, l->clock, PL_COL_FG) + count_value(&e.b, l->clock,
 		pl_pixel(c, PL_COL_BG, bar_alpha)), l->clock.w * l->clock.h, "the clock has two colours in the bitmap font");
@@ -952,7 +959,7 @@ static void test_render(enum pl_fmt fmt, int bar_alpha, int popup_alpha)
 	env_init(&cl, fmt, bar_alpha, popup_alpha, false, NOFONT);
 	pl_render_all(&cl.b.c, &cl.l, &cl.a, &cl.st, PL_SLIDER_NONE);
 	CHECK(guards_intact(&cl.b), "a closed bar stays inside the buffer");
-	CHECK_EQ(cl.b.c.h, 20, "the closed canvas is the bar");
+	CHECK_EQ(cl.b.c.h, BAR, "the closed canvas is the bar");
 	CHECK_EQ(count_color(&cl.b, cl.l.hl[0], PL_COL_HL), 0, "nothing is highlighted");
 	CHECK_EQ(px(&cl.b, 80, 2), pl_pixel(&cl.b.c, PL_COL_BG, bar_alpha), "bar background");
 	CHECK(count_color(&cl.b, pl_button_rect(&cl.l, 0), PL_COL_FG) > 15, "idle icons are in the text colour");
@@ -980,7 +987,7 @@ static void test_render(enum pl_fmt fmt, int bar_alpha, int popup_alpha)
 	pl_fill(c, whole, 0x123456, 255);
 	pl_render_row_value(c, l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
 	CHECK_EQ(count_value(&e.b, icon, sent), icon.w * icon.h, "a value redraw leaves the row's icon alone");
-	CHECK_EQ(count_value(&e.b, (struct pl_rect){ 0, 0, 240, 20 }, sent), 240 * 20, "and the bar");
+	CHECK_EQ(count_value(&e.b, (struct pl_rect){ 0, 0, 240, BAR }, sent), 240 * BAR, "and the bar");
 	struct pl_rect vr = pl_row_value_rect(l);
 	CHECK_EQ(count_value(&e.b, vr, sent), 0, "and covers its whole rectangle");
 	CHECK_EQ(count_value(&e.b, (struct pl_rect){ 0, l->row.y + l->row_h - 1, 240, 1 }, sent), 240,
@@ -1008,7 +1015,7 @@ static void test_render_bottom(void)
 
 	pl_assets_init(&e.a, NOFONT, 12, 255, 224);
 	pl_assets_metrics(&e.a, &m);
-	pl_layout_compute(&e.l, 240, 20, true, true, &m);
+	pl_layout_compute(&e.l, 240, BAR, true, true, &m);
 	CHECK(pl_assets_prepare(&e.a, &e.l), "the masks are built");
 	canvas_init(&e.b, 240, e.l.h, PL_FMT_ARGB8888);
 	e.st = (struct pl_state){ .hour = 12, .min = 34, .bat = PL_BAT_DISCHARGING,
@@ -1019,11 +1026,11 @@ static void test_render_bottom(void)
 	CHECK(guards_intact(&e.b), "a bottom bar stays inside the buffer");
 	CHECK_EQ(px(&e.b, 80, l->bar_line_y), pl_pixel(c, PL_COL_LINE, 255), "the line is on top of the bar");
 	CHECK_EQ(px(&e.b, 80, l->bar_line_y + 1), pl_pixel(c, PL_COL_BG, 255), "and the bar under it");
-	CHECK_EQ(px(&e.b, 80, 55), pl_pixel(c, PL_COL_BG, 255), "down to the edge of the screen");
+	CHECK_EQ(px(&e.b, 80, SURF - 1), pl_pixel(c, PL_COL_BG, 255), "down to the edge of the screen");
 	CHECK_EQ(px(&e.b, 80, 0), pl_pixel(c, PL_COL_ROW_LINE, 224), "the row's line is its top edge");
 	CHECK_EQ(px(&e.b, 3, 1), pl_pixel(c, PL_COL_ROW, 224), "the row under it");
 	CHECK_EQ(px(&e.b, 3, 35), pl_pixel(c, PL_COL_ROW, 224), "to the bar");
-	CHECK(count_color(&e.b, pl_button_rect(l, 1), PL_COL_ACCENT) > 10, "the open button is highlighted in the bar");
+	CHECK(count_color(&e.b, pl_button_rect(l, 1), PL_COL_ACCENT) > 6, "the open button is highlighted in the bar");
 	struct pl_rect th = pl_slider_thumb(l, 80);
 	CHECK_EQ(px(&e.b, th.x + th.w / 2, th.y + th.h / 2), pl_pixel(c, PL_COL_THUMB, 255), "the thumb is in the row");
 	CHECK(th.y + th.h < 36, "above the bar");
@@ -1124,13 +1131,15 @@ static void test_battery_icon(void)
 	CHECK(mask_partial(&e.a.sun[0]) >= 15 && mask_partial(&e.a.speaker[2][0]) >= 15,
 		"the icons are anti-aliased");
 	CHECK(mask_sum(&e.a.sun[0]) > 255 * 30, "the sun has substance");
-	CHECK(e.a.sun[0].w >= 12 && e.a.sun[0].w <= 16, "the button icons are about 14 px");
+	CHECK(e.a.sun[0].w >= 12 && e.a.sun[0].w <= 14, "the button icons are about 12 px");
 	CHECK(e.a.sun[1].w >= 20, "the row icons are large");
 	/* Disabled sliders are grey, not white. */
 	st.vol_pct = -1;
 	pl_render_button(c, l, &e.a, &st, PL_SLIDER_NONE, PL_SLIDER_VOLUME);
 	CHECK_EQ(count_color(&e.b, pl_button_rect(l, 1), PL_COL_FG), 0, "a disabled button is not in the text colour");
-	CHECK(count_color(&e.b, pl_button_rect(l, 1), PL_COL_DISABLED) > 15, "it is grey");
+	/* Few pixels of a 12 px icon are fully covered. */
+	CHECK(count_color(&e.b, pl_button_rect(l, 1), PL_COL_DISABLED) > 3, "it is grey");
+	CHECK(count_not(&e.b, pl_button_rect(l, 1), pl_pixel(c, PL_COL_BG, 255)) > 20, "and drawn");
 	env_free(&e);
 }
 

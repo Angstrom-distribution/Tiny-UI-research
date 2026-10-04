@@ -997,10 +997,11 @@ static void dump_state(const struct panel *p, const char *why)
 		p->canvas.fmt == PL_FMT_RGB565 ? "RGB565" :
 		p->canvas.fmt == PL_FMT_ARGB8888 ? "ARGB8888" : "XRGB8888",
 		p->bottom ? "bottom" : "top", slider_name(p->pop.open));
-	printf("style font=%s%s%s size=%d bar_alpha=%d popup_alpha=%d\n",
+	printf("style font=%s%s%s size=%d small=%d bar_alpha=%d popup_alpha=%d\n",
 		p->font_ttf ? "ttf" : "bitmap", p->font_ttf ? ":" : "",
 		p->font_ttf ? p->assets.font.path : "",
 		p->font_ttf ? p->assets.font.face[0].px : p->assets.font.scale[0] * 7,
+		p->font_ttf ? p->assets.font.face[1].px : p->assets.font.scale[1] * 7,
 		p->bar_alpha, p->popup_alpha);
 	/* What the compositor is told: the exclusive zone is the bar and never
 	 * the row; the input region is the bar and the row. */
@@ -1043,12 +1044,12 @@ static void usage(FILE *out)
 {
 	fprintf(out,
 		"usage: picowl-panel [options]\n"
-		"  --height N          height of the bar in pixels, 24..80 (default %d)\n"
+		"  --height N          height of the bar in pixels, %d..%d (default %d)\n"
 		"  --bottom            anchor at the bottom edge (default: top)\n"
 		"  --font PATH         TrueType font file (default: the first of the\n"
 		"                      Liberation Sans and DejaVu Sans files that exist);\n"
 		"                      without a usable one the built-in bitmap font is used\n"
-		"  --font-size PX      size of the text in pixels, 8..48 (default: 15 at the\n"
+		"  --font-size PX      size of the text in pixels, 8..48 (default: %d at the\n"
 		"                      default height)\n"
 		"  --bar-alpha N       opacity of the bar, 0..255 (default %d)\n"
 		"  --popup-alpha N     opacity of the slider row, 0..255 (default %d);\n"
@@ -1063,7 +1064,9 @@ static void usage(FILE *out)
 		"                      ibl, ivol tap a button; w MS wait; b RAW sets the\n"
 		"                      backlight), before the dump\n"
 		"  --help              this text\n",
-		PL_HEIGHT_DEFAULT, PL_ALPHA_BAR_DEFAULT, PL_ALPHA_POPUP_DEFAULT);
+		PL_HEIGHT_MIN, PL_HEIGHT_MAX, PL_HEIGHT_DEFAULT,
+		pl_default_font_px(PL_HEIGHT_DEFAULT), PL_ALPHA_BAR_DEFAULT,
+		PL_ALPHA_POPUP_DEFAULT);
 }
 
 static bool parse_int(const char *s, int *v)

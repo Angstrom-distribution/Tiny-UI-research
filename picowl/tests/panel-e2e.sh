@@ -187,23 +187,27 @@ T0=$(date +%H:%M)
 "$PANEL" --dump-state >"$DIR/a.out" 2>"$DIR/a.err" || fail "A: --dump-state failed"
 T1=$(date +%H:%M)
 cat "$DIR/a.out"
-has "$DIR/a.out" '^panel width=240 height=20 bar=20 row=0 format=RGB565 anchor=top popup=none$' "A geometry"
-has "$DIR/a.out" '^surface exclusive=20 input=0,0,240,20$' "A exclusive zone and input region are the bar"
+has "$DIR/a.out" '^panel width=240 height=18 bar=18 row=0 format=RGB565 anchor=top popup=none$' "A geometry"
+has "$DIR/a.out" '^surface exclusive=18 input=0,0,240,18$' "A exclusive zone and input region are the bar"
 CLOCK=$(sed -n 's/^clock text=\([0-9:]*\) .*/\1/p' "$DIR/a.out")
 [ "$CLOCK" = "$T0" ] || [ "$CLOCK" = "$T1" ] || fail "A: the clock shows '$CLOCK', the time is $T0"
-has "$DIR/a.out" '^clock text=[0-2][0-9]:[0-5][0-9] rect=0,0,[0-9]*,19$' "A clock rect"
-has "$DIR/a.out" '^battery text=73% status=discharging percent=73 rect=[0-9]*,0,[0-9]*,19$' "A battery"
+has "$DIR/a.out" '^clock text=[0-2][0-9]:[0-5][0-9] rect=0,0,[0-9]*,17$' "A clock rect"
+has "$DIR/a.out" '^battery text=73% status=discharging percent=73 rect=[0-9]*,0,[0-9]*,17$' "A battery"
 BATR=$(val "$DIR/a.out" battery rect)
 [ $(($(comp "$BATR" 1) + $(comp "$BATR" 3))) -eq 240 ] || fail "A: the battery rectangle does not reach the edge: $BATR"
-has "$DIR/a.out" '^backlight available=1 value=59 raw=600 max=1023 button=[0-9]*,0,[0-9]*,20$' "A backlight button"
-has "$DIR/a.out" '^volume available=1 value=20 button=[0-9]*,0,[0-9]*,20$' "A volume button (8 of 0..40)"
+has "$DIR/a.out" '^backlight available=1 value=59 raw=600 max=1023 button=[0-9]*,0,[0-9]*,18$' "A backlight button"
+has "$DIR/a.out" '^volume available=1 value=20 button=[0-9]*,0,[0-9]*,18$' "A volume button (8 of 0..40)"
 for k in backlight volume; do
 	B=$(val "$DIR/a.out" $k button)
 	[ "$(comp "$B" 3)" -ge 36 ] || fail "A: the $k button is only $(comp "$B" 3) px wide"
-	[ "$(comp "$B" 4)" -eq 20 ] || fail "A: the $k button is not the whole bar high"
+	[ "$(comp "$B" 4)" -eq 18 ] || fail "A: the $k button is not the whole bar high"
 	[ $(($(comp "$B" 1) + $(comp "$B" 3))) -le "$(comp "$BATR" 1)" ] || fail "A: the $k button overlaps the battery"
 done
 has "$DIR/a.out" '^style font=' "A style line"
+# 11 px for the clock and the battery, 10 px for the percentage in the row (the
+# bitmap font draws 5x7 at twice its size for the bar and at its own size in
+# the row).
+has "$DIR/a.out" '^style font=ttf:.* size=11 small=10 \|^style font=bitmap size=14 small=7 ' "A text sizes of the default bar"
 hasnt "$DIR/a.out" '^row ' "A no row while closed"
 [ "$(cat "$BL/brightness")" = 600 ] || fail "A: the panel changed the brightness by looking"
 [ "$(cat "$CTL")" = "$(printf 'volume 8\nswitch 0')" ] || fail "A: the panel changed the volume by looking"
@@ -214,9 +218,9 @@ echo "panel-e2e: A ok"
 # ---- B: touch ----
 # The row's geometry, read from a panel that has the backlight row open.
 dump geo.out --inject "ibl"
-has "$DIR/geo.out" '^panel width=240 height=56 bar=20 row=36 format=ARGB8888 anchor=top popup=backlight$' "B open: surface of bar and row, ARGB8888 for the translucent row"
-has "$DIR/geo.out" '^surface exclusive=20 input=0,0,240,56$' "B open: the exclusive zone stays the bar, the input region is bar and row"
-has "$DIR/geo.out" '^row slider=backlight rect=0,20,240,36 ' "B row rect"
+has "$DIR/geo.out" '^panel width=240 height=54 bar=18 row=36 format=ARGB8888 anchor=top popup=backlight$' "B open: surface of bar and row, ARGB8888 for the translucent row"
+has "$DIR/geo.out" '^surface exclusive=18 input=0,0,240,54$' "B open: the exclusive zone stays the bar, the input region is bar and row"
+has "$DIR/geo.out" '^row slider=backlight rect=0,18,240,36 ' "B row rect"
 TRACK=$(val "$DIR/geo.out" row track)
 THUMB=$(val "$DIR/geo.out" row thumb)
 TX=$(comp "$TRACK" 1); TW=$(comp "$TRACK" 3); TD=$(comp "$THUMB" 3)
@@ -234,7 +238,7 @@ dump b.out --inject "ibl"
 has "$DIR/b.out" 'popup=backlight$' "B tap opens the backlight row"
 has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B tap on the sun sets nothing"
 dump b.out --inject "ibl;ibl"
-has "$DIR/b.out" '^panel width=240 height=20 .*popup=none$' "B the same button closes the row and the surface shrinks"
+has "$DIR/b.out" '^panel width=240 height=18 .*popup=none$' "B the same button closes the row and the surface shrinks"
 dump b.out --inject "ibl;ivol"
 has "$DIR/b.out" 'popup=volume$' "B the other button switches the row"
 has "$DIR/b.out" '^row slider=volume ' "B the row shows the volume"
@@ -259,7 +263,7 @@ dump b.out --inject "ibl;p$CX,$Y;r"
 has "$DIR/b.out" '^backlight available=1 value=5 raw=51 ' "B floor"
 [ "$(cat "$BL/brightness")" = 51 ] || fail "B: the floor wrote $(cat "$BL/brightness"), wanted 51"
 # The whole height of the row is the target, and the area past the track.
-for yy in 20 55; do
+for yy in 18 53; do
 	echo 600 >"$BL/brightness"
 	dump b.out --inject "ibl;p$X2,$yy;r"
 	V=$(val "$DIR/b.out" backlight value)
@@ -335,7 +339,7 @@ echo 600 >"$BL/brightness"
 dump b.out --inject "ibl;w2500"
 has "$DIR/b.out" 'popup=backlight$' "B still open after 2.5 s"
 dump b.out --inject "ibl;w2500;w800"
-has "$DIR/b.out" '^panel width=240 height=20 .*popup=none$' "B closed after 3.3 s, the surface is the bar again"
+has "$DIR/b.out" '^panel width=240 height=18 .*popup=none$' "B closed after 3.3 s, the surface is the bar again"
 dump b.out --inject "ibl;w2000;p$X0,$Y;r;w2000"
 has "$DIR/b.out" 'popup=backlight$' "B a touch 2 s in keeps it open at 4 s"
 dump b.out --inject "ibl;w2000;p$X0,$Y;r;w2000;w1300"
@@ -352,7 +356,7 @@ echo "panel-e2e: B ok"
 [ "$(mapped)" = 240x320 ] || fail "C: without the panel a toplevel is not 240x320: $(mapped)"
 start_panel c
 M=$(mapped)
-[ "$M" = 240x300 ] || fail "C: with the panel a toplevel is $M, wanted 240x300"
+[ "$M" = 240x302 ] || fail "C: with the panel a toplevel is $M, wanted 240x302"
 stop_panel C
 [ "$(mapped)" = 240x320 ] || fail "C: the area did not come back after the panel exited"
 # With the row open the usable area is the same: the row covers windows. The
@@ -360,21 +364,21 @@ stop_panel C
 start_panel c --inject "ibl;p$X0,$Y"
 has "$DIR/c.out" 'popup=backlight$' "C the row is open"
 M=$(mapped)
-[ "$M" = 240x300 ] || fail "C: with the row open a toplevel is $M, wanted 240x300 as without"
-has "$DIR/c.out" '^surface exclusive=20 input=0,0,240,56$' "C open: exclusive zone and input region"
+[ "$M" = 240x302 ] || fail "C: with the row open a toplevel is $M, wanted 240x302 as without"
+has "$DIR/c.out" '^surface exclusive=18 input=0,0,240,54$' "C open: exclusive zone and input region"
 stop_panel C
 start_panel c --bottom
 has "$DIR/c.out" 'anchor=bottom' "C bottom"
 M=$(mapped)
-[ "$M" = 240x300 ] || fail "C: with the panel at the bottom a toplevel is $M, wanted 240x300"
+[ "$M" = 240x302 ] || fail "C: with the panel at the bottom a toplevel is $M, wanted 240x302"
 stop_panel C
 # At the bottom the row opens above the bar: the bar stays at the edge.
 start_panel c --bottom --inject "ivol;p$X0,15"
-has "$DIR/c.out" '^panel width=240 height=56 bar=20 row=36 .*anchor=bottom popup=volume$' "C bottom: row open"
+has "$DIR/c.out" '^panel width=240 height=54 bar=18 row=36 .*anchor=bottom popup=volume$' "C bottom: row open"
 has "$DIR/c.out" '^row slider=volume rect=0,0,240,36 ' "C bottom: the row is the top of the surface"
-has "$DIR/c.out" '^backlight available=1 value=[0-9]* raw=.* button=[0-9]*,36,[0-9]*,20$' "C bottom: the bar is at the bottom of the surface"
+has "$DIR/c.out" '^backlight available=1 value=[0-9]* raw=.* button=[0-9]*,36,[0-9]*,18$' "C bottom: the bar is at the bottom of the surface"
 M=$(mapped)
-[ "$M" = 240x300 ] || fail "C: with the panel at the bottom and the row open a toplevel is $M, wanted 240x300"
+[ "$M" = 240x302 ] || fail "C: with the panel at the bottom and the row open a toplevel is $M, wanted 240x302"
 stop_panel C
 start_panel c --height 80
 has "$DIR/c.out" '^panel width=240 height=80 bar=80 row=0 ' "C height 80"
@@ -405,13 +409,13 @@ WAYLAND_DEBUG=1 "$PANEL" --dump-state --inject "ibl;p$X0,$Y;m$X1,$Y;m$X2,$Y;r;ib
 grep -q 'protocol error' "$DIR/w.err" && fail "C: protocol error"
 EZ=$(grep -c 'set_exclusive_zone' "$DIR/w.err")
 [ "$EZ" = 1 ] || fail "C: the exclusive zone was set $EZ times, wanted once"
-grep -q 'set_exclusive_zone(20)' "$DIR/w.err" || fail "C: the exclusive zone is not the bar"
+grep -q 'set_exclusive_zone(18)' "$DIR/w.err" || fail "C: the exclusive zone is not the bar"
 grep 'set_size' "$DIR/w.err" | sed 's/.*set_size/set_size/' | tr '\n' ' ' >"$DIR/w.sizes"
-[ "$(cat "$DIR/w.sizes")" = "set_size(0, 20) set_size(0, 56) set_size(0, 20) " ] || fail "C: the sizes asked for: $(cat "$DIR/w.sizes")"
+[ "$(cat "$DIR/w.sizes")" = "set_size(0, 18) set_size(0, 54) set_size(0, 18) " ] || fail "C: the sizes asked for: $(cat "$DIR/w.sizes")"
 grep -q 'set_anchor(13)' "$DIR/w.err" || fail "C: the anchor is not top|left|right"
 # Buffers: RGB565 for the bar, ARGB8888 for the surface with the translucent row.
 grep 'create_buffer' "$DIR/w.err" | sed 's/.*create_buffer/create_buffer/' | tr '\n' ' ' >"$DIR/w.bufs"
-echo "$(sed 's/new id wl_buffer[#@][0-9]*, //g' "$DIR/w.bufs")" | grep -q '^create_buffer(0, 240, 20, 480, 909199186) create_buffer(0, 240, 56, 960, 0) create_buffer(0, 240, 20, 480, 909199186) $' ||
+echo "$(sed 's/new id wl_buffer[#@][0-9]*, //g' "$DIR/w.bufs")" | grep -q '^create_buffer(0, 240, 18, 480, 909199186) create_buffer(0, 240, 54, 960, 0) create_buffer(0, 240, 18, 480, 909199186) $' ||
 	fail "C: the buffers are not RGB565 bar, ARGB8888 bar and row, RGB565 bar: $(cat "$DIR/w.bufs")"
 # The input region: the bar, then the bar and the row; never more. Each
 # set_input_region names a region that was filled by add calls just before.
@@ -424,15 +428,15 @@ awk '
 cat "$DIR/w.regions"
 [ "$(grep -c '^input' "$DIR/w.regions")" -ge 3 ] || fail "C: no input regions on the wire"
 grep '^input' "$DIR/w.regions" | sort -u | tr '\n' ';' >"$DIR/w.in"
-[ "$(cat "$DIR/w.in")" = "input 0,0,240,20;input 0,0,240,56;" ] || fail "C: input regions on the wire: $(cat "$DIR/w.in")"
+[ "$(cat "$DIR/w.in")" = "input 0,0,240,18;input 0,0,240,54;" ] || fail "C: input regions on the wire: $(cat "$DIR/w.in")"
 # The opaque region of the translucent row's surface is the bar only.
 grep '^opaque' "$DIR/w.regions" | sort -u | tr '\n' ';' >"$DIR/w.op"
-[ "$(cat "$DIR/w.op")" = "opaque 0,0,240,20;" ] || fail "C: opaque regions on the wire: $(cat "$DIR/w.op"), wanted the bar only, closed and open"
+[ "$(cat "$DIR/w.op")" = "opaque 0,0,240,18;" ] || fail "C: opaque regions on the wire: $(cat "$DIR/w.op"), wanted the bar only, closed and open"
 # Damage: after the surface grew, a drag damages the value rectangle of the row
 # and not the whole surface; opening damages everything once.
-awk '/set_size\(0, 56\)/ { open = 1 } open && /damage_buffer/ { sub(/.*damage_buffer\(/, ""); sub(/\).*/, ""); gsub(/ /, ""); print }' "$DIR/w.err" >"$DIR/w.damage"
-[ "$(grep -c '^0,0,240,56$' "$DIR/w.damage")" = 1 ] || fail "C: the full surface was damaged $(grep -c '^0,0,240,56$' "$DIR/w.damage") times after opening: $(tr '\n' ' ' <"$DIR/w.damage")"
-grep -q '^[0-9]*,2[0-9],' "$DIR/w.damage" || fail "C: a drag damaged nothing in the row: $(tr '\n' ' ' <"$DIR/w.damage")"
+awk '/set_size\(0, 54\)/ { open = 1 } open && /damage_buffer/ { sub(/.*damage_buffer\(/, ""); sub(/\).*/, ""); gsub(/ /, ""); print }' "$DIR/w.err" >"$DIR/w.damage"
+[ "$(grep -c '^0,0,240,54$' "$DIR/w.damage")" = 1 ] || fail "C: the full surface was damaged $(grep -c '^0,0,240,54$' "$DIR/w.damage") times after opening: $(tr '\n' ' ' <"$DIR/w.damage")"
+grep -q '^[0-9]*,\(1[89]\|[2-9][0-9]\),' "$DIR/w.damage" || fail "C: a drag damaged nothing in the row: $(tr '\n' ' ' <"$DIR/w.damage")"
 echo "panel-e2e: C ok"
 
 # ---- D: nothing happens while nothing changes ----
@@ -485,7 +489,7 @@ while [ "$(grep -c '^redraw resize' "$DIR/d.out")" -le "$N" ]; do
 	i=$((i + 1)); [ $i -gt 100 ] && fail "D: the row did not close by itself"
 	sleep 0.05
 done
-tail -n 8 "$DIR/d.out" | grep -q '^panel width=240 height=20 .*popup=none$' || fail "D: the surface did not shrink to the bar"
+tail -n 8 "$DIR/d.out" | grep -q '^panel width=240 height=18 .*popup=none$' || fail "D: the surface did not shrink to the bar"
 stop_panel D
 echo "panel-e2e: D ok"
 
@@ -513,15 +517,15 @@ echo "panel-e2e: D idle after a row ok ($((V1 - V0)) switches)"
 
 # ---- E: rotation ----
 start_panel e
-has "$DIR/e.out" '^panel width=240 height=20 ' "E start"
+has "$DIR/e.out" '^panel width=240 height=18 ' "E start"
 "$KEYS" 397 || fail "E: key client failed"
-wait_for "$DIR/e.out" '^panel width=320 height=20 bar=20 ' 5 "E rotated"
+wait_for "$DIR/e.out" '^panel width=320 height=18 bar=18 ' 5 "E rotated"
 has "$DIR/e.out" '^redraw resize' "E resize"
 BLX=$(comp "$(tail -n 8 "$DIR/e.out" | awk '$1 == "backlight" { for (i = 2; i <= NF; i++) { split($i, a, "="); if (a[1] == "button") print a[2] } }')" 1)
 [ "$BLX" -gt "$(comp "$BLB" 1)" ] || fail "E: the buttons are not laid out for 320 (x=$BLX)"
-tail -n 8 "$DIR/e.out" | grep -q '^surface exclusive=20 input=0,0,320,20$' || fail "E: the input region is not the new bar"
+tail -n 8 "$DIR/e.out" | grep -q '^surface exclusive=18 input=0,0,320,18$' || fail "E: the input region is not the new bar"
 M=$(mapped)
-[ "$M" = 320x220 ] || fail "E: a toplevel after the rotation is $M, wanted 320x220"
+[ "$M" = 320x222 ] || fail "E: a toplevel after the rotation is $M, wanted 320x222"
 "$KEYS" 397 || fail "E: key client failed"
 i=0
 while [ "$(grep -c '^panel width=240' "$DIR/e.out")" -lt 2 ]; do
@@ -532,11 +536,11 @@ stop_panel E
 # With the row open while the output turns: the row follows the new width.
 start_panel e --inject "ibl;p$X0,$Y"
 "$KEYS" 397 || fail "E: key client failed"
-wait_for "$DIR/e.out" '^panel width=320 height=56 bar=20 row=36 ' 5 "E rotated with the row open"
-tail -n 8 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,20,320,36 ' || fail "E: the row is not 320 wide"
+wait_for "$DIR/e.out" '^panel width=320 height=54 bar=18 row=36 ' 5 "E rotated with the row open"
+tail -n 8 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,18,320,36 ' || fail "E: the row is not 320 wide"
 "$KEYS" 397 || fail "E: key client failed"
 i=0
-while [ "$(grep -c '^panel width=240 height=56' "$DIR/e.out")" -lt 2 ]; do
+while [ "$(grep -c '^panel width=240 height=54' "$DIR/e.out")" -lt 2 ]; do
 	i=$((i + 1)); [ $i -gt 100 ] && fail "E: no 240 wide layout with the row after the second rotation"
 	sleep 0.05
 done
@@ -662,10 +666,10 @@ g_end() {
 	kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=
 	stop_panel g
 }
-RY=$((20 + 3))
+RY=$((18 + 3))
 # Row ground #252930 (37,41,48) at 224/255 over green (0,255,0): about (32,67,42).
 g_case --inject "ibl;p$X0,$Y"
-has "$DIR/g.out" '^panel width=240 height=56 .*format=ARGB8888 ' "G the surface is ARGB8888 for a translucent row"
+has "$DIR/g.out" '^panel width=240 height=54 .*format=ARGB8888 ' "G the surface is ARGB8888 for a translucent row"
 g_pixel 3,$RY
 [ "$G" -gt 55 ] && [ "$G" -lt 85 ] || fail "G: the pixel under the row is #$RGB: not a blend of the row ground and the window (green is $G)"
 [ "$R" -lt 50 ] && [ "$B" -lt 60 ] || fail "G: the pixel under the row is #$RGB"
@@ -675,13 +679,13 @@ g_pixel 80,3
 g_end
 # Opaque: the same pixel is the row ground, the window does not show.
 g_case --popup-alpha 255 --inject "ibl;p$X0,$Y"
-has "$DIR/g.out" '^panel width=240 height=56 .*format=RGB565 ' "G an opaque row needs no alpha: RGB565 again"
+has "$DIR/g.out" '^panel width=240 height=54 .*format=RGB565 ' "G an opaque row needs no alpha: RGB565 again"
 g_pixel 3,$RY
 [ "$G" -lt 50 ] || fail "G: an opaque row shows the window through it (#$RGB)"
 g_end
 # A translucent bar shows the background behind it, closed as well.
 g_case --bar-alpha 128
-has "$DIR/g.out" '^panel width=240 height=20 .*format=ARGB8888 ' "G a translucent bar is ARGB8888 even when closed"
+has "$DIR/g.out" '^panel width=240 height=18 .*format=ARGB8888 ' "G a translucent bar is ARGB8888 even when closed"
 g_pixel 80,3
 [ "$R" -gt 100 ] || fail "G: the translucent bar shows no background through it (#$RGB)"
 g_end
@@ -709,7 +713,7 @@ CLIENTPID=$!
 wait_for "$DIR/client.out" 'mapped' 5 "H client"
 # The injected script holds the event loop while it waits, so the panel is
 # not waited for with start_panel.
-"$PANEL" --watch --height 18 --popup-alpha 150 --inject 'w1500;ibl;w9000' >"$DIR/h.out" 2>"$DIR/h.err" &
+"$PANEL" --watch --popup-alpha 150 --inject 'w1500;ibl;w9000' >"$DIR/h.out" 2>"$DIR/h.err" &
 PANELPID=$!
 sleep 2.5
 g_pixel 3,21

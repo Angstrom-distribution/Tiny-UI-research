@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PL_HEIGHT_DEFAULT 20
+#define PL_HEIGHT_DEFAULT 18
 #define PL_HEIGHT_MIN 18
 #define PL_HEIGHT_MAX 80
 
