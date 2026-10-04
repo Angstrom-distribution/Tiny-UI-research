@@ -91,7 +91,7 @@ Per-output rotation mode: `<output-name> = <mode>` (`*` matches any output).
 
 - `auto` (default): hardware rotation whenever the primary plane's `rotation` property supports the requested transform (in practice the MediaQ mq11xx driver), else software.
 - `hardware`: require hardware rotation; logs an error and falls back if unsupported.
-- `software`: always rotate in the renderer.
+- `software`: always rotate in the renderer. Hardware rotation stays the default until measurements show otherwise (test plan: `doc/rotation-measurement.md`). The h2200 media player measured it as neutral at 240 wide and about +2.5% CPU with roughly double the dropped frames at 320 wide with ordered dither, and it saves no bus bytes; no compositor workload has been measured yet. Copy-type outputs also depend on the kernel honouring `FB_DAMAGE_CLIPS`: h2200 kernel builds #201 and #202 ignore them after any rotation or format change and upload the full frame on every commit (about 17.5 ms), fixed by kernel commit daf8e6712ae1.
 
 If the hardware rotation commit fails, picowl logs an error and uses software rotation. Hardware rotation disables hardware cursors (cursor plane has no rotation property); software cursor (hold animation) is used. See [compositor.md § 5.3](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/compositor.md) for implementation details and [hardware.md § 5](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md) for per-device rotation capabilities.
 
