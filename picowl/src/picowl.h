@@ -331,6 +331,7 @@ struct pw_server {
 	struct wl_listener new_virtual_keyboard;
 	struct wl_listener request_set_cursor;
 	struct wl_listener request_set_selection;
+	struct wl_listener request_set_primary_selection;
 	struct wl_listener output_power_set_mode;
 };
 

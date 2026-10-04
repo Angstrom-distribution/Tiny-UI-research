@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_presentation_time.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
@@ -224,6 +225,9 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	}
 	wlr_subcompositor_create(server->display);
 	wlr_data_device_manager_create(server->display);
+	/* Select-to-copy, middle-click-to-paste: GTK and Qt apps expect it. */
+	if (!wlr_primary_selection_v1_device_manager_create(server->display))
+		pw_log(WLR_ERROR, "cannot create the primary selection manager");
 
 	server->output_layout = wlr_output_layout_create(server->display);
 	server->scene = wlr_scene_create();

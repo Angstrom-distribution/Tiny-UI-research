@@ -18,6 +18,7 @@
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <xkbcommon/xkbcommon.h>
 #ifdef PW_HAVE_LIBINPUT
@@ -839,6 +840,13 @@ static void handle_request_set_selection(struct wl_listener *l, void *data)
 	wlr_seat_set_selection(server->seat, ev->source, ev->serial);
 }
 
+static void handle_request_set_primary_selection(struct wl_listener *l, void *data)
+{
+	struct pw_server *server = wl_container_of(l, server, request_set_primary_selection);
+	struct wlr_seat_request_set_primary_selection_event *ev = data;
+	wlr_seat_set_primary_selection(server->seat, ev->source, ev->serial);
+}
+
 /* Clients may ask for a cursor image; picowl never draws one. */
 static void handle_request_set_cursor(struct wl_listener *l, void *data)
 {
@@ -915,6 +923,9 @@ bool pw_input_init(struct pw_server *server)
 	wl_signal_add(&server->seat->events.request_set_cursor, &server->request_set_cursor);
 	server->request_set_selection.notify = handle_request_set_selection;
 	wl_signal_add(&server->seat->events.request_set_selection, &server->request_set_selection);
+	server->request_set_primary_selection.notify = handle_request_set_primary_selection;
+	wl_signal_add(&server->seat->events.request_set_primary_selection,
+		&server->request_set_primary_selection);
 	return true;
 }
 
@@ -944,4 +955,5 @@ void pw_input_finish(struct pw_server *server)
 	wl_list_remove(&server->new_virtual_keyboard.link);
 	wl_list_remove(&server->request_set_cursor.link);
 	wl_list_remove(&server->request_set_selection.link);
+	wl_list_remove(&server->request_set_primary_selection.link);
 }

@@ -351,6 +351,7 @@ Picowl advertises and implements (via wlroots 0.19):
 - `wl_compositor`, `wl_subcompositor`: surface trees.
 - `zwlr_layer_shell_v1`: panel, overlay, background, lock surfaces with exclusive keyboard interactivity.
 - `wl_data_device_manager`: copy/paste clipboard.
+- `zwp_primary_selection_device_manager_v1`: select-to-copy and middle-click paste; picowl accepts every client request, as it does for the clipboard.
 
 **Input & Interaction:**
 - `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_touch` (if available): input focus.
