@@ -37,8 +37,9 @@ DEPENDS = " \
     libinput \
 "
 # libwlroots, libwayland-server, libxkbcommon, libpixman and libdrm are picked
-# up at runtime through the automatic shlibs dependencies. libinput, libseat
-# and udev are used inside wlroots only, so wlroots pulls them in.
+# up at runtime through the automatic shlibs dependencies. libinput is also
+# linked by picowl itself (touch calibration matrix); libseat and udev are used
+# inside wlroots only, so wlroots pulls them in.
 RDEPENDS:${PN} += "seatd xkeyboard-config"
 
 # meson.options: 'tests' (boolean) and 'systemd' (feature). The unit file is
