@@ -61,6 +61,7 @@ OUT=$("$CLIENT" --expect-no-global wp_drm_lease_device_v1 2>&1) || fail "lease g
 # Protocols that need no configuration are always advertised.
 OUT=$("$CLIENT" --expect-global wp_content_type_manager_v1 2>&1) || fail "content-type global missing: $OUT"
 OUT=$("$CLIENT" --expect-global zwp_primary_selection_device_manager_v1 2>&1) || fail "primary selection global missing: $OUT"
+OUT=$("$CLIENT" --expect-global wp_cursor_shape_manager_v1 2>&1) || fail "cursor-shape global missing: $OUT"
 
 # [capture] is off by default: no screencopy global.
 OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"

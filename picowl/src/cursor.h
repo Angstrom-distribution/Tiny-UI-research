@@ -18,7 +18,8 @@ struct pw_server;
 void pw_cursor_init(struct pw_server *server);
 
 /* Show frame 0 centred (hotspot) at layout coords x,y and start the
- * config->cursor_frame_ms timer. Idempotent while running. */
+ * config->cursor_frame_ms timer. Idempotent while a touch hold animation
+ * runs; takes over one a client asked for (cursor-shape wait). */
 void pw_cursor_hold_start(struct pw_server *server, int x, int y);
 
 /* Hide the cursor image and stop the timer. Idempotent. */

@@ -108,6 +108,9 @@ test_inc = include_directories('../src')
 test('leasepolicy', executable('test-leasepolicy', 'test-leasepolicy.c',
   '../src/leasepolicy.c', protocol_headers, dependencies: [wlroots, wayland_server],
   include_directories: test_inc))
+test('cursorshape', executable('test-cursorshape', 'test-cursorshape.c',
+  '../src/cursorshape.c', protocol_headers, dependencies: [wayland_server],
+  include_directories: [test_inc, include_directories('..')]))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',

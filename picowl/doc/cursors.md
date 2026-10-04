@@ -46,6 +46,17 @@ Every picowl cursor frame must satisfy:
 
 Picowl displays a cursor **only during the tap-and-hold animation**. No cursor is drawn otherwise.
 
+### Client Cursor Shapes
+
+`wp_cursor_shape_manager_v1` lets a client name a cursor instead of attaching an image. picowl has no cursor theme, so the shape is mapped to what it can draw (`src/cursorshape.c`):
+
+| Shape | Result |
+|-------|--------|
+| `wait`, `progress` | the hold animation, centred on the cursor position |
+| every other shape, including `default` | no image (picowl draws no pointer) |
+
+Requests from clients without pointer focus are dropped. The animation a client started stops when the client asks for any other shape or when the pointer focus changes. A running tap-and-hold animation is never restarted, replaced or stopped by a client; the touch state machine alone ends it. Image cursors set through `wl_pointer.set_cursor` remain ignored.
+
 ### Configuration Keys
 
 All cursor configuration lives in the `[cursor]` section of the INI config file (first found of `$XDG_CONFIG_HOME/picowl/picowl.ini`, `~/.config/picowl/picowl.ini`, `/etc/picowl.ini`):

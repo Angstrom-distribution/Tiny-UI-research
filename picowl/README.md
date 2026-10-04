@@ -280,7 +280,7 @@ Rules:
 
 ### Cursor Configuration
 
-Picowl draws a cursor **only during the tap-and-hold animation**. The animation is configured in the `[cursor]` section:
+Picowl draws a cursor **only during the tap-and-hold animation** (and while the pointer-focused client asks for a `wait` or `progress` cursor shape, see `wp_cursor_shape_manager_v1`). The animation is configured in the `[cursor]` section:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -357,6 +357,7 @@ Picowl advertises and implements (via wlroots 0.19):
 - `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_touch` (if available): input focus.
 - `zwp_virtual_keyboard_manager_v1`: on-screen keyboards (software input methods).
 - `xdg_activation_v1`: app activation requests.
+- `wp_cursor_shape_manager_v1` (version 1): only the client with pointer focus is heard. `wait` and `progress` show the hold animation (stopped when the client asks for another shape or loses focus); every other shape shows no image, as picowl draws no pointer. The animation of a touch hold is never replaced or stopped by a client request.
 
 **Output & Rendering:**
 - `wl_output`: output geometry, mode, subpixel, transform.
@@ -391,7 +392,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `cursorfit`, `cursor-builtin`, `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
+Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `cursorfit`, `cursor-builtin`, `cursorshape` (shape mapping), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 
