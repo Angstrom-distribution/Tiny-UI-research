@@ -70,15 +70,22 @@ static float sun_sd(const void *ctx, float x, float y)
 
 static float speaker_sd(const void *ctx, float x, float y)
 {
-	static const float cone[4][2] = { { 4.6f, 6.4f }, { 8.6f, 2.8f },
-		{ 8.6f, 15.2f }, { 4.6f, 11.6f } };
 	const struct icon *ic = ctx;
 	float u = ic->s / U, px = x / u, py = y / u;
 	/* Without waves the speaker is centred. */
 	float ox = ic->waves ? 0 : 4.3f;
-	float qx = px - ox;
-	float d = pl_sd_rrect(qx, py, 0.8f, 6.4f, 4.8f, 11.6f, 0.7f);
-	float c = pl_sd_poly(qx, py, cone, 4);
+	/* The box and the vertical edge of the cone are put on pixel boundaries,
+	 * in pixels; the rest of the icon is in units. */
+	float bx0 = floorf((0.8f + ox) * u + 0.5f), bx1 = floorf((4.8f + ox) * u + 0.5f);
+	float cx1 = floorf((8.6f + ox) * u + 0.5f);
+	float half = floorf(2.6f * u + 0.5f), far = floorf(6.2f * u + 0.5f);
+	if (half < 1)
+		half = 1;
+	float cy = floorf(9 * u + 0.5f), by0 = cy - half, by1 = cy + half;
+	const float cone[4][2] = { { bx1 - 1, by0 }, { cx1, cy - far }, { cx1, cy + far },
+		{ bx1 - 1, by1 } };
+	float d = pl_sd_rrect(x, y, bx0, by0, bx1, by1, 0.7f * u) / u;
+	float c = pl_sd_poly(x, y, cone, 4) / u;
 
 	if (c < d)
 		d = c;
@@ -102,14 +109,25 @@ struct bat {
 	float w, h;
 };
 
+/* The edges of the battery are on pixel boundaries (a whole outline width, a
+ * whole gap, a nub of whole pixels), so that they are not blurred by the
+ * anti-aliasing: only the rounded corners are partial. */
+static float bat_outline_w(const struct bat *b)
+{
+	float t = floorf(b->h * 0.12f + 0.5f);
+
+	return t < 1 ? 1 : t;
+}
+
 static float bat_outline_sd(const void *ctx, float x, float y)
 {
 	const struct bat *b = ctx;
-	float t = b->h * 0.12f < 1.2f ? 1.2f : b->h * 0.12f;
+	float t = bat_outline_w(b);
 	float r = b->h * 0.25f;
 	float o = pl_sd_rrect(x, y, 0, 0, b->w - 2, b->h, r);
 	float d = fabsf(o + t / 2) - t / 2;
-	float nub = pl_sd_rrect(x, y, b->w - 2.6f, b->h * 0.3f, b->w, b->h * 0.7f, 1.0f);
+	float ny0 = floorf(b->h * 0.3f + 0.5f);
+	float nub = pl_sd_rrect(x, y, b->w - 2.5f, ny0, b->w, b->h - ny0, 0.5f);
 
 	return d < nub ? d : nub;
 }
@@ -117,8 +135,7 @@ static float bat_outline_sd(const void *ctx, float x, float y)
 static float bat_inner_sd(const void *ctx, float x, float y)
 {
 	const struct bat *b = ctx;
-	float t = b->h * 0.12f < 1.2f ? 1.2f : b->h * 0.12f;
-	float ins = t + 0.8f;
+	float ins = bat_outline_w(b) + 1;
 	float r = b->h * 0.25f - ins;
 
 	return pl_sd_rrect(x, y, ins, ins, b->w - 2 - ins, b->h - ins, r < 0.8f ? 0.8f : r);
@@ -267,8 +284,9 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	bool charging = st->bat == PL_BAT_CHARGING;
 	int iw = l->bat_icon_w, ih = l->bat_icon_h;
 	int ix = tx - PL_GAP - iw, iy = l->battery.y + (dh - ih) / 2;
-	/* The interior is inset by the outline and a gap, a little over 2 px. */
-	int ins = 2, inner_w = iw - 2 - 2 * ins;
+	/* The interior is inset by the outline and a gap of 1 px. */
+	int ol = ih * 12 / 100 + (ih * 12 % 100 >= 50);
+	int ins = (ol < 1 ? 1 : ol) + 1, inner_w = iw - 2 - 2 * ins;
 	int fw = inner_w * pct / 100;
 	/* A sliver of 1 px is lost in the outline's anti-aliasing. */
 	if (fw < 2 && pct > 0)

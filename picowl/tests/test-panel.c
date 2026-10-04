@@ -1112,6 +1112,41 @@ static void test_battery_icon(void)
 	CHECK(count_color(&e.b, l->battery, PL_COL_FG) > 5, "-- is written");
 	CHECK(guards_intact(&e.b), "the battery stays in the buffer");
 
+	/* The edges are on pixel boundaries, not smeared over two pixels: a 1 px
+	 * outline, the fill one pixel inside it, a nub of whole pixels. */
+	const struct pl_mask *ol = &e.a.bat_outline, *in = &e.a.bat_inner;
+	int my = ol->h / 2, w = ol->w;
+	CHECK_EQ(ol->a[(size_t)my * w + 0], 255, "the outline's left edge is a whole pixel");
+	CHECK_EQ(ol->a[(size_t)my * w + 1], 0, "and one pixel wide");
+	CHECK_EQ(ol->a[(size_t)my * w + (w - 3)], 255, "the right edge of the body is whole too");
+	CHECK_EQ(ol->a[(size_t)my * w + (w - 1)], 255, "the nub is solid");
+	CHECK_EQ(ol->a[(size_t)0 * w + (w - 1)], 0, "and does not reach the top");
+	int nub_top = 0;
+	while (nub_top < ol->h && ol->a[(size_t)nub_top * w + (w - 1)] == 0)
+		nub_top++;
+	CHECK_EQ(ol->a[(size_t)nub_top * w + (w - 1)], 255, "the nub starts on a pixel edge");
+	int nub_bot = ol->h - 1;
+	while (nub_bot > 0 && ol->a[(size_t)nub_bot * w + (w - 1)] == 0)
+		nub_bot--;
+	CHECK_EQ(nub_top, ol->h - 1 - nub_bot, "and is centred on the body");
+	int first = 0;
+	while (first < in->w && in->a[(size_t)my * in->w + first] == 0)
+		first++;
+	CHECK_EQ(in->a[(size_t)my * in->w + first], 255, "the fill starts on a pixel edge");
+	CHECK_EQ(first, 2, "one pixel inside the outline, after a gap of one");
+
+	/* The speaker's body and the sun's rays: the first pixel of the middle
+	 * row is solid. */
+	for (int v = 1; v < 3; v++)
+		for (int i = 0; i < 2; i++) {
+			const struct pl_mask *sp = &e.a.speaker[v][i];
+			int x = 0, row = sp->h / 2;
+			while (x < sp->w && sp->a[(size_t)row * sp->w + x] == 0)
+				x++;
+			CHECK_EQ(sp->a[(size_t)row * sp->w + x], 255, "the speaker's body starts on a pixel edge");
+		}
+
+
 	/* The speaker shows the level; muted has the slash. */
 	struct pl_state st = e.st;
 	int ink[3];
