@@ -10,6 +10,10 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=89e064f90bcb87796ca335cbd2ce4179"
 
 # S defaults to ${UNPACKDIR}/${BP} and BB_GIT_DEFAULT_DESTSUFFIX is ${BP}, so
 # no S assignment is needed (see ../../../README.md).
+# Bumped when a patch is added: the library keeps the same file name and PV, so without a new
+# revision opkg sees no upgrade on a board that already has the previous build.
+PR = "r1"
+
 SRC_URI = "git://gitlab.freedesktop.org/wlroots/wlroots.git;protocol=https;branch=0.19;tag=${PV}"
 
 # picowl patches (byte-identical copies of picowl/subprojects/packagefiles/wlroots)
@@ -64,4 +68,3 @@ EXTRA_OEMESON += " \
 WLROOTS_API = "${@'.'.join(d.getVar('PV').split('.')[0:2])}"
 SOLIBS = "-${WLROOTS_API}.so"
 FILES_SOLIBSDEV = ""
-INSANE_SKIP:${PN} += "dev-so"
