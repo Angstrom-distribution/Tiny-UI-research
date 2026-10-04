@@ -265,7 +265,7 @@ The text is drawn at twice the size of the 5x7 font (14 px high) so that it is r
 
 ### Touch
 
-picowl turns the stylus into pointer events: a press is `BTN_LEFT`, a drag is motion. A press inside the whole 28 px cell of a slider (not only on the thin track) sets the value from the x position, motion while pressed keeps setting it and the release ends the drag; a drag keeps its slider when the stylus leaves the cell. A press anywhere else does nothing, and a drag that starts outside a slider does nothing even when it moves over one. The redraw is immediate; the value is written to the system at most every 50 ms during a drag and always at the release.
+picowl turns the stylus into pointer events: a press is `BTN_LEFT`, a drag is motion. The panel's layer surface has a built-in `[layer.panel] hold_action = none` rule, so the press is sent at touch-down: with the default tap-and-hold it would be deferred until the stylus moved `slop_px` (8 px) and a slow drag would turn into a right click after `hold_ms`, which swallows the rest of the touch. A `[layer.panel]` section of your own merges over it. A press inside the whole 28 px cell of a slider (not only on the thin track) sets the value from the x position, motion while pressed keeps setting it and the release ends the drag; a drag keeps its slider when the stylus leaves the cell. A press anywhere else does nothing, and a drag that starts outside a slider does nothing even when it moves over one. The redraw is immediate; the value is written to the system at most every 50 ms during a drag and always at the release.
 
 - **Backlight:** `/sys/class/backlight/<dev>/brightness` and `max_brightness` of the first device (by name) with a `max_brightness` of at least 1; the sysfs root honours `PICOWL_SYSFS_ROOT` as in picowl. The percent maps linearly onto the raw range, rounded to nearest, with a floor of 5 percent, so the screen cannot be turned black by accident. The level is read once at start. `brightness` must be writable by the user the panel runs as (the udev rule installed by picowl gives the `video` group write access). If the board has several backlight devices, give picowl and the panel the same one: picowl prefers `firmware`, `platform`, `raw` (`[power] backlight`), the panel takes the first name.
 - **Volume:** alsa-lib's simple mixer on the card `default`. The element is the first of `Master`, `PCM`, `Headphone`, `Speaker` that has a playback volume, else the first element with one. 0..100 percent maps linearly onto the element's raw range (not onto decibels), and raising the volume above 0 also switches the playback on (it is never switched off). Changes made by other programs are followed: the mixer's descriptors are in the poll loop, so there is no timer, and the thumb moves while nobody touches it (not during the panel's own drag, where the quantized value would make it jump). With no mixer or no element the slider is greyed out and ignores touches. The user needs access to the sound device (the `audio` group; picowl's unit runs as root).
@@ -366,6 +366,10 @@ hold_button = middle
 
 # built in, shown here to say how to change it: the keyboard times its own presses
 [layer.wvkbd]
+hold_action = none
+
+# built in too: the panel's sliders are dragged, so its presses are not deferred
+[layer.panel]
 hold_action = none
 ```
 

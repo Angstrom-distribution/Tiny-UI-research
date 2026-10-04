@@ -480,18 +480,24 @@ struct pw_config *pw_config_default(void)
 	c->lease_enable = true;
 	c->lease_allow = strdup("mediaplayer");
 	c->capture_enable = false;
-	/* The keyboard times its own long presses (key repeat, accents), so a hold
-	 * must not delay its key presses. A user [layer.wvkbd] merges over this.
-	 * The other keys are resolved from [touch] by pw_config_load(); they are
-	 * filled in here too for a config that is never loaded from a file. */
-	struct pw_app_rule *osk_rule = find_or_add_rule(c, PW_RULE_LAYER, "wvkbd");
-	if (osk_rule) {
-		osk_rule->hold.action = PW_HOLD_NONE;
-		osk_rule->hold.button = c->hold_button;
-		osk_rule->hold.delay_ms = c->hold_delay_ms;
-		osk_rule->hold.hold_ms = c->hold_ms;
-		osk_rule->hold.slop_px = c->slop_px;
-		osk_rule->set |= PW_HOLD_SET_ACTION;
+	/* The keyboard times its own long presses (key repeat, accents), and the
+	 * panel's sliders are dragged: a hold must not delay their presses until
+	 * the finger moves 8 px or lifts, nor turn a slow drag into a right click
+	 * that swallows it. A user [layer.wvkbd] or [layer.panel] merges over
+	 * these. The other keys are resolved from [touch] by pw_config_load();
+	 * they are filled in here too for a config that is never loaded from a
+	 * file. */
+	static const char *const no_hold_layers[] = { "wvkbd", "panel" };
+	for (size_t i = 0; i < sizeof(no_hold_layers) / sizeof(no_hold_layers[0]); i++) {
+		struct pw_app_rule *rule = find_or_add_rule(c, PW_RULE_LAYER, no_hold_layers[i]);
+		if (!rule)
+			continue;
+		rule->hold.action = PW_HOLD_NONE;
+		rule->hold.button = c->hold_button;
+		rule->hold.delay_ms = c->hold_delay_ms;
+		rule->hold.hold_ms = c->hold_ms;
+		rule->hold.slop_px = c->slop_px;
+		rule->set |= PW_HOLD_SET_ACTION;
 	}
 	add_default_keybindings(c);
 	return c;

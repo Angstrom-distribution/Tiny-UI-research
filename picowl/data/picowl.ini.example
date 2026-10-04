@@ -103,8 +103,9 @@ code:155 = rotate
 # [app.havoc]
 # hold_button = middle
 #
-# picowl has a built-in [layer.wvkbd] with hold_action = none for the keyboard;
-# a [layer.wvkbd] section of your own merges over it.
+# picowl has a built-in [layer.wvkbd] with hold_action = none for the keyboard,
+# and a built-in [layer.panel] with hold_action = none for the panel's sliders;
+# a section of your own with the same name merges over it.
 
 [cursor]
 # Cursor appearance during hold animation (only visible during the hold animation).

@@ -22,11 +22,19 @@ static int test_default_config(void)
 
 	/* Check default keybindings exist */
 	assert(!wl_list_empty(&c->keybindings));
-	/* the only rule is the built-in one for the keyboard's layer surface */
+	/* the only rules are the built-in ones for the layer surfaces of the
+	 * keyboard and the panel */
 	assert(!wl_list_empty(&c->app_rules));
-	assert(c->app_rules.next->next == &c->app_rules);
-	struct pw_app_rule *builtin = wl_container_of(c->app_rules.next, builtin, link);
-	assert(builtin->kind == PW_RULE_LAYER && strcmp(builtin->name, "wvkbd") == 0);
+	int builtin_n = 0;
+	bool have_wvkbd = false, have_panel = false;
+	struct pw_app_rule *builtin;
+	wl_list_for_each(builtin, &c->app_rules, link) {
+		assert(builtin->kind == PW_RULE_LAYER);
+		have_wvkbd |= strcmp(builtin->name, "wvkbd") == 0;
+		have_panel |= strcmp(builtin->name, "panel") == 0;
+		builtin_n++;
+	}
+	assert(builtin_n == 2 && have_wvkbd && have_panel);
 
 	struct pw_keybinding *kb;
 	int kb_count = 0;
@@ -206,10 +214,11 @@ static int test_app_rules(void)
 	assert(hp.hold_ms == 1200);
 	assert(hp.slop_px == 8);
 
-	/* layer.panel: slop_px = 4 */
+	/* layer.panel: slop_px = 4, merged over the built-in rule, which keeps
+	 * the hold off */
 	hit = pw_config_hold(c, PW_RULE_LAYER, "panel", &hp);
 	assert(hit == true);
-	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	assert(hp.action == PW_HOLD_NONE);
 	assert(hp.delay_ms == 300);
 	assert(hp.hold_ms == 900);
 	assert(hp.slop_px == 4);
@@ -230,7 +239,8 @@ static int test_app_rules(void)
 	assert(hp.hold_ms == 900);
 	assert(hp.slop_px == 8);
 
-	/* empty [app.] and [layer.] are ignored: five rules plus the built-in wvkbd one, none unnamed */
+	/* empty [app.] and [layer.] are ignored: five rules plus the built-in wvkbd one
+	 * (the file's [layer.panel] merges into the built-in panel rule), none unnamed */
 	int n = 0;
 	struct pw_app_rule *rule;
 	wl_list_for_each(rule, &c->app_rules, link) {
@@ -657,7 +667,8 @@ static int test_zerocopy_limits(void)
 	/* [layer.*] has no buffer pool */
 	wl_list_for_each(r, &c->app_rules, link)
 		if (r->kind == PW_RULE_LAYER) {
-			assert(strcmp(r->name, "osk") == 0 || strcmp(r->name, "wvkbd") == 0);
+			assert(strcmp(r->name, "osk") == 0 || strcmp(r->name, "wvkbd") == 0 ||
+				strcmp(r->name, "panel") == 0);
 			assert(r->zb_buffers == -1 && r->zb_pool == 0);
 		}
 	assert(pw_config_app(c, "osk") == NULL);
@@ -945,6 +956,12 @@ static int test_osk_config(void)
 	/* the rule is for the layer namespace only */
 	assert(!pw_config_hold(c, PW_RULE_APP, "wvkbd", &hp));
 	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	/* the panel's sliders are dragged: the press is not deferred either */
+	assert(pw_config_hold(c, PW_RULE_LAYER, "panel", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 300 && hp.hold_ms == 900 && hp.slop_px == 8);
+	assert(!pw_config_hold(c, PW_RULE_APP, "panel", &hp));
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
 	pw_config_free(c);
 
 	const char *path = write_tmp_ini("picowl-test-osk.ini",
@@ -1017,6 +1034,30 @@ static int test_osk_config(void)
 	struct pw_app_rule *rule;
 	wl_list_for_each(rule, &c->app_rules, link)
 		if (rule->kind == PW_RULE_LAYER && strcmp(rule->name, "wvkbd") == 0)
+			n++;
+	assert(n == 1);
+	pw_config_free(c);
+
+	/* the same for the panel's built-in rule: a [layer.panel] of the user
+	 * merges over it, [touch] values reach it, and it stays one rule */
+	path = write_tmp_ini("picowl-test-osk.ini",
+		"[layer.panel]\nslop_px = 20\n"
+		"[touch]\nhold_ms = 1200\n");
+	c = pw_config_load(path);
+	assert(c != NULL);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "panel", &hp));
+	assert(hp.action == PW_HOLD_NONE && hp.slop_px == 20 && hp.hold_ms == 1200);
+	pw_config_free(c);
+	path = write_tmp_ini("picowl-test-osk.ini",
+		"[layer.panel]\nhold_action = right-click\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "panel", &hp));
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	n = 0;
+	wl_list_for_each(rule, &c->app_rules, link)
+		if (rule->kind == PW_RULE_LAYER && strcmp(rule->name, "panel") == 0)
 			n++;
 	assert(n == 1);
 	pw_config_free(c);
