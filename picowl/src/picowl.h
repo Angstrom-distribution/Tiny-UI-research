@@ -436,6 +436,10 @@ void pw_im_init(struct pw_server *server);
  * Called by pw_input_finish(). */
 void pw_im_finish(struct pw_server *server);
 
+/* Move the input method popups after the usable area or an output transform
+ * changed. Called by pw_view_arrange_all(). */
+void pw_im_arrange(struct pw_server *server);
+
 /*
  * input.c
  */

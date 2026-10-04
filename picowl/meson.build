@@ -100,6 +100,7 @@ sources = files(
   'src/layer.c',
   'src/input.c',
   'src/imrelay.c',
+  'src/implace.c',
   'src/tablet.c',
   'src/idle.c',
   'src/touchhold.c',

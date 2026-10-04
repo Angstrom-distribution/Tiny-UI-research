@@ -74,6 +74,7 @@ void pw_view_arrange_all(struct pw_server *server)
 
 	wl_list_for_each(view, &server->views, link)
 		view_arrange(view);
+	pw_im_arrange(server);
 }
 
 /* ---- focus ------------------------------------------------------------ */
