@@ -2,16 +2,17 @@
 #include "touchhold.h"
 
 void pw_touchhold_init(struct pw_touchhold *th, enum pw_th_hold_action action,
-	int delay_ms, int hold_ms, int slop_px)
+	enum pw_th_hold_button button, int delay_ms, int hold_ms, int slop_px)
 {
 	th->state = PW_TH_IDLE;
-	pw_touchhold_set_params(th, action, delay_ms, hold_ms, slop_px);
+	pw_touchhold_set_params(th, action, button, delay_ms, hold_ms, slop_px);
 	th->down_x = th->down_y = 0;
 	th->down_ms = 0;
 }
 
 unsigned pw_touchhold_set_params(struct pw_touchhold *th,
-	enum pw_th_hold_action action, int delay_ms, int hold_ms, int slop_px)
+	enum pw_th_hold_action action, enum pw_th_hold_button button,
+	int delay_ms, int hold_ms, int slop_px)
 {
 	unsigned r = 0;
 
@@ -24,6 +25,7 @@ unsigned pw_touchhold_set_params(struct pw_touchhold *th,
 	if (th->state != PW_TH_IDLE)
 		r = pw_touchhold_cancel(th);
 	th->action = action;
+	th->button = button == PW_TH_BTN_MIDDLE ? PW_TH_BTN_MIDDLE : PW_TH_BTN_RIGHT;
 	th->delay_ms = delay_ms;
 	th->hold_ms = hold_ms;
 	th->slop_px = slop_px;
@@ -119,7 +121,9 @@ unsigned pw_touchhold_tick(struct pw_touchhold *th, int64_t now_ms)
 	if (th->state != PW_TH_PENDING && th->state != PW_TH_ANIMATING)
 		return 0;
 	if (now_ms >= th->down_ms + th->hold_ms) {
-		unsigned r = PW_TH_SEND_RIGHT_CLICK | PW_TH_SWALLOW;
+		unsigned r = PW_TH_SWALLOW |
+			(th->button == PW_TH_BTN_MIDDLE ? PW_TH_SEND_MIDDLE_CLICK
+				: PW_TH_SEND_RIGHT_CLICK);
 
 		if (th->state == PW_TH_ANIMATING)
 			r |= PW_TH_STOP_ANIMATION;

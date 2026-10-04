@@ -100,6 +100,11 @@ enum pw_hold_action {
 	PW_HOLD_NONE,              /* no hold detection, immediate left press */
 };
 
+enum pw_hold_button {
+	PW_HOLD_BTN_RIGHT,         /* hold -> BTN_RIGHT (default) */
+	PW_HOLD_BTN_MIDDLE,        /* hold -> BTN_MIDDLE: pastes the primary selection */
+};
+
 enum pw_rule_kind {
 	PW_RULE_APP,               /* app_id (xdg_toplevel) */
 	PW_RULE_LAYER,             /* namespace (zwlr_layer_surface_v1) */
@@ -107,6 +112,7 @@ enum pw_rule_kind {
 
 struct pw_hold_params {
 	enum pw_hold_action action;
+	enum pw_hold_button button;
 	int delay_ms, hold_ms, slop_px;
 };
 
@@ -114,6 +120,7 @@ struct pw_hold_params {
 #define PW_HOLD_SET_DELAY  (1u << 1)
 #define PW_HOLD_SET_HOLD   (1u << 2)
 #define PW_HOLD_SET_SLOP   (1u << 3)
+#define PW_HOLD_SET_BUTTON (1u << 4)
 
 struct pw_app_rule {
 	struct wl_list link;          /* pw_config.app_rules, file order */
@@ -141,6 +148,7 @@ struct pw_config {
 
 	/* [touch] tap-and-hold. */
 	enum pw_hold_action hold_action; /* default PW_HOLD_RIGHT_CLICK */
+	enum pw_hold_button hold_button; /* default PW_HOLD_BTN_RIGHT */
 	int hold_delay_ms;         /* animation starts after this (default 300) */
 	int hold_ms;               /* right click fires after this, measured from
 	                            * touch-down (default 900) */

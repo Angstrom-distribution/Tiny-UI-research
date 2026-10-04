@@ -103,6 +103,19 @@ static bool parse_action(const char *str, enum pw_action *action)
 	return false;
 }
 
+static bool parse_hold_button(const char *str, enum pw_hold_button *button)
+{
+	if (strcmp(str, "right") == 0) {
+		*button = PW_HOLD_BTN_RIGHT;
+		return true;
+	}
+	if (strcmp(str, "middle") == 0) {
+		*button = PW_HOLD_BTN_MIDDLE;
+		return true;
+	}
+	return false;
+}
+
 static bool parse_hold_action(const char *str, enum pw_hold_action *action)
 {
 	if (strcmp(str, "right-click") == 0) {
@@ -336,6 +349,7 @@ struct pw_config *pw_config_default(void)
 	c->background[3] = 1.0f;
 	c->idle_timeout_ms = 60000; /* 60 seconds */
 	c->hold_action = PW_HOLD_RIGHT_CLICK;
+	c->hold_button = PW_HOLD_BTN_RIGHT;
 	c->hold_delay_ms = 300;
 	c->hold_ms = 900;
 	c->slop_px = 8;
@@ -580,6 +594,12 @@ struct pw_config *pw_config_load(const char *path)
 				} else {
 					pw_log(WLR_ERROR, "Unknown hold_action: %s (valid: right-click, none)", val);
 				}
+			} else if (strcmp(key, "hold_button") == 0) {
+				enum pw_hold_button button;
+				if (parse_hold_button(val, &button))
+					c->hold_button = button;
+				else
+					pw_log(WLR_ERROR, "Unknown hold_button: %s (valid: right, middle)", val);
 			} else if (strcmp(key, "hold_delay_ms") == 0) {
 				c->hold_delay_ms = atoi(val);
 			} else if (strcmp(key, "hold_ms") == 0) {
@@ -834,6 +854,11 @@ struct pw_config *pw_config_load(const char *path)
 					cur_rule->set |= PW_HOLD_SET_ACTION;
 				else
 					pw_log(WLR_ERROR, "Unknown hold_action in [%s]: %s (valid: right-click, none)", section, val);
+			} else if (strcmp(key, "hold_button") == 0) {
+				if (parse_hold_button(val, &cur_rule->hold.button))
+					cur_rule->set |= PW_HOLD_SET_BUTTON;
+				else
+					pw_log(WLR_ERROR, "Unknown hold_button in [%s]: %s (valid: right, middle)", section, val);
 			} else if (strcmp(key, "hold_delay_ms") == 0) {
 				cur_rule->hold.delay_ms = atoi(val);
 				cur_rule->set |= PW_HOLD_SET_DELAY;
@@ -969,12 +994,14 @@ struct pw_config *pw_config_load(const char *path)
 			c->zb_total_kb);
 
 	/* Resolve [app.*]/[layer.*] rules: unset keys come from [touch]; bad
-	 * timings revert to [touch] (the action stays as configured). */
+	 * timings revert to [touch] (the action and button stay as configured). */
 	struct pw_app_rule *rule;
 	wl_list_for_each(rule, &c->app_rules, link) {
 		struct pw_hold_params *h = &rule->hold;
 		if (!(rule->set & PW_HOLD_SET_ACTION))
 			h->action = c->hold_action;
+		if (!(rule->set & PW_HOLD_SET_BUTTON))
+			h->button = c->hold_button;
 		if (!(rule->set & PW_HOLD_SET_DELAY))
 			h->delay_ms = c->hold_delay_ms;
 		if (!(rule->set & PW_HOLD_SET_HOLD))
@@ -1127,6 +1154,7 @@ bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
 
 	/* No match; use global [touch] settings */
 	out->action = c->hold_action;
+	out->button = c->hold_button;
 	out->delay_ms = c->hold_delay_ms;
 	out->hold_ms = c->hold_ms;
 	out->slop_px = c->slop_px;

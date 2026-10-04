@@ -9,6 +9,7 @@
 #define SO PW_TH_STOP_ANIMATION
 #define RC PW_TH_SEND_RIGHT_CLICK
 #define SW PW_TH_SWALLOW
+#define MC PW_TH_SEND_MIDDLE_CLICK
 
 static int fails;
 #define EQ(got, want) do { unsigned g_ = (got), w_ = (want); if (g_ != w_) { \
@@ -17,7 +18,7 @@ static int fails;
 	fprintf(stderr, "%s:%d: got %lld want %lld\n", __FILE__, __LINE__, g_, w_); fails++; } } while (0)
 
 static struct pw_touchhold th;
-static void fresh(void) { pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8); }
+static void fresh(void) { pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8); }
 
 int main(void)
 {
@@ -118,7 +119,7 @@ int main(void)
 	pw_touchhold_cancel(&th);
 
 	/* action NONE */
-	pw_touchhold_init(&th, PW_TH_ACTION_NONE, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8);
 	EQ(pw_touchhold_down(&th, 0, 0, 0), L);
 	EQ(th.state, PW_TH_DRAGGING);
 	EQ(pw_touchhold_tick(&th, 5000), 0);
@@ -126,10 +127,36 @@ int main(void)
 	EQ64(pw_touchhold_next_deadline(&th), -1);
 	EQ(pw_touchhold_up(&th, 20), R);
 
+	/* button middle: the hold emits a middle click, never a right click */
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_MIDDLE, 300, 900, 8);
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_tick(&th, 300), SA);
+	EQ(pw_touchhold_tick(&th, 900), SO | MC | SW);
+	EQ(pw_touchhold_up(&th, 1000), SW);
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_tick(&th, 1000), MC | SW); /* both thresholds in one tick */
+	pw_touchhold_cancel(&th);
+	/* a tap or a drag is unaffected by the button */
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_up(&th, 100), L | R);
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_motion(&th, 20, 0, 100), L | M);
+	pw_touchhold_up(&th, 200);
+	/* set_params switches the button between touches */
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8), 0);
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_tick(&th, 900), RC | SW);
+	pw_touchhold_cancel(&th);
+	/* an unknown value falls back to right */
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, (enum pw_th_hold_button)7, 300, 900, 8);
+	pw_touchhold_down(&th, 0, 0, 0);
+	EQ(pw_touchhold_tick(&th, 900), RC | SW);
+	pw_touchhold_cancel(&th);
+
 	/* invalid configs */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, -5, 100, -3);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, -5, 100, -3);
 	EQ(th.delay_ms, 0); EQ(th.slop_px, 0);
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 500, 200, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 500, 200, 8);
 	EQ(th.hold_ms, 500);
 	pw_touchhold_down(&th, 0, 0, 0);
 	EQ(pw_touchhold_motion(&th, 1, 0, 1), 0);
@@ -138,7 +165,7 @@ int main(void)
 	/* set_params tests */
 	fresh();
 	/* set_params(NONE) in IDLE returns 0 */
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, 300, 900, 8), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8), 0);
 	EQ(th.action, PW_TH_ACTION_NONE);
 	EQ(pw_touchhold_down(&th, 0, 0, 0), L);
 	EQ(th.state, PW_TH_DRAGGING);
@@ -147,51 +174,51 @@ int main(void)
 	EQ(pw_touchhold_tick(&th, 5000), 0);
 
 	/* set_params in PENDING returns 0 */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8);
 	pw_touchhold_down(&th, 0, 0, 0);
 	EQ(th.state, PW_TH_PENDING);
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, 300, 900, 8), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8), 0);
 	EQ(th.state, PW_TH_IDLE);
 	EQ64(pw_touchhold_next_deadline(&th), -1);
 
 	/* set_params in ANIMATING returns SO */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8);
 	pw_touchhold_down(&th, 0, 0, 0);
 	pw_touchhold_tick(&th, 300);
 	EQ(th.state, PW_TH_ANIMATING);
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, 300, 900, 8), SO);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8), SO);
 	EQ(th.state, PW_TH_IDLE);
 
 	/* set_params in DRAGGING returns R */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8);
 	pw_touchhold_down(&th, 0, 0, 0);
 	pw_touchhold_motion(&th, 50, 0, 10);
 	EQ(th.state, PW_TH_DRAGGING);
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, 300, 900, 8), R);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8), R);
 	EQ(th.state, PW_TH_IDLE);
 
 	/* set_params in TRIGGERED returns 0 */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8);
 	pw_touchhold_down(&th, 0, 0, 0);
 	pw_touchhold_tick(&th, 900);
 	EQ(th.state, PW_TH_TRIGGERED);
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, 300, 900, 8), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_NONE, PW_TH_BTN_RIGHT, 300, 900, 8), 0);
 	EQ(th.state, PW_TH_IDLE);
 
 	/* Clamping in set_params */
 	fresh();
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, -5, 100, -3), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, -5, 100, -3), 0);
 	EQ(th.delay_ms, 0); EQ(th.slop_px, 0);
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, 500, 200, 8), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 500, 200, 8), 0);
 	EQ(th.hold_ms, 500);
 
 	/* Parameters are fixed for the gesture */
-	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, 300, 900, 8);
+	pw_touchhold_init(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 300, 900, 8);
 	pw_touchhold_down(&th, 0, 0, 0);
 	EQ(pw_touchhold_tick(&th, 300), SA);
 	EQ(pw_touchhold_tick(&th, 900), SO | RC | SW);
 	/* Now set new parameters and down again */
-	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, 500, 1500, 8), 0);
+	EQ(pw_touchhold_set_params(&th, PW_TH_ACTION_RIGHT_CLICK, PW_TH_BTN_RIGHT, 500, 1500, 8), 0);
 	EQ(pw_touchhold_down(&th, 0, 0, 2000), 0);
 	EQ64(pw_touchhold_next_deadline(&th), 2500);
 

@@ -75,8 +75,9 @@ Tap-and-hold timing is configured in the `[touch]` section:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `hold_action` | `right-click` | `right-click` (send BTN_RIGHT) or `none` (no hold detection) |
+| `hold_button` | `right` | `right` (BTN_RIGHT) or `middle` (BTN_MIDDLE, pastes the primary selection in a terminal); unused with `hold_action = none` |
 | `hold_delay_ms` | `300` | Milliseconds before the animation starts |
-| `hold_ms` | `900` | Milliseconds from touch-down to send the right-click |
+| `hold_ms` | `900` | Milliseconds from touch-down to send the click |
 | `slop_px` | `8` | Movement tolerance in pixels; exceeding this cancels the hold |
 
 ### Per-App Hold Overrides
@@ -91,7 +92,7 @@ hold_action = none
 hold_action = none
 ```
 
-All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` is kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
+All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` and `hold_button` are kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
 
 `hold_action = none` is useful for apps that time their own long press (e.g. media players): the left press is sent at touch-down, motion is forwarded, and there is no right-click and no hold animation. `hold_delay_ms` has no effect in that mode.
 

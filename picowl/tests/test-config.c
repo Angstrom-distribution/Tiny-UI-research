@@ -302,6 +302,59 @@ static int test_app_rules_inherit(void)
 	return 0;
 }
 
+static int test_hold_button(void)
+{
+	struct pw_hold_params hp;
+	struct pw_config *c = pw_config_default();
+
+	assert(c != NULL);
+	assert(c->hold_button == PW_HOLD_BTN_RIGHT);
+	assert(!pw_config_hold(c, PW_RULE_APP, "havoc", &hp));
+	assert(hp.button == PW_HOLD_BTN_RIGHT);
+	pw_config_free(c);
+
+	/* [touch] is middle and comes after the rules */
+	c = pw_config_load("tests/test-config-button.ini");
+	assert(c != NULL);
+	assert(c->hold_button == PW_HOLD_BTN_MIDDLE);
+	assert(pw_config_hold(c, PW_RULE_APP, "havoc", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	/* unset in the rule inherits [touch], also for layers */
+	assert(pw_config_hold(c, PW_RULE_APP, "inherit", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "plain", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "osk", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	/* an explicit right overrides a middle [touch] */
+	assert(pw_config_hold(c, PW_RULE_APP, "back", &hp));
+	assert(hp.button == PW_HOLD_BTN_RIGHT);
+	/* an unknown value is ignored, so the rule inherits */
+	assert(pw_config_hold(c, PW_RULE_APP, "badvalue", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	/* bad timings revert the timings only */
+	assert(pw_config_hold(c, PW_RULE_APP, "badtiming", &hp));
+	assert(hp.button == PW_HOLD_BTN_RIGHT);
+	assert(hp.hold_ms == 900);
+	/* no rule: the [touch] value */
+	assert(!pw_config_hold(c, PW_RULE_APP, "other", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	pw_config_free(c);
+
+	/* a bad [touch] value keeps the default; a rule still applies */
+	c = pw_config_load("tests/test-config-button-bad.ini");
+	assert(c != NULL);
+	assert(c->hold_button == PW_HOLD_BTN_RIGHT);
+	assert(pw_config_hold(c, PW_RULE_APP, "havoc", &hp));
+	assert(hp.button == PW_HOLD_BTN_MIDDLE);
+	assert(!pw_config_hold(c, PW_RULE_APP, "other", &hp));
+	assert(hp.button == PW_HOLD_BTN_RIGHT);
+	pw_config_free(c);
+
+	printf("✓ test_hold_button\n");
+	return 0;
+}
+
 static int test_validation_ranges(void)
 {
 	/* Test that out-of-range values are corrected during validation */
@@ -830,6 +883,7 @@ int main(int argc, char *argv[])
 	failed += test_touch_cursor_parsing();
 	failed += test_app_rules();
 	failed += test_app_rules_inherit();
+	failed += test_hold_button();
 	failed += test_validation_ranges();
 	failed += test_rotation_config();
 	failed += test_copytype_config();

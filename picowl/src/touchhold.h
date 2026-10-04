@@ -6,7 +6,8 @@
  *
  * Every function returns a bitmask of PW_TH_* actions the caller performs
  * in this order: STOP_ANIMATION, SEND_LEFT_PRESS, SEND_MOTION,
- * SEND_RIGHT_CLICK, SEND_LEFT_RELEASE, START_ANIMATION.
+ * SEND_RIGHT_CLICK or SEND_MIDDLE_CLICK (never both), SEND_LEFT_RELEASE,
+ * START_ANIMATION.
  *
  * States:
  *  IDLE      no touch.
@@ -14,8 +15,8 @@
  *  DRAGGING  moved beyond slop (or action == NONE): left press sent; motion
  *            is forwarded (SEND_MOTION), up -> SEND_LEFT_RELEASE.
  *  ANIMATING hold_delay elapsed: animation shown, still deferred.
- *  TRIGGERED hold_ms elapsed: right click sent; everything until up/cancel
- *            is swallowed (SWALLOW).
+ *  TRIGGERED hold_ms elapsed: right or middle click sent (per button);
+ *            everything until up/cancel is swallowed (SWALLOW).
  *
  * Rules:
  *  down:   action NONE -> DRAGGING, SEND_LEFT_PRESS. Else PENDING (focus +
@@ -33,8 +34,9 @@
  *          thresholds and action (same clamping as init).
  *  tick:   PENDING and now >= down+delay -> ANIMATING, START_ANIMATION.
  *          PENDING/ANIMATING and now >= down+hold_ms -> TRIGGERED,
- *          [STOP_ANIMATION,] SEND_RIGHT_CLICK|SWALLOW. (Both thresholds
- *          crossed in one tick -> only the second applies, no START.)
+ *          [STOP_ANIMATION,] SEND_RIGHT_CLICK|SWALLOW, or
+ *          SEND_MIDDLE_CLICK|SWALLOW when the button is middle. (Both
+ *          thresholds crossed in one tick -> only the second applies, no START.)
  *  next_deadline: absolute ms of the next threshold in PENDING/ANIMATING,
  *          else -1.
  * Invalid configs: delay < 0 -> 0; hold_ms < delay -> hold_ms = delay;
@@ -53,6 +55,7 @@ enum pw_th_action {
 	PW_TH_STOP_ANIMATION    = 1 << 4,
 	PW_TH_SEND_RIGHT_CLICK  = 1 << 5, /* press + release of BTN_RIGHT */
 	PW_TH_SWALLOW           = 1 << 6, /* do not deliver this event */
+	PW_TH_SEND_MIDDLE_CLICK = 1 << 7, /* press + release of BTN_MIDDLE */
 };
 
 enum pw_th_state {
@@ -69,21 +72,29 @@ enum pw_th_hold_action {
 	PW_TH_ACTION_NONE = 1,
 };
 
+/* Must mirror enum pw_hold_button in picowl.h without including it. */
+enum pw_th_hold_button {
+	PW_TH_BTN_RIGHT = 0,
+	PW_TH_BTN_MIDDLE = 1,
+};
+
 struct pw_touchhold {
 	enum pw_th_state state;
 	enum pw_th_hold_action action;
+	enum pw_th_hold_button button;
 	int delay_ms, hold_ms, slop_px;
 	int down_x, down_y;
 	int64_t down_ms;
 };
 
 void pw_touchhold_init(struct pw_touchhold *th, enum pw_th_hold_action action,
-	int delay_ms, int hold_ms, int slop_px);
-/* Replace thresholds/action. Same clamping as init. If not IDLE, cancels
+	enum pw_th_hold_button button, int delay_ms, int hold_ms, int slop_px);
+/* Replace thresholds, action and button. Same clamping as init. If not IDLE, cancels
  * first and returns the cancel actions (STOP_ANIMATION or SEND_LEFT_RELEASE),
  * else 0. Not IDLE -> caller must run result through th_exec before next down. */
 unsigned pw_touchhold_set_params(struct pw_touchhold *th,
-	enum pw_th_hold_action action, int delay_ms, int hold_ms, int slop_px);
+	enum pw_th_hold_action action, enum pw_th_hold_button button,
+	int delay_ms, int hold_ms, int slop_px);
 unsigned pw_touchhold_down(struct pw_touchhold *th, int x, int y, int64_t now_ms);
 unsigned pw_touchhold_motion(struct pw_touchhold *th, int x, int y, int64_t now_ms);
 unsigned pw_touchhold_up(struct pw_touchhold *th, int64_t now_ms);

@@ -773,6 +773,13 @@ static void th_exec(unsigned a, uint32_t time)
 		wlr_seat_pointer_notify_button(seat, time, BTN_RIGHT,
 			WL_POINTER_BUTTON_STATE_RELEASED);
 	}
+	if (a & PW_TH_SEND_MIDDLE_CLICK) {
+		st.frame_pending = true;
+		wlr_seat_pointer_notify_button(seat, time, BTN_MIDDLE,
+			WL_POINTER_BUTTON_STATE_PRESSED);
+		wlr_seat_pointer_notify_button(seat, time, BTN_MIDDLE,
+			WL_POINTER_BUTTON_STATE_RELEASED);
+	}
 	if (a & PW_TH_SEND_LEFT_RELEASE) {
 		st.frame_pending = true;
 		wlr_seat_pointer_notify_button(seat, time, BTN_LEFT,
@@ -873,11 +880,12 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 	const char *id = s ? hold_identity(s, &kind) : NULL;
 	bool hit = pw_config_hold(server->config, kind, id, &hp);
 	unsigned a = pw_touchhold_set_params(&st.th, (enum pw_th_hold_action)hp.action,
-		hp.delay_ms, hp.hold_ms, hp.slop_px);
+		(enum pw_th_hold_button)hp.button, hp.delay_ms, hp.hold_ms, hp.slop_px);
 	th_exec(a, ev->time_msec);
 	if (hit)
 		pw_log(WLR_DEBUG, "hold: %s '%s' -> %s", kind == PW_RULE_APP ? "app" : "layer",
-			id, hp.action == PW_HOLD_NONE ? "none" : "right-click");
+			id, hp.action == PW_HOLD_NONE ? "none" :
+				hp.button == PW_HOLD_BTN_MIDDLE ? "middle-click" : "right-click");
 	/* Now perform the touch down */
 	a = pw_touchhold_down(&st.th, st.down_x, st.down_y, now_ms());
 	th_exec(a, ev->time_msec);
@@ -1095,6 +1103,7 @@ bool pw_input_init(struct pw_server *server)
 	pw_tablet_init(server);
 
 	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
+		(enum pw_th_hold_button)server->config->hold_button,
 		server->config->hold_delay_ms, server->config->hold_ms,
 		server->config->slop_px);
 	st.th_timer = wl_event_loop_add_timer(

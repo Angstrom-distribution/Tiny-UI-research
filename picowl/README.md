@@ -255,7 +255,7 @@ Touch input on picowl supports a tap-and-hold gesture (enabled by default, confi
 - **Tap** (touch-up before hold triggers): Send left button press and release as a single click.
 - **Drag** (movement > `slop_px` before hold triggers): Send the deferred left press and normal motion; no hold animation.
 - **Hold animation** (after `hold_delay_ms`): Display a wait cursor at the touch point, stepping frames via a timer at ~12 fps (configurable).
-- **Right-click** (after `hold_ms` total from touch-down): Hide the animation, send right button press and release (Pocket PC convention; GTK2 sees button 3), and swallow remaining touch events.
+- **Right-click** (after `hold_ms` total from touch-down): Hide the animation, send right button press and release (Pocket PC convention; GTK2 sees button 3), and swallow remaining touch events. With `hold_button = middle` the hold sends a middle button press and release instead, which pastes the primary selection in a terminal such as havoc.
 - **Lift during animation**: Counts as a tap (left press + release) only if the hold had not yet triggered.
 
 The behaviour is controlled by the `[touch]` section (see `data/picowl.ini.example`):
@@ -263,8 +263,9 @@ The behaviour is controlled by the `[touch]` section (see `data/picowl.ini.examp
 | Key | Default | Range | Meaning |
 |-----|---------|-------|---------|
 | `hold_action` | `right-click` | `right-click`, `none` | Enable right-click on hold (`none` = immediate left press like traditional pointer) |
+| `hold_button` | `right` | `right`, `middle` | Button the hold sends: `right` (BTN_RIGHT) or `middle` (BTN_MIDDLE). Unused when `hold_action = none`. An unknown value is logged and the default is kept |
 | `hold_delay_ms` | 300 | integers | Milliseconds before the hold animation starts |
-| `hold_ms` | 900 | > `hold_delay_ms` | Milliseconds from touch-down to right-click |
+| `hold_ms` | 900 | > `hold_delay_ms` | Milliseconds from touch-down to the click |
 | `slop_px` | 8 | 0..64 | Movement tolerance in pixels; exceeding this cancels hold and triggers drag |
 
 ### Per-App and Per-Layer Overrides
@@ -278,6 +279,10 @@ hold_action = none
 [app.org.example.Viewer]
 hold_ms = 1200
 
+# holding pastes the primary selection in a terminal
+[app.havoc]
+hold_button = middle
+
 [layer.wvkbd]
 hold_action = none
 ```
@@ -287,14 +292,15 @@ Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections (`[app.*]` also take
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `hold_action` | from `[touch]` | `right-click` or `none` |
+| `hold_button` | from `[touch]` | `right` or `middle` |
 | `hold_delay_ms` | from `[touch]` | Milliseconds before animation starts |
-| `hold_ms` | from `[touch]` | Milliseconds to right-click |
+| `hold_ms` | from `[touch]` | Milliseconds to the click |
 | `slop_px` | from `[touch]` | Movement tolerance in pixels |
 | `aspect` | unset | `[app.*]` only: `W:H` for the tiled layout, see below |
 
 Rules:
 - **Inheritance**: Unset keys use the value from `[touch]`, whatever the order of sections in the file.
-- **Bad timings**: If `hold_ms` is not greater than `hold_delay_ms` or `slop_px` is outside 0..64, the rule's three timing keys revert to `[touch]`; its `hold_action` is kept. A bad `hold_action` value is ignored (inherited).
+- **Bad timings**: If `hold_ms` is not greater than `hold_delay_ms` or `slop_px` is outside 0..64, the rule's three timing keys revert to `[touch]`; its `hold_action` and `hold_button` are kept. A bad `hold_action` or `hold_button` value is logged and ignored (inherited).
 - **Matching**: Names match exactly and case-sensitively. No wildcards.
 - **Merging**: A section appearing twice merges into one rule; later keys win.
 - **Scope**: `[app.panel]` and `[layer.panel]` are separate namespaces. An empty `[app.]` or `[layer.]` is logged and ignored.
