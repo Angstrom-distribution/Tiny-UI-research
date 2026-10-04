@@ -208,7 +208,7 @@ Keyboard shortcuts. Format: `<modifiers>+<key> = <action> [command]`.
   - `quit`: exit the compositor.
 - `[command]`: optional shell command for the `spawn` action.
 
-**Built-in defaults** (if no keybindings are defined in the config):
+**Built-in defaults** (always present: bindings from the config are added to them, and a config entry cannot remove one):
 
 | Binding | Action |
 |---------|--------|

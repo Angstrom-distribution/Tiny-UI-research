@@ -32,11 +32,15 @@ color = #101010
 # "<modifiers>+<key> = <action> [command]"
 # key is an xkb keysym name (Tab) or a numeric evdev keycode (code:116).
 # modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, panel, quit.
-# Built-in defaults: code:116 = blank, alt+Tab = cycle, logo+Escape = quit.
+# Built-in defaults (always present, your entries are added to them): code:116 = blank,
+# alt+Tab = cycle, logo+Escape = quit.
 # alt+Tab = cycle
 # alt+F4 = close
 # code:116 = blank
 # logo+Return = spawn foot
+# The iPAQ email button (KEY_MAIL, 155) cycles the output rotation, as in the media player;
+# it does nothing on models without that button.
+code:155 = rotate
 
 [touch]
 # Tap-and-hold gesture detection (default: enabled with right-click behaviour).
