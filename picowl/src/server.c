@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_presentation_time.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
@@ -258,6 +259,9 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 
 	wlr_presentation_create(server->display, server->backend, 2);
 	wlr_viewporter_create(server->display);
+	/* Clients such as grim take the logical output size and position from here and
+	 * otherwise guess a size of zero. */
+	wlr_xdg_output_manager_v1_create(server->display, server->output_layout);
 	wlr_single_pixel_buffer_manager_v1_create(server->display);
 	/* Advertised so clients stop falling back to guessing; picowl has no
 	 * content-dependent policy yet, so the hint is only logged (view.c). */

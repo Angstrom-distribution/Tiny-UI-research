@@ -443,6 +443,7 @@ Picowl advertises and implements (via wlroots 0.19):
 - `wl_output`: output geometry, mode, subpixel, transform.
 - `wp_presentation`: frame timing hints (via wlr_presentation).
 - `wp_viewporter`: scaling and cropping (via wlr_viewporter).
+- `zxdg_output_manager_v1`: the logical position and size of each output, from the output layout (via wlr_xdg_output_v1). Screenshot tools such as grim need it; without it they guess a zero-sized output. With hardware rotation the logical size is the rotated one, as clients see it.
 - `zwp_single_pixel_buffer_v1`: solid-color surfaces (useful for backgrounds).
 - `wp_content_type_manager_v1` (version 1): clients may declare photo, video or game content. picowl only logs the hint of a toplevel at debug level when it maps; nothing acts on it yet.
 
