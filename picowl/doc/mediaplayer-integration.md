@@ -1,6 +1,6 @@
 # Integrating the media player with picowl
 
-This is a handoff plan for the media player work stream. It assumes the player as described in `media-player.md` (two binaries over `libmpcore.a`, the `mp_frontend_ops` contract, `drm/kms_state.c`, the hx4700 overlay planner) and picowl as on branch `picowl` (`README.md`, `doc/buffers.md`, `doc/zero-copy.md`, `doc/power.md`, `doc/cursors.md`).
+This is a handoff plan for the media player work stream. It assumes the player (two binaries over `libmpcore.a`, the `mp_frontend_ops` contract, `drm/kms_state.c`, the hx4700 overlay planner) and picowl as on branch `picowl` (`README.md`, `doc/buffers.md`, `doc/zero-copy.md`, `doc/power.md`, `doc/cursors.md`).
 
 Nothing here has been run on hardware. Items marked **[picowl]** are work for the picowl side; everything else is player work.
 
@@ -51,7 +51,7 @@ Extend `tests/kms_state_selftest.c` with a scripted Wayland event model covering
 - **The player's default:** `--decode-ahead 5` asks for 7 buffers. That is 1.05 MiB at QVGA, but 4.1 MiB on the hx4700, which exceeds the total budget.
 
 Plan:
-- Request `mp_core_want_bufs()` and accept what is granted: `failed(no_memory)` or `failed(too_large)` ends allocation, and `nbufs` reports the count. The core already degrades to rendering fewer frames ahead, with decoded pictures still queuing N deep.
+- Request the buffer count from the core (`mp_core_want_bufs()` in the older player tree; the name is unverified on the player's current master, which has its own bounded decode-ahead queue) and accept what is granted: `failed(no_memory)` or `failed(too_large)` ends allocation, and `nbufs` reports the count. The core already degrades to rendering fewer frames ahead, with decoded pictures still queuing N deep.
 - **[picowl]** Done: the limits are configurable (`[zerocopy] max_buffers_per_client`, `budget_kb`, `total_kb`), with an `app_id`-specific override (`[app.mediaplayer] zerocopy_buffers = 7`). The player must call `set_app_id` before `create_buffer`.
 - On copy-type outputs fewer buffers cost little, because `copied` frees FRONT immediately.
 
@@ -82,16 +82,16 @@ Expected cost: identical bus bytes to `--vo drm`, plus one compositor wakeup and
 ### 2.6 Timing and A/V sync
 
 - Use `wp_presentation` feedback (`presented`: timestamp, refresh, sequence) as the display clock input, as page-flip timestamps are used now. picowl creates `wp_presentation` version 2.
-- None of the drivers has a real vblank, so presentation times come from the kernel's fake-vblank helper, as for the KMS path.
+- mq11xx has a real vblank from the frame interrupt on the h2200: flip events complete at the next vblank (17.59 ms period), and full-frame RGB565 flips are upload-bound at about 28 Hz, while C8 and pixel-doubled flips reach about 56 Hz. The other drivers have none, so their presentation times come from the kernel's fake-vblank helper, as for the KMS path.
 - Don't block on frame callbacks; pace from the audio clock as today, and treat a missing `presented` as discarded (`discarded` event).
 
 ### 2.7 Input
 
-- **Touch** arrives as pointer events. picowl converts touch to pointer and applies the libinput calibration matrix, so coordinates are calibrated and rotated. Path A needs no tslib; the §4.7 tslib work remains for bare DRM only.
+- **Touch** arrives as pointer events. picowl converts touch to pointer and applies the libinput calibration matrix, so coordinates are calibrated and rotated. Path A needs no tslib; the player's tslib touch work remains for bare DRM only.
 - **Tap-and-hold:**
   - picowl turns a hold into `BTN_RIGHT` (picowl `doc/cursors.md`). A right click is the natural "open menu / OSD" gesture. A tap is a `BTN_LEFT` press and release delivered together at lift; a drag starts after 8 px.
   - **[picowl]** Add a per-`app_id` `hold_action` override, so the player can turn hold off if it wants raw long-press timing, for example for seeking.
-- **Keys** arrive as `wl_keyboard` events with an xkb keymap. Map keysyms to the command vocabulary with a keysym column in the existing keymap files (§8.5). picowl consumes its own bindings first (power key = blank, app-cycle key), so don't bind those in the player.
+- **Keys** arrive as `wl_keyboard` events with an xkb keymap. Map keysyms to the command vocabulary with a keysym column in the existing keymap files (the player's existing keymap files). picowl consumes its own bindings first (power key = blank, app-cycle key), so don't bind those in the player.
 - **Bluetooth keyboards** appear as ordinary keyboards through picowl; no inotify needed in this front-end.
 
 ### 2.8 Idle, dimming and blanking
@@ -146,13 +146,14 @@ The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_
 Use the same clip, kernel and rootfs for `--vo drm` (bare console), `--vo wayland` (Path A) and Path B, using the player telemetry plus picowl's driver counters (`mq11xx_copy_stats`, `w100_2d`):
 - **Per-frame VRAM bytes and present time.** Path A full screen must match `--vo drm` within noise on the h2200/h5550/hx4700/h3800.
 - **Composition.** Count frames where picowl composited instead of direct scanout (picowl debug log or `retained` counts). Expect zero in steady full-screen playback.
-- **Drops and idle CPU per frame,** against the acceptance numbers in §10.4.
+- **Drops and idle CPU per frame,** against the player's own acceptance numbers for its bare-DRM path.
 - **RSS of the player plus picowl,** compared with the player plus X11.
 - **Path B:** the handoff time and picowl's restore time, plus overlay-path drops identical to bare DRM.
 
 ## 6. Open questions for the two owners
 
 - Does Path A replace `mediaplayer-x11` once GPE runs on picowl, or does the player keep three front-ends for a while? (player owner)
-- Should picowl prefer hardware rotation or software rotation with client buffer transforms on the MediaQ boards for video? Hardware rotation removes the player's rotate pass but its dither regression in §9.10 still applies. (both; measure with item 3)
-- Should `--vo auto` pick Path B on the hx4700 whenever the planner accepts the stream, given that §12.1 has not decided rotation 0 versus 90 for landscape clips? (player owner)
+- Should picowl prefer hardware rotation or software rotation with client buffer transforms on the MediaQ boards for video? Hardware rotation removes the player's rotate pass, but on the h2200 it regressed with ordered dither at 320 wide (about +2.5% CPU and roughly double the drops, because the physical Bayer phase forces the general dither kernel) and was neutral at 240 wide. That was measured before the player's Bayer-aware kernels, so the figures are stale, and nobody has measured a compositor workload. picowl keeps hardware rotation as the default until the compositor measurements in `doc/rotation-measurement.md` say otherwise. (both; measure with item 3)
+- Should `--vo auto` pick Path B on the hx4700 whenever the planner accepts the stream, given that the player has not decided rotation 0 versus 90 for landscape clips? (player owner)
+- Should picowl take the output transform from the DRM connector's `panel orientation` property instead of the `[output]` config? On the h3900 (kernel #276) it reads Right Side Up. (picowl; not implemented)
 - Exact `copied` timing relative to the kernel copy on each copy-type driver (picowl `doc/zero-copy.md` hardware checklist). Both Path A's single-buffer win and its correctness depend on it. (picowl, on hardware)
