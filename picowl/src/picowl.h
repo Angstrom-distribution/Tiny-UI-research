@@ -140,6 +140,10 @@ struct pw_app_rule {
 	int aspect_w, aspect_h;
 };
 
+/* Most namespaces [layout] pan takes, and the longest one. */
+#define PW_PAN_MAX 8
+#define PW_PAN_NAME_MAX 64
+
 struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
@@ -213,6 +217,12 @@ struct pw_config {
 	 * n_stack is 2 or 0: a list which is not two distinct names is dropped. */
 	char *stack[2];
 	int n_stack;
+
+	/* [layout] pan: namespaces of the bottom-anchored layer surfaces (the
+	 * on-screen keyboard) which move a tiled stack up instead of shrinking
+	 * it. Default "wvkbd"; n_pan is 0 when panning is off. */
+	char *pan[PW_PAN_MAX];
+	int n_pan;
 };
 
 /*
@@ -223,6 +233,9 @@ struct pw_config {
  * transforms, idle off, default keybindings, dark background). Never NULL.
  * Called by main() and by pw_config_load() as the starting point. */
 struct pw_config *pw_config_default(void);
+
+/* True if namespace is one of the [layout] pan names (exact match). */
+bool pw_config_pan_match(const struct pw_config *config, const char *namespace);
 
 /* Parse the INI file at path on top of defaults. A missing file is not an
  * error (returns defaults); a malformed line is logged and skipped. path may

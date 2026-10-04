@@ -233,6 +233,75 @@ static void parse_layout_stack(struct pw_config *c, const char *val)
 	free(copy);
 }
 
+/* [layout] pan = namespace, namespace. An empty value turns panning off. A
+ * list with an empty name between commas, a name with whitespace or control
+ * characters in it, an over-long name or too many names is rejected as a
+ * whole and the previous list stays: a half-read list would pan some
+ * keyboards and not others without saying why. Layer namespaces are free-form
+ * strings, so the only structure the list can rely on is the comma. */
+static void parse_layout_pan(struct pw_config *c, const char *val)
+{
+	char *names[PW_PAN_MAX];
+	int n = 0;
+	const char *p = val;
+	bool bad = false;
+
+	while (*p && isspace((unsigned char)*p))
+		p++;
+	if (*p) {
+		for (;;) {
+			const char *end = strchr(p, ',');
+			size_t len = end ? (size_t)(end - p) : strlen(p);
+			const char *q = p;
+			size_t l = len;
+
+			while (l > 0 && isspace((unsigned char)q[0])) { q++; l--; }
+			while (l > 0 && isspace((unsigned char)q[l - 1])) l--;
+			if (l == 0 || l >= PW_PAN_NAME_MAX || n >= PW_PAN_MAX) {
+				bad = true;
+				break;
+			}
+			for (size_t i = 0; i < l; i++)
+				if (isspace((unsigned char)q[i]) || iscntrl((unsigned char)q[i]))
+					bad = true;
+			if (bad)
+				break;
+			names[n] = strndup(q, l);
+			if (!names[n]) {
+				bad = true;
+				break;
+			}
+			n++;
+			if (!end)
+				break;
+			p = end + 1;
+		}
+	}
+	if (bad) {
+		pw_log(WLR_ERROR, "[layout] pan: needs comma separated layer namespaces without "
+			"spaces inside (at most %d, each shorter than %d), keeping the previous value",
+			PW_PAN_MAX, PW_PAN_NAME_MAX);
+		while (n > 0)
+			free(names[--n]);
+		return;
+	}
+	for (int i = 0; i < c->n_pan; i++)
+		free(c->pan[i]);
+	for (int i = 0; i < n; i++)
+		c->pan[i] = names[i];
+	c->n_pan = n;
+}
+
+bool pw_config_pan_match(const struct pw_config *config, const char *namespace)
+{
+	if (!config || !namespace)
+		return false;
+	for (int i = 0; i < config->n_pan; i++)
+		if (strcmp(config->pan[i], namespace) == 0)
+			return true;
+	return false;
+}
+
 /* Parse boolean value and return success. On invalid value, return false and keep the previous value.
  * This version logs errors. For use in config parsing where we want to report problems. */
 static bool parse_bool_log(const char *str, const char *key, bool *out)
@@ -378,6 +447,8 @@ struct pw_config *pw_config_default(void)
 	c->pointercal = strdup("/etc/pointercal");
 	wl_list_init(&c->app_rules);
 	c->osk_restart = true;
+	c->pan[0] = strdup("wvkbd");
+	c->n_pan = c->pan[0] ? 1 : 0;
 	c->hold_animation = NULL;
 	c->cursor_fill = 0x2050c0;
 	c->cursor_outline = 0xffffff;
@@ -762,6 +833,8 @@ struct pw_config *pw_config_load(const char *path)
 		} else if (strcmp(section, "layout") == 0) {
 			if (strcmp(key, "stack") == 0) {
 				parse_layout_stack(c, val);
+			} else if (strcmp(key, "pan") == 0) {
+				parse_layout_pan(c, val);
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [layout]: %s", key);
 			}
@@ -1084,6 +1157,8 @@ void pw_config_free(struct pw_config *config)
 	free(config->lease_allow);
 	free(config->stack[0]);
 	free(config->stack[1]);
+	for (int i = 0; i < config->n_pan; i++)
+		free(config->pan[i]);
 	free(config->pointercal);
 
 	struct pw_output_transform *t, *t_tmp;

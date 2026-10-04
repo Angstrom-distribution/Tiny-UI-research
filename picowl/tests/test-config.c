@@ -867,6 +867,54 @@ static int test_layout_config(void)
 	assert(strcmp(c->stack[0], "a") == 0 && strcmp(c->stack[1], "b") == 0);
 	pw_config_free(c);
 
+	/* [layout] pan: the keyboard by default, a list, or nothing */
+	c = pw_config_default();
+	assert(c != NULL && c->n_pan == 1);
+	assert(pw_config_pan_match(c, "wvkbd"));
+	assert(!pw_config_pan_match(c, "wvkbd2") && !pw_config_pan_match(c, "wvk"));
+	assert(!pw_config_pan_match(c, "WVKBD") && !pw_config_pan_match(c, ""));
+	assert(!pw_config_pan_match(c, NULL) && !pw_config_pan_match(NULL, "wvkbd"));
+	pw_config_free(c);
+
+	struct { const char *text; int n; const char *first; const char *last; } pan_ok[] = {
+		{ "[layout]\npan = squeekboard\n", 1, "squeekboard", "squeekboard" },
+		{ "[layout]\npan =  wvkbd , onboard ,third\n", 3, "wvkbd", "third" },
+		{ "[layout]\npan =\n", 0, NULL, NULL },
+		{ "[layout]\npan =   \n", 0, NULL, NULL },
+		/* a later list replaces an earlier one */
+		{ "[layout]\npan = a, b\n[layout]\npan = c\n", 1, "c", "c" },
+		{ "[layout]\npan = a, b\n[layout]\npan =\n", 0, NULL, NULL },
+		/* a rejected value keeps what was there */
+		{ "[layout]\npan = a\npan = x,,y\n", 1, "a", "a" },
+		{ "[layout]\npan = x y\n", 1, "wvkbd", "wvkbd" },
+		{ "[layout]\npan = a,\n", 1, "wvkbd", "wvkbd" },
+		{ "[layout]\npan = ,a\n", 1, "wvkbd", "wvkbd" },
+		{ "[layout]\npan = ,\n", 1, "wvkbd", "wvkbd" },
+		{ "[layout]\npan = a,b,c,d,e,f,g,h,i\n", 1, "wvkbd", "wvkbd" },
+		{ "[layout]\npan = a,b,c,d,e,f,g,h\n", 8, "a", "h" },
+		{ "[layout]\npan = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+			1, "wvkbd", "wvkbd" },
+	};
+	for (unsigned i = 0; i < sizeof(pan_ok) / sizeof(pan_ok[0]); i++) {
+		path = write_tmp_ini("picowl-test-layout.ini", pan_ok[i].text);
+		c = pw_config_load(path);
+		remove(path);
+		if (!c || c->n_pan != pan_ok[i].n)
+			fprintf(stderr, "pan case %u: n_pan %d expected %d\n", i,
+				c ? c->n_pan : -1, pan_ok[i].n);
+		assert(c != NULL && c->n_pan == pan_ok[i].n);
+		if (pan_ok[i].n) {
+			assert(strcmp(c->pan[0], pan_ok[i].first) == 0);
+			assert(strcmp(c->pan[c->n_pan - 1], pan_ok[i].last) == 0);
+		}
+		pw_config_free(c);
+	}
+	path = write_tmp_ini("picowl-test-layout.ini", "[layout]\npan = a, b\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c->n_pan == 2 && pw_config_pan_match(c, "b") && !pw_config_pan_match(c, "wvkbd"));
+	pw_config_free(c);
+
 	printf("✓ test_layout_config\n");
 	return 0;
 }
