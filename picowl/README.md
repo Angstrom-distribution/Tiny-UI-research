@@ -395,7 +395,7 @@ DRM paths (rotation, copy-type, swapchain, direct scanout) cannot run in the bui
 
 See the hardware-only checklist in `doc/zero-copy.md`.
 
-## OpenEmbedded / Yocto
+## OpenEmbedded
 
 For embedded systems using OpenEmbedded (wrynose/blacksail releases), picowl includes pre-configured bitbake recipes. See `oe/README.md` for adding the layer, configuring the machine/distro, and building.
 
