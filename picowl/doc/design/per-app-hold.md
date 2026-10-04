@@ -35,7 +35,7 @@ hold_action = none
 [app.org.example.Viewer] # dots in app_id are fine: everything after "app."
 hold_ms = 1200           # other keys inherited from [touch]
 
-[layer.osk]              # zwlr_layer_surface_v1 namespace, exact
+[layer.wvkbd]            # zwlr_layer_surface_v1 namespace, exact (wvkbd uses "wvkbd")
 slop_px = 16
 ```
 

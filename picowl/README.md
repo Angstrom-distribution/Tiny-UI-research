@@ -180,8 +180,10 @@ Example:
 ```ini
 [autostart]
 cmd = picowl-panel
-cmd = picowl-osk
+cmd = wvkbd-mobintl --hidden --non-exclusive
 ```
+
+wvkbd (the on-screen keyboard) is shown and hidden with signals, e.g. a keybinding `code:<key> = spawn pkill -RTMIN wvkbd`. Supervision and an `osk` action are planned in [doc/design/osk.md](doc/design/osk.md).
 
 ### [keybindings] section
 
@@ -248,8 +250,8 @@ hold_action = none
 [app.org.example.Viewer]
 hold_ms = 1200
 
-[layer.osk]
-slop_px = 16
+[layer.wvkbd]
+hold_action = none
 ```
 
 Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections (`[app.*]` also takes the buffer keys above):

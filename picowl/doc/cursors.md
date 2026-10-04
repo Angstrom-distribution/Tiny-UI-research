@@ -76,8 +76,8 @@ You can configure different tap-and-hold behaviour for specific apps and layer-s
 [app.mediaplayer]
 hold_action = none
 
-[layer.osk]
-hold_delay_ms = 500
+[layer.wvkbd]
+hold_action = none
 ```
 
 All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` is kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.

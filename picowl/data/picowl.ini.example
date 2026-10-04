@@ -26,7 +26,7 @@ color = #101010
 [autostart]
 # One shell command per line, run once at startup.
 # cmd = picowl-panel
-# cmd = picowl-osk
+# cmd = wvkbd-mobintl --hidden --non-exclusive
 
 [keybindings]
 # "<modifiers>+<key> = <action> [command]"
