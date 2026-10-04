@@ -16,6 +16,7 @@
 #include <string.h>
 #include <linux/input-event-codes.h>
 #include <wlr/types/wlr_input_device.h>
+#include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_compositor.h>
@@ -52,6 +53,8 @@ struct pw_input_state {
 	uint8_t swallowed[PW_KEY_MAX / 8]; /* keycodes whose release is dropped */
 	uint32_t btn_swallowed;        /* bit n: release of BTN_LEFT+n is dropped */
 	struct xkb_keymap *keymap;     /* shared by all physical keyboards */
+	struct wlr_keyboard fallback_kb; /* keymap holder, never produces events */
+	bool fallback_kb_up;
 	bool frame_pending;            /* pointer events sent since last frame */
 	struct pw_grab grab;           /* the touch-grabbed surface and its origin */
 	struct pw_touchhold th;        /* tap-and-hold state machine */
@@ -117,8 +120,11 @@ static bool activity(struct pw_server *server)
 static void update_capabilities(struct pw_server *server)
 {
 	uint32_t caps = 0;
-	if (!wl_list_empty(&server->keyboards))
-		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+	/* Always: the fallback keyboard keeps a keymap on the seat, and a client
+	 * that binds wl_keyboard only while the capability is there (the media
+	 * player, at startup) must get it before any device exists or after the
+	 * last one went away. */
+	caps |= WL_SEAT_CAPABILITY_KEYBOARD;
 	if (st.n_pointers > 0 || st.n_touch > 0)
 		caps |= WL_SEAT_CAPABILITY_POINTER;
 	wlr_seat_set_capabilities(server->seat, caps);
@@ -360,16 +366,36 @@ static void keyboard_handle_key(struct wl_listener *l, void *data)
 	wlr_seat_keyboard_notify_key(server->seat, ev->time_msec, ev->keycode, ev->state);
 }
 
+/* wlroots sends a new wl_keyboard the keymap of the seat's active keyboard
+ * and NO_KEYMAP when there is none, and a client with no keymap ignores every
+ * key. The seat drops its keyboard when that one is destroyed (the on-screen
+ * keyboard's virtual keyboard, an unplugged device), so move it to the
+ * fallback, which has the shared keymap and no key or modifier state. The next
+ * key event of a real keyboard makes that one active again. */
+static const struct wlr_keyboard_impl fallback_kb_impl = {
+	.name = "picowl-fallback",
+};
+
+static void fallback_keyboard_activate(struct pw_server *server)
+{
+	if (st.fallback_kb_up)
+		wlr_seat_set_keyboard(server->seat, &st.fallback_kb);
+}
+
 static void keyboard_handle_destroy(struct wl_listener *l, void *data)
 {
 	(void)data;
 	struct pw_keyboard *k = wl_container_of(l, k, destroy);
 	struct pw_server *server = k->server;
+	/* This listener runs before the seat's own, which would leave NULL. */
+	bool active = wlr_seat_get_keyboard(server->seat) == k->wlr_keyboard;
 	wl_list_remove(&k->modifiers.link);
 	wl_list_remove(&k->key.link);
 	wl_list_remove(&k->destroy.link);
 	wl_list_remove(&k->link);
 	free(k);
+	if (active)
+		fallback_keyboard_activate(server);
 	update_capabilities(server);
 }
 
@@ -1116,6 +1142,14 @@ bool pw_input_init(struct pw_server *server)
 	}
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
+	wlr_keyboard_init(&st.fallback_kb, &fallback_kb_impl, "picowl-fallback");
+	st.fallback_kb_up = true;
+	if (st.keymap && !wlr_keyboard_set_keymap(&st.fallback_kb, st.keymap))
+		pw_log(WLR_ERROR, "failed to set keymap on the fallback keyboard");
+	wlr_keyboard_set_repeat_info(&st.fallback_kb, 25, 600);
+	wlr_seat_set_keyboard(server->seat, &st.fallback_kb);
+	update_capabilities(server);
+
 	pw_im_init(server);
 	pw_tablet_init(server);
 
@@ -1194,4 +1228,9 @@ void pw_input_finish(struct pw_server *server)
 	wl_list_remove(&server->request_set_cursor.link);
 	wl_list_remove(&server->request_set_selection.link);
 	wl_list_remove(&server->request_set_primary_selection.link);
+	if (st.fallback_kb_up) {
+		/* The seat outlives this and drops its listeners on the destroy. */
+		wlr_keyboard_finish(&st.fallback_kb);
+		st.fallback_kb_up = false;
+	}
 }
