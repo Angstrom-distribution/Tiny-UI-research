@@ -37,11 +37,13 @@ color = #101010
 # tap on a button pops a slider row out under the bar (it covers windows, it
 # does not move them) and closes it again 3 s after the last touch. It is hidden
 # while an app has the focus, and with it the row, unless [zerocopy]
-# panel_autohide is false. Options: --height N (18..80, default 20), --bottom,
+# panel_autohide is false. Options: --height N (18..80, default 18), --bottom,
 # --font PATH and --font-size PX (the text is rasterized from a TrueType font,
 # by default the first Liberation Sans or DejaVu Sans file that exists, else a
 # built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
-# translucent) and --bar-alpha N (default 255).
+# translucent), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
+# (default auto: LCD text in the order [output] subpixel advertises, in
+# grayscale where the ground is translucent or the stripes do not run across).
 # cmd = picowl-panel
 # cmd = picowl-panel --bottom --height 24 --popup-alpha 255
 

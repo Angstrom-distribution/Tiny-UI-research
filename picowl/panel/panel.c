@@ -47,6 +47,7 @@
 #define BATTERY_POLL_S 30
 #define MAX_DAMAGE 8
 #define MAX_INJECT 64
+#define MAX_OUTPUTS 8
 
 /* Widgets to redraw. W_ROW_VALUE is the track, thumb and value of the open
  * row, W_ROW the whole row. */
@@ -62,6 +63,7 @@ struct panel {
 	const char *font_path;
 	int font_px;
 	int bar_alpha, popup_alpha;
+	enum pl_subopt subopt;
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
 
@@ -75,6 +77,14 @@ struct panel {
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *ls;
 	int n_outputs;
+	/* what each output says about its stripes, and the one the bar is on */
+	struct out_info {
+		struct wl_output *wl;
+		int subpixel, transform;
+	} outs[MAX_OUTPUTS];
+	struct wl_output *surf_out;
+	enum pl_sub sub;
+	bool assets_ready;
 	bool shm_565;
 	bool configured, closed, need_buffer, first;
 	int cfg_w, cfg_h;
@@ -778,6 +788,69 @@ static const struct wl_seat_listener seat_listener = { seat_caps, seat_name };
 
 /* ---- registry, shm, layer surface ---- */
 
+/* The text mode follows the output the bar is on: its subpixel layout and
+ * transform come in wl_output.geometry, which is sent again when the output is
+ * rotated. Without a surface enter (yet) the first output stands in. */
+static void sub_update(struct panel *p)
+{
+	const struct out_info *oi = NULL;
+
+	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
+		if (p->outs[i].wl && (!oi || p->outs[i].wl == p->surf_out))
+			oi = &p->outs[i];
+	enum pl_sub s = oi ? pl_subpixel_resolve(p->subopt, oi->subpixel, oi->transform) :
+		pl_subpixel_resolve(p->subopt, 0, 0);
+
+	if (s == p->sub)
+		return;
+	p->sub = s;
+	if (p->assets_ready) {
+		p->assets.sub = s;
+		p->dirty |= W_CLOCK | W_BATTERY | W_ROW;
+	}
+}
+
+static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw,
+	int32_t ph, int32_t subpixel, const char *make, const char *model, int32_t transform)
+{
+	struct panel *p = d;
+	(void)x; (void)y; (void)pw; (void)ph; (void)make; (void)model;
+
+	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
+		if (p->outs[i].wl == o) {
+			p->outs[i].subpixel = subpixel;
+			p->outs[i].transform = transform;
+		}
+	sub_update(p);
+}
+static void out_mode(void *d, struct wl_output *o, uint32_t f, int32_t w, int32_t h, int32_t r)
+{
+	(void)d; (void)o; (void)f; (void)w; (void)h; (void)r;
+}
+static void out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
+static void out_scale(void *d, struct wl_output *o, int32_t f) { (void)d; (void)o; (void)f; }
+static const struct wl_output_listener out_listener = {
+	.geometry = out_geometry, .mode = out_mode, .done = out_done, .scale = out_scale,
+};
+
+static void surf_enter(void *d, struct wl_surface *s, struct wl_output *o)
+{
+	struct panel *p = d;
+	(void)s;
+	p->surf_out = o;
+	sub_update(p);
+}
+static void surf_leave(void *d, struct wl_surface *s, struct wl_output *o)
+{
+	(void)d; (void)s; (void)o;
+}
+static void surf_noop2(void *d, struct wl_surface *s, int32_t v) { (void)d; (void)s; (void)v; }
+static void surf_noop3(void *d, struct wl_surface *s, uint32_t v) { (void)d; (void)s; (void)v; }
+static const struct wl_surface_listener surf_listener = {
+	.enter = surf_enter, .leave = surf_leave,
+	.preferred_buffer_scale = surf_noop2, .preferred_buffer_transform = surf_noop3,
+};
+
 static void shm_format(void *d, struct wl_shm *shm, uint32_t format)
 {
 	struct panel *p = d;
@@ -806,6 +879,12 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 		p->layer_shell = wl_registry_bind(r, name,
 			&zwlr_layer_shell_v1_interface, 1);
 	} else if (!strcmp(iface, wl_output_interface.name)) {
+		if (p->n_outputs < MAX_OUTPUTS) {
+			struct wl_output *o = wl_registry_bind(r, name, &wl_output_interface,
+				ver < 2 ? ver : 2);
+			p->outs[p->n_outputs].wl = o;
+			wl_output_add_listener(o, &out_listener, p);
+		}
 		p->n_outputs++;
 	}
 }
@@ -1003,6 +1082,8 @@ static void dump_state(const struct panel *p, const char *why)
 		p->font_ttf ? p->assets.font.face[0].px : p->assets.font.scale[0] * 7,
 		p->font_ttf ? p->assets.font.face[1].px : p->assets.font.scale[1] * 7,
 		p->bar_alpha, p->popup_alpha);
+	printf("text subpixel=%s\n", p->assets.sub == PL_SUB_RGB ? "rgb" :
+		p->assets.sub == PL_SUB_BGR ? "bgr" : "none");
 	/* What the compositor is told: the exclusive zone is the bar and never
 	 * the row; the input region is the bar and the row. */
 	struct pl_rect in = pl_input_rect(l, p->canvas.w, p->canvas.h);
@@ -1054,6 +1135,11 @@ static void usage(FILE *out)
 		"  --bar-alpha N       opacity of the bar, 0..255 (default %d)\n"
 		"  --popup-alpha N     opacity of the slider row, 0..255 (default %d);\n"
 		"                      below 255 the surface needs ARGB8888 while the row is open\n"
+		"  --subpixel MODE     auto, rgb, bgr or none (default auto): the order of the\n"
+		"                      colour stripes for subpixel text. auto uses what the\n"
+		"                      compositor says about the output, and only when the\n"
+		"                      stripes run across the bar; rgb and bgr force one. Text\n"
+		"                      on a translucent ground is always grayscale\n"
 		"  --dump-state        print the widget values and geometry after the first\n"
 		"                      frame and exit (for tests)\n"
 		"  --watch             test only: like --dump-state, and print the state again\n"
@@ -1112,6 +1198,20 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				p->bar_alpha = pl_clamp_alpha(v);
 			else
 				p->popup_alpha = pl_clamp_alpha(v);
+		} else if (!strcmp(a, "--subpixel") && i + 1 < argc) {
+			const char *v = argv[++i];
+			if (!strcmp(v, "auto"))
+				p->subopt = PL_SUBOPT_AUTO;
+			else if (!strcmp(v, "rgb"))
+				p->subopt = PL_SUBOPT_RGB;
+			else if (!strcmp(v, "bgr"))
+				p->subopt = PL_SUBOPT_BGR;
+			else if (!strcmp(v, "none"))
+				p->subopt = PL_SUBOPT_NONE;
+			else {
+				say("--subpixel: '%s' is not auto, rgb, bgr or none", v);
+				return -1;
+			}
 		} else if (!strcmp(a, "--font") && i + 1 < argc) {
 			p->font_path = argv[++i];
 		} else if (!strcmp(a, "--inject") && i + 1 < argc) {
@@ -1359,6 +1459,8 @@ int main(int argc, char **argv)
 		say("cannot use the font '%s', using the built-in bitmap font", p.font_path);
 	else if (!p.font_ttf)
 		say("no usable font file found, using the built-in bitmap font");
+	p.assets_ready = true;
+	p.assets.sub = p.sub;
 
 	p.st.hour = p.st.min = -1;
 	clock_arm(&p);
@@ -1384,6 +1486,7 @@ int main(int argc, char **argv)
 	p.surface = wl_compositor_create_surface(p.compositor);
 	p.ls = zwlr_layer_shell_v1_get_layer_surface(p.layer_shell, p.surface, NULL,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
+	wl_surface_add_listener(p.surface, &surf_listener, &p);
 	zwlr_layer_surface_v1_add_listener(p.ls, &ls_listener, &p);
 	p.req_h = p.height;
 	zwlr_layer_surface_v1_set_size(p.ls, 0, p.height);

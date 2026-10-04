@@ -249,7 +249,7 @@ test('subpixel', executable('test-subpixel', 'test-subpixel.c', '../src/subpixel
 # drawing and sysfs access.
 test('panel', executable('test-panel', 'test-panel.c',
   link_with: pwpanel_lib, dependencies: libm,
-  include_directories: include_directories('../panel')))
+  include_directories: include_directories('../panel', '../src')))
 
 # picowl-panel against headless picowl. pw-fake-ctl is an alsa-lib control
 # plugin that stands in for a sound card (no kernel driver needed), and

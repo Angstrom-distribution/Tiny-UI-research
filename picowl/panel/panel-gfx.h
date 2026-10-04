@@ -2,7 +2,8 @@
  * panel-gfx.h - the pixel layer of picowl-panel: canvases in RGB565, XRGB8888
  * and premultiplied ARGB8888, gamma-aware blending, anti-aliased coverage
  * masks built from signed distance functions, and text from a TrueType font
- * (stb_truetype) with the 5x7 bitmap font as the fallback.
+ * (stb_truetype), in grayscale or with LCD subpixel coverage, with the 5x7
+ * bitmap font as the fallback.
  *
  * Everything that rasterizes (masks, glyphs) allocates and runs when the panel
  * starts or its layout changes. Drawing (fill, blit, text) only blends masks
@@ -37,6 +38,12 @@ uint32_t pl_pixel(const struct pl_canvas *c, uint32_t rgb, int alpha);
 
 /* Replaces the pixels, alpha included. */
 void pl_fill(const struct pl_canvas *c, struct pl_rect r, uint32_t rgb, int alpha);
+
+/* src (0xRRGGBB) over dst, an opaque pixel (alpha 255), with a coverage for
+ * each channel, blended in linear light; 0xFFRRGGBB. The three coverages are
+ * what a subpixel-rendered glyph has under the red, green and blue stripes of
+ * one pixel. */
+uint32_t pl_over_lcd(uint32_t dst, uint32_t src_rgb, int ar, int ag, int ab);
 
 /* A coverage mask: 8 bits per pixel, 255 is inside. */
 struct pl_mask {
@@ -74,10 +81,41 @@ float pl_sd_arc(float px, float py, float cx, float cy, float r, float t, float 
 
 #define PL_FACES 2		/* 0: bar text, 1: the value in the slider row */
 
+/* Colour stripes of the panel along the horizontal axis, left to right. */
+enum pl_sub { PL_SUB_NONE, PL_SUB_RGB, PL_SUB_BGR };
+
+/* --subpixel */
+enum pl_subopt { PL_SUBOPT_AUTO, PL_SUBOPT_RGB, PL_SUBOPT_BGR, PL_SUBOPT_NONE };
+
+/* The text mode for an option, wl_output.subpixel of the output and the
+ * wl_output.transform that goes with it. Automatic uses the layout the
+ * compositor advertises, in the frame of the buffer; a forced order is taken
+ * as it is. */
+enum pl_sub pl_subpixel_resolve(enum pl_subopt opt, int wl_subpixel, int wl_transform);
+
+/* Subpixel text needs to know the colour under it: only an opaque ground
+ * qualifies, anything else is drawn in grayscale. */
+enum pl_sub pl_text_sub(enum pl_sub sub, int ground_alpha);
+
+/* The FIR filter that spreads a coverage over the neighbouring subpixels so
+ * that the colour fringes are not harsher than the sharpness is worth. The
+ * weights add up to 256, so the total coverage of a glyph is kept. */
+#define PL_LCD_TAPS 5
+extern const int pl_lcd_weights[PL_LCD_TAPS];
+
+/* Filters n coverages, one per subpixel and left to right, into n + 4: the
+ * filter reaches two subpixels past each end. */
+void pl_lcd_filter(const uint8_t *in, int n, uint8_t *out);
+
 struct pl_glyph {
 	struct pl_mask m;
 	int xoff, yoff;		/* of the mask from the pen, baseline at yoff 0 */
 	int adv;
+	/* The same glyph for subpixel text: three coverages per pixel, the
+	 * leftmost subpixel first (so m.w is three times the width in pixels),
+	 * and the x offset in whole pixels. */
+	struct pl_mask lcd;
+	int lcd_xoff;
 };
 
 #define PL_FONT_CHARS "0123456789:%-AC "
@@ -108,8 +146,19 @@ void pl_font_free(struct pl_font *f);
 
 int pl_font_text_w(const struct pl_font *f, int face, const char *s);
 
-/* Draws s with its digits centred vertically in the band y..y+h. */
+/* Blends rgb with a mask of three coverages per pixel (see pl_glyph.lcd), the
+ * leftmost subpixel being red for PL_SUB_RGB and blue for PL_SUB_BGR. The
+ * canvas must be opaque where it draws. */
+void pl_blit_lcd(const struct pl_canvas *c, const struct pl_mask *m, int x, int y,
+	uint32_t rgb, enum pl_sub sub);
+
+/* Draws s with its digits centred vertically in the band y..y+h. The pen x and
+ * the baseline are whole pixels, so equal strings are equal. sub is what
+ * pl_text_sub allowed for the ground. */
 void pl_font_draw(const struct pl_canvas *c, const struct pl_font *f, int face,
-	int x, int y, int h, const char *s, uint32_t rgb);
+	int x, int y, int h, const char *s, uint32_t rgb, enum pl_sub sub);
+
+/* Where the baseline of a face goes for text centred in the band y..y+h. */
+int pl_font_baseline(const struct pl_font *f, int face, int y, int h);
 
 #endif

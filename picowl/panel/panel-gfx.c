@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "panel-gfx.h"
+#include "subpixel.h"
 
 /* ---- colour ---- */
 
@@ -77,6 +78,25 @@ uint32_t pl_over(uint32_t dst, uint32_t src, int a)
 		out |= (uint32_t)mul255(lin_srgb[lin], ao) << sh;
 	}
 	return out;
+}
+
+static int over_chan(int s, int d, int a)
+{
+	if (a <= 0)
+		return d;
+	if (a >= 255)
+		return s;
+	return lin_srgb[(srgb_lin[s] * a + srgb_lin[d] * (255 - a) + 127) / 255];
+}
+
+uint32_t pl_over_lcd(uint32_t dst, uint32_t src, int ar, int ag, int ab)
+{
+	init_tables();
+	int r = over_chan((src >> 16) & 0xff, (dst >> 16) & 0xff, ar);
+	int g = over_chan((src >> 8) & 0xff, (dst >> 8) & 0xff, ag);
+	int b = over_chan(src & 0xff, dst & 0xff, ab);
+
+	return 0xff000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
 }
 
 static uint32_t pack565(uint32_t argb)
@@ -204,6 +224,77 @@ void pl_blit(const struct pl_canvas *c, const struct pl_mask *m, int x, int y,
 			px_store(c, p, pl_over(px_load(c, p), rgb, a));
 		}
 	}
+}
+
+void pl_blit_lcd(const struct pl_canvas *c, const struct pl_mask *m, int x, int y,
+	uint32_t rgb, enum pl_sub sub)
+{
+	int pw = m->w / 3, x0, y0, x1, y1;
+	int bpp = c->fmt == PL_FMT_RGB565 ? 2 : 4;
+
+	if (!m->a || sub == PL_SUB_NONE ||
+			!clip_rect(c, (struct pl_rect){ x, y, pw, m->h }, NULL, &x0, &y0, &x1, &y1))
+		return;
+	for (int py = y0; py < y1; py++) {
+		const uint8_t *mr = m->a + (size_t)(py - y) * m->w;
+		uint8_t *row = c->data + (size_t)py * c->stride;
+		for (int px = x0; px < x1; px++) {
+			const uint8_t *cv = mr + 3 * (px - x);
+			if (!(cv[0] | cv[1] | cv[2]))
+				continue;
+			uint8_t *p = row + (size_t)px * bpp;
+			int ar = sub == PL_SUB_RGB ? cv[0] : cv[2], ab = sub == PL_SUB_RGB ? cv[2] : cv[0];
+			/* Blended in 8 bits and packed afterwards: 565 has no room to
+			 * blend in. */
+			px_store(c, p, pl_over_lcd(px_load(c, p), rgb, ar, cv[1], ab));
+		}
+	}
+}
+
+/* Wider than FreeType's default (8 77 86 77 8): on a dark ground the light
+ * text's colour fringes of that one are saturated blue and orange at 12 to 15
+ * px, and this one trades a little of the edge for calmer ones. */
+const int pl_lcd_weights[PL_LCD_TAPS] = { 0x0E, 0x3D, 0x6A, 0x3D, 0x0E };
+
+void pl_lcd_filter(const uint8_t *in, int n, uint8_t *out)
+{
+	for (int i = 0; i < n + PL_LCD_TAPS - 1; i++) {
+		int sum = 0;
+		for (int k = 0; k < PL_LCD_TAPS; k++) {
+			int j = i - k;
+			if (j >= 0 && j < n)
+				sum += pl_lcd_weights[k] * in[j];
+		}
+		sum = (sum + 128) >> 8;
+		out[i] = (uint8_t)(sum > 255 ? 255 : sum);
+	}
+}
+
+enum pl_sub pl_subpixel_resolve(enum pl_subopt opt, int wl_subpixel, int wl_transform)
+{
+	switch (opt) {
+	case PL_SUBOPT_RGB:
+		return PL_SUB_RGB;
+	case PL_SUBOPT_BGR:
+		return PL_SUB_BGR;
+	case PL_SUBOPT_NONE:
+		return PL_SUB_NONE;
+	default:
+		break;
+	}
+	switch (pw_subpixel_stripes(wl_subpixel, wl_transform)) {
+	case PW_STRIPES_RGB:
+		return PL_SUB_RGB;
+	case PW_STRIPES_BGR:
+		return PL_SUB_BGR;
+	default:
+		return PL_SUB_NONE;
+	}
+}
+
+enum pl_sub pl_text_sub(enum pl_sub sub, int ground_alpha)
+{
+	return ground_alpha >= 255 ? sub : PL_SUB_NONE;
 }
 
 /* ---- masks ---- */

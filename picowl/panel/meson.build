@@ -13,7 +13,9 @@ pwpanel_stb = static_library('pwpanel-stb', 'panel-stb.c',
 libm = cc.find_library('m', required: false)
 pwpanel_lib = static_library('pwpanel',
   'panel-logic.c', 'panel-gfx.c', 'panel-font.c', 'panel-draw.c', 'panel-sys.c',
-  link_with: pwpanel_stb, dependencies: libm)
+  '../src/subpixel.c',
+  link_with: pwpanel_stb, dependencies: libm,
+  include_directories: include_directories('../src'))
 
 # The program needs libwayland-client and alsa-lib, not wlroots. The protocol
 # code is private to it.

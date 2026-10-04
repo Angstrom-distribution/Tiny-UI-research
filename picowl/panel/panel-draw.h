@@ -36,6 +36,8 @@
 struct pl_assets {
 	struct pl_font font;
 	int bar_alpha, popup_alpha;
+	/* Order of the colour stripes under the text, where its ground is opaque. */
+	enum pl_sub sub;
 
 	/* What the masks were built for. */
 	int key[9];

@@ -14,6 +14,7 @@
 #include "panel-gfx.h"
 #include "panel-logic.h"
 #include "panel-sys.h"
+#include "subpixel.h"
 
 static int test_count, fail_count;
 
@@ -1247,11 +1248,11 @@ static void test_draw(void)
 	pl_font_load(&f, NOFONT, 12, 11);
 	canvas_init(&b, 40, 20, PL_FMT_RGB565);
 	pl_fill(&b.c, (struct pl_rect){ 0, 0, 40, 20 }, 0x000000, 255);
-	pl_font_draw(&b.c, &f, 0, -30, -3, 20, "12:34 %", 0xffffff);
-	pl_font_draw(&b.c, &f, 0, 30, 10, 20, "88", 0xffffff);
+	pl_font_draw(&b.c, &f, 0, -30, -3, 20, "12:34 %", 0xffffff, PL_SUB_NONE);
+	pl_font_draw(&b.c, &f, 0, 30, 10, 20, "88", 0xffffff, PL_SUB_NONE);
 	CHECK(guards_intact(&b), "text clips to the canvas");
 	pl_fill(&b.c, (struct pl_rect){ 0, 0, 40, 20 }, 0x000000, 255);
-	pl_font_draw(&b.c, &f, 0, 4, 0, 20, "1", 0xffffff);
+	pl_font_draw(&b.c, &f, 0, 4, 0, 20, "1", 0xffffff, PL_SUB_NONE);
 	/* The 1 at scale 2, 14 px high in a band of 20: the top pixel is column 2 of row 0, at y 3. */
 	CHECK_EQ(px(&b, 4 + 2 * 2, 3), 0xffff, "glyph pixel, top");
 	CHECK_EQ(px(&b, 4 + 2 * 2 + 1, 3 + 1), 0xffff, "a pixel is scale x scale");
@@ -1309,6 +1310,262 @@ static void supply(const char *root, const char *name, const char *type, const c
 		write_file(dir, key, val);
 	if (status)
 		write_file(dir, "status", status);
+}
+
+/* ---- subpixel text ---- */
+
+static uint32_t rgb_of(const struct canvas_buf *b, int x, int y)
+{
+	uint32_t v = px(b, x, y);
+
+	if (b->c.fmt != PL_FMT_RGB565)
+		return v & 0xffffff;
+	uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, bl = v & 31;
+	return (((r << 3) | (r >> 2)) << 16) | (((g << 2) | (g >> 4)) << 8) | ((bl << 3) | (bl >> 2));
+}
+
+static void test_subpixel_modes(void)
+{
+	enum { N = 0, R90 = 1 };
+
+	/* The panel's modes. */
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_HORIZONTAL_RGB, N), PL_SUB_RGB, "auto: horizontal_rgb is RGB");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_HORIZONTAL_BGR, N), PL_SUB_BGR, "auto: horizontal_bgr is BGR");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_HORIZONTAL_RGB, R90), PL_SUB_NONE, "auto: rotated, grayscale");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_VERTICAL_RGB, N), PL_SUB_NONE, "auto: vertical, grayscale");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_UNKNOWN, N), PL_SUB_NONE, "auto: unknown, grayscale");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_AUTO, PW_SUBPIXEL_VERTICAL_RGB, R90), PL_SUB_BGR, "auto: h3900 rotated for portrait");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_RGB, PW_SUBPIXEL_UNKNOWN, N), PL_SUB_RGB, "forced rgb");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_BGR, PW_SUBPIXEL_HORIZONTAL_RGB, N), PL_SUB_BGR, "forced bgr");
+	CHECK_EQ(pl_subpixel_resolve(PL_SUBOPT_NONE, PW_SUBPIXEL_HORIZONTAL_RGB, N), PL_SUB_NONE, "forced none");
+	CHECK_EQ(pl_text_sub(PL_SUB_RGB, 255), PL_SUB_RGB, "an opaque ground: subpixel");
+	CHECK_EQ(pl_text_sub(PL_SUB_RGB, 254), PL_SUB_NONE, "a translucent ground: grayscale");
+	CHECK_EQ(pl_text_sub(PL_SUB_BGR, 0), PL_SUB_NONE, "a clear ground: grayscale");
+}
+
+static void test_lcd_filter(void)
+{
+	int sum = 0;
+
+	for (int i = 0; i < PL_LCD_TAPS; i++)
+		sum += pl_lcd_weights[i];
+	CHECK_EQ(sum, 256, "the filter weights add up to 256");
+	/* Symmetric: a mirrored glyph gets a mirrored filter. */
+	CHECK(pl_lcd_weights[0] == pl_lcd_weights[4] && pl_lcd_weights[1] == pl_lcd_weights[3],
+		"and are symmetric");
+
+	/* A stem one subpixel wide, at full coverage: in[2] is out[4], and the
+	 * taps spread over out[2..6]. */
+	uint8_t in[5] = { 0, 0, 255, 0, 0 }, out[9];
+	pl_lcd_filter(in, 5, out);
+	const uint8_t stem[9] = { 0, 0, 14, 61, 106, 61, 14, 0, 0 };
+	CHECK(!memcmp(out, stem, 9), "a one subpixel stem spreads into 14 61 106 61 14");
+
+	/* The total coverage is kept, up to rounding. */
+	uint8_t blob[12] = { 0, 30, 255, 255, 200, 90, 0, 255, 0, 0, 120, 60 }, ob[16];
+	int a = 0, b = 0;
+	pl_lcd_filter(blob, 12, ob);
+	for (int i = 0; i < 12; i++)
+		a += blob[i];
+	for (int i = 0; i < 16; i++)
+		b += ob[i];
+	CHECK(abs(a - b) <= 8, "the filter keeps the energy of a glyph row");
+	/* A flat run stays flat in the middle: no ringing. */
+	uint8_t flat[12], of[16];
+	memset(flat, 255, sizeof(flat));
+	pl_lcd_filter(flat, 12, of);
+	CHECK(of[6] == 255 && of[5] == 255 && of[8] == 255, "the inside of a wide stem stays solid");
+	CHECK(of[0] < 20 && of[1] < 100, "and the ends ramp");
+}
+
+static void test_lcd_blend(void)
+{
+	/* White on dark, the three coverages meant for R, G, B. */
+	uint32_t dark = 0xff1c1f24;
+	uint32_t o = pl_over_lcd(dark, 0xffffff, 255, 0, 0);
+	CHECK_EQ((o >> 16) & 0xff, 0xff, "red coverage lights red");
+	CHECK_EQ((o >> 8) & 0xff, 0x1f, "and leaves green");
+	CHECK_EQ(o & 0xff, 0x24, "and blue");
+	o = pl_over_lcd(dark, 0xffffff, 0, 0, 255);
+	CHECK(((o >> 16) & 0xff) == 0x1c && (o & 0xff) == 0xff, "blue coverage lights blue only");
+	o = pl_over_lcd(dark, 0xffffff, 255, 255, 255);
+	CHECK_EQ(o & 0xffffff, 0xffffff, "full coverage is the colour");
+	o = pl_over_lcd(dark, 0xffffff, 0, 0, 0);
+	CHECK_EQ(o & 0xffffff, dark & 0xffffff, "no coverage is the ground");
+	CHECK_EQ(o >> 24, 0xff, "and the result is opaque");
+	/* Linear light: half coverage of white over black is well above 128. */
+	o = pl_over_lcd(0xff000000, 0xffffff, 128, 128, 128);
+	CHECK(((o >> 16) & 0xff) > 170 && ((o >> 16) & 0xff) < 200, "half coverage is blended in linear light");
+	CHECK(((o >> 16) & 0xff) == ((o >> 8) & 0xff) && ((o >> 8) & 0xff) == (o & 0xff),
+		"equal coverages: equal channels");
+
+	/* pl_blit_lcd: one pixel whose leftmost subpixel is covered. */
+	uint8_t cov[3] = { 255, 0, 0 };
+	struct pl_mask m = { 3, 1, cov };
+	struct canvas_buf b;
+	canvas_init(&b, 4, 2, PL_FMT_XRGB8888);
+	pl_fill(&b.c, (struct pl_rect){ 0, 0, 4, 2 }, 0x1c1f24, 255);
+	pl_blit_lcd(&b.c, &m, 1, 0, 0xffffff, PL_SUB_RGB);
+	CHECK_EQ(rgb_of(&b, 1, 0), 0xff1f24, "RGB: the left subpixel is red");
+	CHECK_EQ(rgb_of(&b, 0, 0), 0x1c1f24, "the neighbour is untouched");
+	pl_fill(&b.c, (struct pl_rect){ 0, 0, 4, 2 }, 0x1c1f24, 255);
+	pl_blit_lcd(&b.c, &m, 1, 0, 0xffffff, PL_SUB_BGR);
+	CHECK_EQ(rgb_of(&b, 1, 0), 0x1c1fff, "BGR: the left subpixel is blue");
+	pl_fill(&b.c, (struct pl_rect){ 0, 0, 4, 2 }, 0x1c1f24, 255);
+	pl_blit_lcd(&b.c, &m, 1, 0, 0xffffff, PL_SUB_NONE);
+	CHECK_EQ(rgb_of(&b, 1, 0), 0x1c1f24, "no order: nothing is drawn (the caller uses the gray path)");
+	CHECK(guards_intact(&b), "the blit stays in the buffer");
+
+	/* Clipped at both edges. */
+	uint8_t wide[9] = { 255, 255, 255, 255, 255, 255, 255, 255, 255 };
+	struct pl_mask wm = { 9, 1, wide };
+	pl_blit_lcd(&b.c, &wm, -1, 1, 0xffffff, PL_SUB_RGB);
+	CHECK_EQ(rgb_of(&b, 0, 1), 0xffffff, "clipped at the left");
+	CHECK_EQ(rgb_of(&b, 1, 1), 0xffffff, "the pixels inside the canvas are drawn");
+	CHECK_EQ(rgb_of(&b, 3, 1), 0x1c1f24, "and the one past the mask is not");
+	CHECK(guards_intact(&b), "clipping keeps to the buffer");
+	free(b.mem);
+
+	/* Equal coverages are what the grayscale path draws. */
+	uint8_t g3[3] = { 100, 100, 100 }, g1[1] = { 100 };
+	struct pl_mask lm = { 3, 1, g3 }, gm = { 1, 1, g1 };
+	struct canvas_buf x, y;
+	canvas_init(&x, 2, 1, PL_FMT_XRGB8888);
+	canvas_init(&y, 2, 1, PL_FMT_XRGB8888);
+	pl_fill(&x.c, (struct pl_rect){ 0, 0, 2, 1 }, 0x1c1f24, 255);
+	pl_fill(&y.c, (struct pl_rect){ 0, 0, 2, 1 }, 0x1c1f24, 255);
+	pl_blit_lcd(&x.c, &lm, 0, 0, 0xe8eaed, PL_SUB_RGB);
+	pl_blit(&y.c, &gm, 0, 0, 0xe8eaed, 255, NULL);
+	CHECK_EQ(px(&x, 0, 0), px(&y, 0, 0), "R=G=B coverage equals the grayscale blend");
+	free(x.mem);
+	free(y.mem);
+
+	/* RGB565: blended in 8 bits, then packed. */
+	struct canvas_buf s;
+	uint8_t c2[3] = { 200, 90, 10 };
+	struct pl_mask m2 = { 3, 1, c2 };
+	canvas_init(&s, 1, 1, PL_FMT_RGB565);
+	pl_fill(&s.c, (struct pl_rect){ 0, 0, 1, 1 }, 0x1c1f24, 255);
+	uint32_t before = rgb_of(&s, 0, 0);
+	pl_blit_lcd(&s.c, &m2, 0, 0, 0xffffff, PL_SUB_RGB);
+	uint32_t e8 = pl_over_lcd(0xff000000 | before, 0xffffff, 200, 90, 10);
+	uint32_t want565 = ((((e8 >> 16) & 0xff) * 31 + 127) / 255) << 11 |
+		((((e8 >> 8) & 0xff) * 63 + 127) / 255) << 5 | (((e8 & 0xff) * 31 + 127) / 255);
+	CHECK_EQ(px(&s, 0, 0), want565, "565 is the packed 8 bit blend");
+	free(s.mem);
+}
+
+static void test_lcd_text(void)
+{
+	struct pl_font probe;
+
+	if (!pl_font_load(&probe, NULL, 12, 11)) {
+		printf("test-panel: no default font, the subpixel text checks are skipped\n");
+		return;
+	}
+	pl_font_free(&probe);
+	struct env e;
+	env_init(&e, PL_FMT_XRGB8888, 255, 255, true, NULL);
+	const struct pl_font *f = &e.a.font;
+	CHECK(f->face[0].g[0].lcd.a != NULL, "glyphs have a subpixel mask");
+	CHECK(f->face[0].g[0].lcd.w % 3 == 0, "of whole pixels");
+
+	/* The clock does not move when the minute changes: the digits are tabular
+	 * and advances are whole pixels. */
+	int w0 = pl_font_text_w(f, 0, "00:00");
+	CHECK_EQ(pl_font_text_w(f, 0, "59:59"), w0, "clock text is as wide at 59:59");
+	CHECK_EQ(pl_font_text_w(f, 0, "11:11"), w0, "and at 11:11");
+	CHECK_EQ(pl_font_text_w(f, 0, "88:88"), w0, "and at 88:88");
+	for (int d = 1; d <= 9; d++)
+		CHECK_EQ(f->face[0].g[d].adv, f->face[0].g[0].adv, "every digit has the advance of the 0");
+
+	/* The same string drawn twice looks the same: the pen is on a whole pixel,
+	 * so the subpixel phase does not depend on where the text starts. */
+	struct canvas_buf b;
+	canvas_init(&b, 200, 20, PL_FMT_XRGB8888);
+	pl_fill(&b.c, (struct pl_rect){ 0, 0, 200, 20 }, PL_COL_BG, 255);
+	pl_font_draw(&b.c, f, 0, 10, 0, 20, "12:34", PL_COL_FG, PL_SUB_RGB);
+	pl_font_draw(&b.c, f, 0, 110, 0, 20, "12:34", PL_COL_FG, PL_SUB_RGB);
+	bool same = true;
+	for (int y = 0; y < 20; y++)
+		for (int x = 0; x < 80; x++)
+			if (px(&b, 10 + x, y) != px(&b, 110 + x, y))
+				same = false;
+	CHECK(same, "equal strings are drawn equal wherever they start");
+	/* The height of the digits is a whole number of pixels: the flat top of
+	 * the 7 is a crisp row. */
+	const struct pl_glyph *seven = &f->face[0].g[7];
+	int top_max = 0;
+	for (int x = 0; x < seven->m.w; x++)
+		if (seven->m.a[x] > top_max)
+			top_max = seven->m.a[x];
+	CHECK(top_max >= 250, "the top bar of a 7 starts on a pixel edge");
+	CHECK_EQ(pl_font_baseline(f, 0, 0, 20), (20 - f->face[0].digit_h) / 2 + f->face[0].digit_top,
+		"the baseline is an integer by construction");
+
+	/* Colour appears at the edges with a mode, and not without. */
+	struct canvas_buf gcv;
+	canvas_init(&gcv, 200, 20, PL_FMT_XRGB8888);
+	pl_fill(&gcv.c, (struct pl_rect){ 0, 0, 200, 20 }, PL_COL_BG, 255);
+	pl_font_draw(&gcv.c, f, 0, 10, 0, 20, "12:34", PL_COL_FG, PL_SUB_NONE);
+	/* The ground is a little blue, so R-B of an untouched pixel is not 0; a
+	 * grayscale pixel keeps the hue of the ground to the text colour line, a
+	 * fringe leaves it. */
+	int fringes_sub = 0, fringes_gray = 0;
+	for (int y = 0; y < 20; y++)
+		for (int x = 0; x < 80; x++) {
+			uint32_t s = rgb_of(&b, 10 + x, y), g = rgb_of(&gcv, 10 + x, y);
+			int ds = (int)((s >> 16) & 0xff) - (int)(s & 0xff);
+			int dg = (int)((g >> 16) & 0xff) - (int)(g & 0xff);
+			if (abs(ds) > 40)
+				fringes_sub++;
+			if (abs(dg) > 40)
+				fringes_gray++;
+		}
+	CHECK(fringes_sub > 8, "subpixel text has colour at its edges");
+	CHECK_EQ(fringes_gray, 0, "grayscale text has none");
+	free(b.mem);
+	free(gcv.mem);
+	env_free(&e);
+
+	/* The rule: a ground that is not opaque gets grayscale, whatever the mode. */
+	struct env t, u;
+	env_init(&t, PL_FMT_ARGB8888, 255, 224, true, NULL);
+	env_init(&u, PL_FMT_ARGB8888, 255, 224, true, NULL);
+	t.a.sub = PL_SUB_RGB;
+	u.a.sub = PL_SUB_NONE;
+	pl_render_all(&t.b.c, &t.l, &t.a, &t.st, PL_SLIDER_BACKLIGHT);
+	pl_render_all(&u.b.c, &u.l, &u.a, &u.st, PL_SLIDER_BACKLIGHT);
+	CHECK(!memcmp(t.b.c.data + (size_t)t.l.row.y * t.b.c.stride,
+			u.b.c.data + (size_t)u.l.row.y * u.b.c.stride,
+			(size_t)t.l.row_h * t.b.c.stride), "popup-alpha 224: the row text is grayscale in every mode");
+	CHECK(memcmp(t.b.c.data, u.b.c.data, (size_t)t.l.bar_h * t.b.c.stride) != 0,
+		"while the opaque bar next to it is drawn with subpixels");
+	env_free(&t);
+	env_free(&u);
+	env_init(&t, PL_FMT_ARGB8888, 128, 255, false, NULL);
+	env_init(&u, PL_FMT_ARGB8888, 128, 255, false, NULL);
+	t.a.sub = PL_SUB_RGB;
+	u.a.sub = PL_SUB_NONE;
+	pl_render_all(&t.b.c, &t.l, &t.a, &t.st, PL_SLIDER_NONE);
+	pl_render_all(&u.b.c, &u.l, &u.a, &u.st, PL_SLIDER_NONE);
+	CHECK(!memcmp(t.b.c.data, u.b.c.data, (size_t)t.l.bar_h * t.b.c.stride),
+		"bar-alpha 128: the bar text is grayscale");
+	env_free(&t);
+	env_free(&u);
+	env_init(&t, PL_FMT_RGB565, 255, 255, true, NULL);
+	env_init(&u, PL_FMT_RGB565, 255, 255, true, NULL);
+	t.a.sub = PL_SUB_RGB;
+	u.a.sub = PL_SUB_NONE;
+	pl_render_all(&t.b.c, &t.l, &t.a, &t.st, PL_SLIDER_BACKLIGHT);
+	pl_render_all(&u.b.c, &u.l, &u.a, &u.st, PL_SLIDER_BACKLIGHT);
+	CHECK(memcmp(t.b.c.data + (size_t)t.l.row.y * t.b.c.stride,
+			u.b.c.data + (size_t)u.l.row.y * u.b.c.stride,
+			(size_t)t.l.row_h * t.b.c.stride) != 0,
+		"popup-alpha 255: the value in the row gets subpixels too");
+	CHECK(guards_intact(&t.b), "565 subpixel rendering stays in the buffer");
+	env_free(&t);
+	env_free(&u);
 }
 
 static void test_sys(void)
@@ -1439,6 +1696,10 @@ int main(void)
 	test_masks();
 	test_font();
 	test_draw();
+	test_subpixel_modes();
+	test_lcd_filter();
+	test_lcd_blend();
+	test_lcd_text();
 	test_sys();
 	printf("test-panel: %d checks, %d failed\n", test_count, fail_count);
 	return fail_count ? 1 : 0;

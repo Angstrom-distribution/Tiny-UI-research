@@ -242,7 +242,8 @@ void pl_render_clock(const struct pl_canvas *c, const struct pl_layout *l,
 
 	pl_fill(c, l->clock, PL_COL_BG, a->bar_alpha);
 	pl_clock_text(buf, sizeof(buf), st->hour, st->min);
-	pl_font_draw(c, &a->font, 0, PL_MARGIN, l->clock.y, l->clock.h, buf, PL_COL_FG);
+	pl_font_draw(c, &a->font, 0, PL_MARGIN, l->clock.y, l->clock.h, buf, PL_COL_FG,
+		pl_text_sub(a->sub, a->bar_alpha));
 }
 
 void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
@@ -257,7 +258,8 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	pl_battery_text(buf, sizeof(buf), st->bat, st->bat_pct);
 	int tw = pl_font_text_w(&a->font, 0, buf);
 	int tx = l->battery.x + l->battery.w - PL_MARGIN - tw;
-	pl_font_draw(c, &a->font, 0, tx, l->battery.y, dh, buf, PL_COL_FG);
+	pl_font_draw(c, &a->font, 0, tx, l->battery.y, dh, buf, PL_COL_FG,
+		pl_text_sub(a->sub, a->bar_alpha));
 	if (!icon)
 		return;
 
@@ -330,7 +332,7 @@ void pl_render_row_value(const struct pl_canvas *c, const struct pl_layout *l,
 	pl_pct_text(buf, sizeof(buf), pct);
 	int tw = pl_font_text_w(&a->font, 1, buf);
 	pl_font_draw(c, &a->font, 1, l->w - PL_MARGIN - tw, l->row_in.y, l->row_h - 1, buf,
-		PL_COL_FG);
+		PL_COL_FG, pl_text_sub(a->sub, a->popup_alpha));
 }
 
 void pl_render_row(const struct pl_canvas *c, const struct pl_layout *l,
