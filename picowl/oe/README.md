@@ -11,6 +11,7 @@ Contents:
 | `recipes-graphics/wlroots/wlroots_0.19.0.bb` | oe-core, meta-openembedded and meta-angstrom ship no wlroots recipe for these releases. Minimal build: DRM and libinput backends, pixman renderer only, no GLES2/Vulkan/GBM/Xwayland. |
 | `recipes-graphics/picowl/picowl_git.bb` | picowl itself, built from the `picowl` subfolder of the research repository. Installs `picowl.service` (not auto-enabled) and `/etc/picowl.ini` (conffile). |
 | `recipes-graphics/wvkbd/wvkbd-ipaq_git.bb` | The on-screen keyboard: upstream wvkbd plus an eleven patch series, built with the `ipaq` layout. See the wvkbd-ipaq section below. |
+| `recipes-graphics/havoc/files/` | A patch only, no recipe: the havoc recipe lives in meta-handhelds. The patch binds text-input-v3 so the terminal brings up the on-screen keyboard. See `recipes-graphics/havoc/README.md`. |
 
 ## Adding the layer
 

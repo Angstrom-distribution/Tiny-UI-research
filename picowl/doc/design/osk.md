@@ -127,7 +127,7 @@ The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until
 - **Not implemented: hold-action rules for popups.** A touch on an input method popup falls back to the global `[touch]` hold defaults (`hold_identity` in `input.c` knows no popup role); a long press could send a right click to the candidate list.
 - **OSK requirement:** the OSK must use layer-shell keyboard interactivity `none`. With `on_demand` or `exclusive` a tap on its keys moves the keyboard focus to the OSK, the text input gets `leave`, the input method gets `deactivate` and the OSK hides itself.
 - Reference: labwc's `src/input/ime.c` (~720 lines with keyboard grab and popups).
-- **Who benefits:** only clients that speak text-input-v3, i.e. GTK3/4 and Qt apps, which are too large for these boards. GTK+2 apps get nothing until a GDK2 Wayland backend exists and gains an input-method module. Typing never needs this part; virtual-keyboard alone is enough.
+- **Who benefits:** only clients that speak text-input-v3, i.e. GTK3/4 and Qt apps, which are too large for these boards, and the havoc terminal with the patch in `oe/recipes-graphics/havoc/files/` (it enables the text input once per focus, so a keyboard hidden with the toggle button stays hidden until the focus returns). GTK+2 apps get nothing until a GDK2 Wayland backend exists and gains an input-method module. Typing never needs this part; virtual-keyboard alone is enough.
 - Recommendation: the relay is built because wvkbd needs no change for it; it only helps clients that speak text-input-v3, and virtual-keyboard stays for everything else.
 
 ## 5. Cost on 64 MiB [est]
