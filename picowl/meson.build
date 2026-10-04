@@ -99,6 +99,7 @@ sources = files(
   'src/view.c',
   'src/layer.c',
   'src/input.c',
+  'src/pointercal.c',
   'src/imrelay.c',
   'src/implace.c',
   'src/tablet.c',
@@ -131,7 +132,8 @@ picowl_exe = executable(
   'picowl',
   sources, protocol_headers, picowl_buffer_code,
   link_with: pwcursorfit,
-  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput],
+  dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput,
+    cc.find_library('m', required: false)],
   include_directories: include_directories('src'),
   install: true,
 )
