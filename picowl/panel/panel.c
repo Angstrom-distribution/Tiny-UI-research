@@ -88,7 +88,7 @@ struct panel {
 
 	/* system */
 	struct pl_backlight bl;
-	bool have_bl, bl_warned;
+	bool have_bl, bl_warned, vol_warned;
 	snd_mixer_t *mixer;
 	snd_mixer_elem_t *elem;
 	long vol_min, vol_max;
@@ -270,15 +270,41 @@ static bool rebuild(struct panel *p, int w, int h)
 
 /* ---- backlight and volume ---- */
 
+/* The thumb shows what the device holds: picowl dims, caps on the LOW profile
+ * and the user's own tools write the brightness behind the panel's back, and
+ * the panel itself only read it at start. Not while a write of ours is
+ * waiting or the stylus is on the slider, where the thumb is the user's. */
+static void backlight_refresh(struct panel *p)
+{
+	if (!p->have_bl || p->pending[PL_SLIDER_BACKLIGHT] ||
+			(p->touch.down && p->touch.slider == PL_SLIDER_BACKLIGHT))
+		return;
+	int raw = pl_backlight_read(&p->bl);
+	if (raw < 0)
+		return;
+	int v = pl_bl_pct_from_raw(raw, p->bl.max);
+	if (v != p->st.bl_pct) {
+		p->st.bl_pct = v;
+		p->dirty |= W_BACKLIGHT;
+	}
+}
+
 static void apply_backlight(struct panel *p, int pct)
 {
 	if (!p->have_bl)
 		return;
-	if (!pl_backlight_write(&p->bl, pl_bl_raw_from_pct(pct, p->bl.max)) &&
-			!p->bl_warned) {
+	if (pl_backlight_write(&p->bl, pl_bl_raw_from_pct(pct, p->bl.max)))
+		return;
+	if (!p->bl_warned) {
 		/* Once: a dragged slider would repeat it for every write. */
 		say("cannot write %s/brightness: %s", p->bl.path, strerror(errno));
 		p->bl_warned = true;
+	}
+	/* Not applied: do not leave the thumb at a level the screen is not at. */
+	int raw = pl_backlight_read(&p->bl);
+	if (raw >= 0) {
+		p->st.bl_pct = pl_bl_pct_from_raw(raw, p->bl.max);
+		p->dirty |= W_BACKLIGHT;
 	}
 }
 
@@ -374,10 +400,22 @@ static void apply_volume(struct panel *p, int pct)
 {
 	if (!p->elem)
 		return;
-	snd_mixer_selem_set_playback_volume_all(p->elem,
+	int err = snd_mixer_selem_set_playback_volume_all(p->elem,
 		pl_vol_raw_from_pct(pct, p->vol_min, p->vol_max));
-	if (pct > 0 && snd_mixer_selem_has_playback_switch(p->elem))
-		snd_mixer_selem_set_playback_switch_all(p->elem, 1);
+	if (err >= 0 && pct > 0 && snd_mixer_selem_has_playback_switch(p->elem))
+		err = snd_mixer_selem_set_playback_switch_all(p->elem, 1);
+	if (err >= 0)
+		return;
+	if (!p->vol_warned) {
+		say("cannot set the volume: %s", snd_strerror(err));
+		p->vol_warned = true;
+	}
+	/* Not applied: show what the mixer holds. */
+	int v = mixer_read_pct(p);
+	if (v >= 0) {
+		p->st.vol_pct = v;
+		p->dirty |= W_VOLUME;
+	}
 }
 
 /* The mixer has something to say: another program changed the volume. */
@@ -458,6 +496,10 @@ static int apply_timeout_ms(const struct panel *p)
 static void touch_press(struct panel *p)
 {
 	bool en[PL_SLIDERS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0 };
+
+	/* set_slider ignores a value equal to the shown one, which must not be
+	 * a stale one. */
+	backlight_refresh(p);
 	int v, s = pl_touch_press(&p->touch, &p->layout, en, p->px, p->py, &v);
 
 	if (s != PL_SLIDER_NONE)
@@ -487,6 +529,7 @@ static void ptr_enter(void *d, struct wl_pointer *w, uint32_t serial,
 	(void)w; (void)serial; (void)s;
 	p->px = wl_fixed_to_int(x);
 	p->py = wl_fixed_to_int(y);
+	backlight_refresh(p);
 }
 
 static void ptr_leave(void *d, struct wl_pointer *w, uint32_t serial,
@@ -664,8 +707,10 @@ static void battery_update(struct panel *p)
 
 /* ---- test hooks ---- */
 
-/* "p X,Y" press, "m X,Y" motion, "r" release, separated by ; or space: the
- * same handlers as the wl_pointer events, for tests without a pointer. */
+/* "p X,Y" press, "m X,Y" motion, "e X,Y" pointer enter, "r" release,
+ * separated by ; or space: the same handlers as the wl_pointer events, for
+ * tests without a pointer. "b RAW" writes the backlight as another process
+ * would. */
 static void run_inject(struct panel *p)
 {
 	char buf[MAX_INJECT * 12];
@@ -674,7 +719,14 @@ static void run_inject(struct panel *p)
 	snprintf(buf, sizeof(buf), "%s", p->inject);
 	for (char *tok = strtok_r(buf, "; ", &save); tok; tok = strtok_r(NULL, "; ", &save)) {
 		int x, y;
-		if (tok[0] == 'r') {
+		if (tok[0] == 'e' && sscanf(tok + 1, "%d,%d", &x, &y) == 2) {
+			p->px = x;
+			p->py = y;
+			backlight_refresh(p);
+		} else if (tok[0] == 'b' && sscanf(tok + 1, "%d", &x) == 1) {
+			/* Another process sets the backlight. */
+			pl_backlight_write(&p->bl, x);
+		} else if (tok[0] == 'r') {
 			if (p->touch.down)
 				touch_release(p);
 		} else if ((tok[0] == 'p' || tok[0] == 'm') && sscanf(tok + 1, "%d,%d", &x, &y) == 2) {
@@ -757,7 +809,8 @@ static void usage(FILE *out)
 		"                      after every redraw, naming the widgets, without exiting\n"
 		"  --exit-after-frame  exit after the first frame\n"
 		"  --inject SPEC       test only: feed pointer events after the first frame\n"
-		"                      (p X,Y press; m X,Y motion; r release), before the dump\n"
+		"                      (p X,Y press; m X,Y motion; e X,Y enter; r release;\n"
+		"                      b RAW sets the backlight), before the dump\n"
 		"  --help              this text\n",
 		PL_HEIGHT_DEFAULT, PL_SCALE_MAX);
 }

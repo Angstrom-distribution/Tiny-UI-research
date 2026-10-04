@@ -195,6 +195,16 @@ has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B icon is inert"
 has "$DIR/b.out" '^volume available=1 value=20 ' "B speaker is inert"
 [ "$(cat "$BL/brightness")" = 600 ] || fail "B: a press on the icon wrote the brightness"
 grep -q '^volume 8$' "$CTL" || fail "B: a press on the speaker reached the mixer"
+# The panel read the level at start; a change made since by another process
+# (picowl dimming, a script) is shown when the pointer enters, and a press
+# must not take the stale level for the shown one: x=78 is 59 percent.
+"$PANEL" --dump-state --inject "b300;e100,40" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+has "$DIR/b.out" '^backlight available=1 value=29 raw=300 ' "B pointer enter re-reads the backlight"
+echo 600 >"$BL/brightness"
+"$PANEL" --dump-state --inject "b300;p78,40;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
+has "$DIR/b.out" '^backlight available=1 value=59 ' "B press after an external change"
+[ "$(cat "$BL/brightness")" != 300 ] || fail "B: a press equal to the stale value was dropped"
+echo 600 >"$BL/brightness"
 # A drag that starts outside a slider, or a press elsewhere, does nothing.
 "$PANEL" --dump-state --inject "p60,10;m100,40;m100,45;r" >"$DIR/b.out" 2>&1 || fail "B: inject failed"
 has "$DIR/b.out" '^backlight available=1 value=59 raw=600 ' "B drag from outside"
