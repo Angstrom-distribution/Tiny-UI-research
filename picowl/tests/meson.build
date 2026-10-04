@@ -101,6 +101,15 @@ pw_im_client = executable('pw-im-client',
   ti_client_h, ti_client_c, im_client_h, im_client_c,
   dependencies: [wayland_client])
 
+# One process, two toplevels: the configure sizes of the tiled layout.
+pw_tile_client = executable('pw-tile-client',
+  'pw-tile-client.c', xdg_client_h, xdg_client_c,
+  dependencies: [wayland_client])
+
+test('tile-e2e', find_program('sh'),
+  args: [files('tile-e2e.sh'), picowl_exe, pw_tile_client],
+  timeout: 60)
+
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client],
   timeout: 30)

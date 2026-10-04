@@ -129,6 +129,75 @@ static bool parse_int_log(const char *str, const char *key, int lo, int hi, int 
 	return true;
 }
 
+/* Parse "W:H", two decimal integers in [1..4096] with nothing around them.
+ * The bound keeps the layout arithmetic far from overflow and rejects typos
+ * like 1920:0. On failure *w and *h are untouched. */
+static bool parse_aspect(const char *str, int *w, int *h)
+{
+	char *end;
+	if (!isdigit((unsigned char)str[0]))
+		return false;
+	long a = strtol(str, &end, 10);
+	if (*end != ':' || !isdigit((unsigned char)end[1]))
+		return false;
+	const char *second = end + 1;
+	long b = strtol(second, &end, 10);
+	if (*end || a < 1 || a > 4096 || b < 1 || b > 4096)
+		return false;
+	*w = (int)a;
+	*h = (int)b;
+	return true;
+}
+
+/* [layout] stack = first, second. Anything but two distinct names leaves
+ * tiling off, because a half-configured stack would be a silent surprise. */
+static void parse_layout_stack(struct pw_config *c, const char *val)
+{
+	char *copy = strdup(val);
+	char *names[2] = { NULL, NULL };
+	int n = 0;
+	bool bad = false;
+
+	free(c->stack[0]);
+	free(c->stack[1]);
+	c->stack[0] = c->stack[1] = NULL;
+	c->n_stack = 0;
+	if (!copy)
+		return;
+
+	char *save = NULL;
+	for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+		tok = trim(tok);
+		if (!tok[0])
+			continue;
+		if (n >= 2) {
+			pw_log(WLR_ERROR, "[layout] stack: more than two app_ids, ignoring '%s'", tok);
+			continue;
+		}
+		if (n == 1 && strcmp(names[0], tok) == 0) {
+			pw_log(WLR_ERROR, "[layout] stack: duplicate app_id '%s' ignored", tok);
+			continue;
+		}
+		names[n++] = tok;
+	}
+	if (n == 2) {
+		c->stack[0] = strdup(names[0]);
+		c->stack[1] = strdup(names[1]);
+		if (c->stack[0] && c->stack[1]) {
+			c->n_stack = 2;
+		} else {
+			free(c->stack[0]);
+			free(c->stack[1]);
+			c->stack[0] = c->stack[1] = NULL;
+		}
+	} else {
+		bad = true;
+	}
+	if (bad)
+		pw_log(WLR_ERROR, "[layout] stack needs two distinct app_ids, tiling is off");
+	free(copy);
+}
+
 /* Parse boolean value and return success. On invalid value, return false and keep the previous value.
  * This version logs errors. For use in config parsing where we want to report problems. */
 static bool parse_bool_log(const char *str, const char *key, bool *out)
@@ -615,6 +684,12 @@ struct pw_config *pw_config_load(const char *path)
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [lease]: %s", key);
 			}
+		} else if (strcmp(section, "layout") == 0) {
+			if (strcmp(key, "stack") == 0) {
+				parse_layout_stack(c, val);
+			} else {
+				pw_log(WLR_ERROR, "Unknown key in [layout]: %s", key);
+			}
 		} else if (strcmp(section, "capture") == 0) {
 			if (strcmp(key, "enabled") == 0) {
 				parse_bool_log(val, "capture.enabled", &c->capture_enable);
@@ -772,6 +847,10 @@ struct pw_config *pw_config_load(const char *path)
 				parse_int_log(val, "zerocopy_buffers", 1, 32, &cur_rule->zb_buffers);
 			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "zerocopy_budget_kb") == 0) {
 				parse_int_log(val, "zerocopy_budget_kb", 0, 65536, &cur_rule->zb_budget_kb);
+			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "aspect") == 0) {
+				if (!parse_aspect(val, &cur_rule->aspect_w, &cur_rule->aspect_h))
+					pw_log(WLR_ERROR, "Bad aspect '%s' in [%s] (need W:H, 1..4096), ignored",
+						val, section);
 			} else if (cur_rule->kind == PW_RULE_APP && strcmp(key, "exe") == 0) {
 				/* resolve symlinks: it is compared to /proc/<pid>/exe */
 				char path[PATH_MAX];
@@ -921,6 +1000,8 @@ void pw_config_free(struct pw_config *config)
 
 	free(config->backlight);
 	free(config->lease_allow);
+	free(config->stack[0]);
+	free(config->stack[1]);
 	free(config->pointercal);
 
 	struct pw_output_transform *t, *t_tmp;

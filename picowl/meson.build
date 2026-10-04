@@ -99,6 +99,7 @@ sources = files(
   'src/config.c',
   'src/output.c',
   'src/view.c',
+  'src/tile.c',
   'src/layer.c',
   'src/input.c',
   'src/pointercal.c',

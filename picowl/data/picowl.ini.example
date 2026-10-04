@@ -158,6 +158,21 @@ code:155 = rotate
 # zerocopy_buffers = 7
 # exe = /usr/bin/mediaplayer-wayland
 
+[layout]
+# Two apps which tile instead of stacking while both are mapped: the first on
+# top in portrait (left in landscape), the second below (right). A single one
+# is maximized like any other window, and so are all other apps. app_ids,
+# comma separated, in order; a list of more than two ignores the extras, a
+# repeated name is skipped, and tiling stays off unless two distinct names remain.
+# The first window's share of the screen follows its natural aspect ratio:
+# the client's fixed size (min_size == max_size) if it has one, else
+# '[app.<id>] aspect = W:H' (1..4096), else half. Each window keeps at least
+# 25 percent. alt+Tab moves the keyboard between the two while one has it.
+# stack = mediaplayer, havoc
+#
+# [app.mediaplayer]
+# aspect = 4:3
+
 [lease]
 # DRM lease: hand the output to a KMS client (the media player's --vo drm:lease)
 # through wp_drm_lease_device_v1, without a VT switch. picowl keeps input and

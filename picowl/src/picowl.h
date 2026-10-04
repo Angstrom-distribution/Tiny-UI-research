@@ -126,6 +126,8 @@ struct pw_app_rule {
 	int zb_budget_kb;             /* -1 = zb_buffers x frame of the largest output */
 	unsigned zb_pool;             /* 0 = no pool (default pool), else 1..zb_n_pools-1 */
 	char *exe;                    /* realpath the client binary must have, or NULL */
+	/* [app.*] only: natural aspect W:H of a tiled window, 0 = not set */
+	int aspect_w, aspect_h;
 };
 
 struct pw_config {
@@ -191,6 +193,11 @@ struct pw_config {
 
 	/* [capture] */
 	bool capture_enable;       /* offer zwlr_screencopy_manager_v1 (default false) */
+
+	/* [layout] stack: the two app_ids which tile, first = top or left.
+	 * n_stack is 2 or 0: a list which is not two distinct names is dropped. */
+	char *stack[2];
+	int n_stack;
 };
 
 /*
@@ -393,16 +400,20 @@ void pw_view_finish(struct pw_server *server);
  * map, from input.c on cycle, and from foreign-toplevel activate requests. */
 void pw_view_focus(struct pw_view *view);
 
-/* Focus the next mapped view in stacking order (rotating the list). Called
- * by input.c for PW_ACTION_CYCLE_VIEWS. */
+/* Focus the next mapped view in stacking order (rotating the list). While
+ * both [layout] stack apps are shown and one of them has the focus, it moves
+ * the keyboard to the other one instead, without restacking. Called by
+ * input.c for PW_ACTION_CYCLE_VIEWS. */
 void pw_view_cycle(struct pw_server *server);
 
 /* Send a close request to the focused view, if any. Called by input.c for
  * PW_ACTION_CLOSE_VIEW. */
 void pw_view_close_focused(struct pw_server *server);
 
-/* Re-size and re-position every mapped view to its output's usable area.
- * Called by output.c and layer.c when the usable area or transform changes. */
+/* Re-size and re-position every mapped view to its output's usable area, or
+ * to its slot while the two [layout] stack apps are both mapped. Called by
+ * output.c and layer.c when the usable area or transform changes, and by
+ * view.c when a stack app maps, unmaps or changes its size hint. */
 void pw_view_arrange_all(struct pw_server *server);
 
 /* Create scene node and listeners for an xdg popup under parent_tree. Used

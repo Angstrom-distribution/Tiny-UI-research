@@ -742,6 +742,78 @@ static int test_touch_calibration(void)
 	return 0;
 }
 
+static int test_layout_config(void)
+{
+	/* off by default */
+	struct pw_config *c = pw_config_default();
+	assert(c != NULL && c->n_stack == 0 && c->stack[0] == NULL);
+	pw_config_free(c);
+
+	c = pw_config_load("tests/test-config-layout.ini");
+	assert(c != NULL);
+	/* trimmed, in order, the third name ignored */
+	assert(c->n_stack == 2);
+	assert(strcmp(c->stack[0], "mediaplayer") == 0);
+	assert(strcmp(c->stack[1], "havoc") == 0);
+
+	const struct pw_app_rule *a = pw_config_app(c, "mediaplayer");
+	assert(a && a->aspect_w == 4 && a->aspect_h == 3);
+	a = pw_config_app(c, "havoc");
+	assert(a && a->aspect_w == 0 && a->aspect_h == 0);
+	const char *bad[] = { "bad.x", "bad.big", "bad.three", "bad.neg", "bad.space", "bad.empty" };
+	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		a = pw_config_app(c, bad[i]);
+		assert(a && a->aspect_w == 0 && a->aspect_h == 0);
+	}
+	a = pw_config_app(c, "max");
+	assert(a && a->aspect_w == 4096 && a->aspect_h == 1);
+	a = pw_config_app(c, "min");
+	assert(a && a->aspect_w == 1 && a->aspect_h == 1);
+	a = pw_config_app(c, "twice");
+	assert(a && a->aspect_w == 3 && a->aspect_h == 2);
+	/* [layer.*] has no aspect */
+	struct pw_app_rule *r;
+	wl_list_for_each(r, &c->app_rules, link)
+		if (r->kind == PW_RULE_LAYER)
+			assert(r->aspect_w == 0 && r->aspect_h == 0);
+	pw_config_free(c);
+
+	/* a stack which is not two distinct names leaves tiling off */
+	const char *texts[] = {
+		"[layout]\nstack = onlyone\n",
+		"[layout]\nstack = same, same\n",
+		"[layout]\nstack =\n",
+		"[layout]\nstack = , ,\n",
+	};
+	for (unsigned i = 0; i < sizeof(texts) / sizeof(texts[0]); i++) {
+		const char *path = write_tmp_ini("picowl-test-layout.ini", texts[i]);
+		c = pw_config_load(path);
+		remove(path);
+		assert(c != NULL && c->n_stack == 0);
+		assert(c->stack[0] == NULL && c->stack[1] == NULL);
+		pw_config_free(c);
+	}
+
+	/* a duplicate in a longer list is skipped, the next name takes its place;
+	 * a later stack replaces an earlier one */
+	const char *path = write_tmp_ini("picowl-test-layout.ini",
+		"[layout]\nstack = a, a, b\n[layout]\nstack = c, d\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->n_stack == 2);
+	assert(strcmp(c->stack[0], "c") == 0 && strcmp(c->stack[1], "d") == 0);
+	pw_config_free(c);
+	path = write_tmp_ini("picowl-test-layout.ini", "[layout]\nstack = a, a, b\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && c->n_stack == 2);
+	assert(strcmp(c->stack[0], "a") == 0 && strcmp(c->stack[1], "b") == 0);
+	pw_config_free(c);
+
+	printf("✓ test_layout_config\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -772,6 +844,7 @@ int main(int argc, char *argv[])
 	failed += test_lease_config();
 	failed += test_capture_config();
 	failed += test_touch_calibration();
+	failed += test_layout_config();
 
 	if (failed == 0) {
 		printf("\nAll tests passed!\n");

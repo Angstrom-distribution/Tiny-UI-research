@@ -290,6 +290,7 @@ Keys in `[app.<app_id>]` and `[layer.<namespace>]` sections (`[app.*]` also take
 | `hold_delay_ms` | from `[touch]` | Milliseconds before animation starts |
 | `hold_ms` | from `[touch]` | Milliseconds to right-click |
 | `slop_px` | from `[touch]` | Movement tolerance in pixels |
+| `aspect` | unset | `[app.*]` only: `W:H` for the tiled layout, see below |
 
 Rules:
 - **Inheritance**: Unset keys use the value from `[touch]`, whatever the order of sections in the file.
@@ -298,6 +299,33 @@ Rules:
 - **Merging**: A section appearing twice merges into one rule; later keys win.
 - **Scope**: `[app.panel]` and `[layer.panel]` are separate namespaces. An empty `[app.]` or `[layer.]` is logged and ignored.
 - **Binding**: The surface under the finger at touch-down decides (popups and subsurfaces follow their parent). The setting stays fixed until lift.
+
+### Tiled layout
+
+Every window is maximized and one is shown at a time, except for two apps you name in `[layout]`. While both of them have a mapped window they tile the usable area instead of stacking:
+
+```ini
+[layout]
+stack = mediaplayer, havoc
+
+[app.mediaplayer]
+aspect = 4:3
+```
+
+- `stack`: two distinct app_ids, comma separated, in order. A list of more than two ignores the extra names; a repeated name is skipped, and tiling stays off unless two distinct names remain.
+- `aspect` (in `[app.<app_id>]`): `W:H`, two integers from 1 to 4096, the natural aspect of the first app. A bad value is logged and ignored.
+
+Rules:
+- **Order**: in a portrait usable area (height at least width) the first app is on top and the second below, both at full width. In a landscape one the first is on the left and the second on the right, both at full height.
+- **Size of the first window** along the split axis: its natural aspect ratio applied to the available extent. The source is, in this order, the client's own fixed size (xdg-shell `min_size` equal to `max_size`, both non-zero, re-read whenever the client commits a change, so a new clip with another aspect re-lays out), then `aspect` from the config, then half. The result is clamped so that each window keeps at least 25 percent of the extent, because a hint is only a preference and one window must not be squeezed to nothing. The second window gets the rest. Each client receives the exact size in a configure and draws its own letterboxing if its content has another aspect.
+- **One of the two**: with only one of the apps mapped, nothing changes: it is maximized like any other window. When the second appears or goes away both are configured again.
+- **Other windows**: apps outside the stack are not affected. A window raised above the pair covers both.
+- **Focus**: touching a tiled window gives it the keyboard. alt+Tab (the `cycle` action) moves the keyboard between the two tiled windows, without restacking, while one of them has the focus; it does not reach other apps then (use the panel). Focusing one tiled window raises both together.
+- **Keyboard overlay**: the on-screen keyboard is a layer surface without an exclusive zone, so it overlays the lower or right window and does not move the layout.
+- **Rotation and panel**: the layout is recomputed whenever the output size, its transform or the usable area changes, the same as for maximized windows.
+- **Fullscreen**: a fullscreen request from a tiled window is answered with its slot size.
+- **Direct scanout**: two visible windows are two entries in the scene's render list, so the scene composes them and never scans out one buffer. A window which is alone is still eligible.
+- **Idle inhibit**: an inhibitor counts while its window has the keyboard focus, so a playing window in the unfocused slot does not hold the screen on.
 
 ### Cursor Configuration
 
@@ -415,7 +443,7 @@ WLR_SCENE_DISABLE_DIRECT_SCANOUT=1 meson test -C build   # force composition
 
 ### Automated Tests (Headless)
 
-Tests: `config`, `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `pointercal` (tslib parsing and matrix conversion), `cursorfit`, `cursor-builtin`, `cursorshape` (shape mapping), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
+Tests: `config`, `tile` (the layout arithmetic), `tile-e2e` (two toplevels over one connection, landscape and portrait: the configure sizes, hint changes at run time and a partner going away), `zbquota`, `smoke` (headless run, also with `--zerocopy`, `--zerocopy-count`, `--probe` and `--expect-global` for the always-on globals), `bufproto` (bind events and version gating over a socketpair, then `pw-test-client` at version 2 and 1), `touchhold`, `pointercal` (tslib parsing and matrix conversion), `cursorfit`, `cursor-builtin`, `cursorshape` (shape mapping), `rotate`, `copytype`, `copyrel`, `pixman-pass`, `pixman-dmabuf`, `rss`, `backlight`, `powersupply`, `dim`, `power-e2e`, `leasepolicy`, `capture` checks inside `smoke` (`pw-capture-client`: no screencopy global by default, the background colour when `[capture]` is enabled), and `lease-vkms` (suite `vkms`: opt-in with `PW_LEASE_VKMS=1`, needs root and the vkms module, skips otherwise).
 
 - **rss:** Memory test. Starts compositor headless (1280×720), maps test client, measures VmHWM. Fails if peak RSS exceeds ceiling (meson option `-Drss_ceiling_kb`, default 12288 kB; headless baseline ~9.5 MB). Override with `PW_RSS_CEILING_KB` for a single run.
 
@@ -429,6 +457,7 @@ DRM paths (rotation, copy-type, swapchain, direct scanout) cannot run in the bui
 - Direct scanout: scene logs it, render list is 1 entry, no composition
 - Damage clipping: only changed regions copied to VRAM
 - DRM lease: the checklist in `doc/lease.md`
+- Tiled layout: with `[layout] stack = mediaplayer, havoc`, start both on the panel in portrait and in landscape: expect the first app on top (left), the second below (right), touching either gives it the keyboard, alt+Tab moves the keyboard between them, the on-screen keyboard overlays the lower window, rotating re-tiles, closing one maximizes the other and the log shows no direct scanout while both are visible
 
 See the hardware-only checklist in `doc/zero-copy.md`.
 

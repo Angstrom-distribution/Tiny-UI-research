@@ -3,6 +3,8 @@
  *
  * PDA window policy: every toplevel is maximized to the usable area of the
  * first output; move/resize/minimize requests are acknowledged and ignored.
+ * The one exception is the pair named by [layout] stack: while both are
+ * mapped they share the usable area (see tile.h).
  *
  * Extra per-view state (the ext-foreign-toplevel handle) lives in a private
  * wrapper around struct pw_view so that picowl.h needs no change.
@@ -15,10 +17,12 @@
 #include <wlr/types/wlr_content_type_v1.h>
 
 #include "picowl.h"
+#include "tile.h"
 
 struct view_impl {
 	struct pw_view base;	/* must be first */
 	struct wlr_ext_foreign_toplevel_handle_v1 *ext_handle;
+	int hint_w, hint_h;	/* fixed size the client announced at its last commit, 0 = none */
 };
 
 struct popup {
@@ -47,11 +51,108 @@ static struct pw_output *first_output(struct pw_server *server)
 
 /* ---- geometry --------------------------------------------------------- */
 
+/* Position of app_id in [layout] stack, or -1. */
+static int stack_index(struct pw_server *server, const char *app_id)
+{
+	struct pw_config *c = server->config;
+
+	if (!c || c->n_stack != 2 || !app_id)
+		return -1;
+	for (int i = 0; i < 2; i++)
+		if (strcmp(c->stack[i], app_id) == 0)
+			return i;
+	return -1;
+}
+
+static int view_stack_index(struct pw_view *view)
+{
+	return stack_index(view->server, view->xdg_toplevel->app_id);
+}
+
+/* The fixed size of a client is the only hint wlroots can carry: min_size
+ * equal to max_size, both axes. The values are double-buffered state, so
+ * current is what the client committed. */
+static void view_fixed_size(struct pw_view *view, int *w, int *h)
+{
+	struct wlr_xdg_toplevel *tl = view->xdg_toplevel;
+
+	*w = *h = 0;
+	if (tl->current.min_width > 0 && tl->current.min_width == tl->current.max_width &&
+			tl->current.min_height > 0 &&
+			tl->current.min_height == tl->current.max_height) {
+		*w = tl->current.min_width;
+		*h = tl->current.min_height;
+	}
+}
+
+/* Remember the hint of the last commit; true if it differs from the one
+ * before. A client changing it (a clip with another aspect) must re-layout. */
+static bool view_hint_changed(struct pw_view *view)
+{
+	struct view_impl *impl = impl_of(view);
+	int w, h;
+
+	view_fixed_size(view, &w, &h);
+	if (w == impl->hint_w && h == impl->hint_h)
+		return false;
+	impl->hint_w = w;
+	impl->hint_h = h;
+	return true;
+}
+
+/* Both stacked apps mapped: fill first and second with them and slots[] with
+ * their boxes. Several mapped views with one app_id: the most recently
+ * focused (list front) is the one which tiles. */
+static bool tile_active(struct pw_server *server, struct pw_view **first,
+		struct pw_view **second, struct wlr_box slots[2])
+{
+	struct pw_output *output = first_output(server);
+	struct pw_view *v, *pair[2] = { NULL, NULL };
+	struct pw_tile_box usable, out[2];
+	struct pw_tile_hint hints[2] = {{0}, {0}};
+	struct wlr_box area;
+
+	if (!output || !server->config || server->config->n_stack != 2)
+		return false;
+	wl_list_for_each(v, &server->views, link) {
+		int i = v->mapped ? view_stack_index(v) : -1;
+		if (i >= 0 && !pair[i])
+			pair[i] = v;
+	}
+	if (!pair[0] || !pair[1])
+		return false;
+
+	pw_output_usable_area(output, &area);
+	usable = (struct pw_tile_box){ area.x, area.y, area.width, area.height };
+	for (int i = 0; i < 2; i++) {
+		const struct pw_app_rule *rule = pw_config_app(server->config,
+			pair[i]->xdg_toplevel->app_id);
+		view_fixed_size(pair[i], &hints[i].fixed_w, &hints[i].fixed_h);
+		if (rule) {
+			hints[i].aspect_w = rule->aspect_w;
+			hints[i].aspect_h = rule->aspect_h;
+		}
+	}
+	if (!pw_tile_layout(&usable, hints, out))
+		return false;
+
+	for (int i = 0; i < 2; i++)
+		slots[i] = (struct wlr_box){ out[i].x, out[i].y, out[i].w, out[i].h };
+	*first = pair[0];
+	*second = pair[1];
+	return true;
+}
+
+/* The scene needs nothing here for direct scanout: it only scans out a
+ * surface which covers the whole output alone, and two windows are two
+ * entries in its render list. */
 static void view_arrange(struct pw_view *view)
 {
 	struct wlr_xdg_toplevel *tl = view->xdg_toplevel;
 	struct pw_output *output = first_output(view->server);
-	struct wlr_box box;
+	struct pw_view *first, *second;
+	struct wlr_box box, slots[2];
+	bool tiled = false;
 
 	if (!output || !tl->base->initialized)
 		return;
@@ -60,11 +161,22 @@ static void view_arrange(struct pw_view *view)
 	if (box.width <= 0 || box.height <= 0)
 		return;
 
+	if (tile_active(view->server, &first, &second, slots)) {
+		if (view == first) {
+			box = slots[0];
+			tiled = true;
+		} else if (view == second) {
+			box = slots[1];
+			tiled = true;
+		}
+	}
+
 	wlr_scene_node_set_position(&view->scene_tree->node, box.x, box.y);
 
 	/* The setters skip redundant configures, so this is cheap to repeat. */
 	wlr_xdg_toplevel_set_maximized(tl, true);
-	wlr_xdg_toplevel_set_fullscreen(tl, tl->requested.fullscreen);
+	/* A fullscreen request cannot be honoured inside a slot. */
+	wlr_xdg_toplevel_set_fullscreen(tl, !tiled && tl->requested.fullscreen);
 	wlr_xdg_toplevel_set_size(tl, box.width, box.height);
 }
 
@@ -102,7 +214,9 @@ static void focus_keyboard(struct pw_server *server, struct pw_view *view)
 			NULL, 0, NULL);
 }
 
-void pw_view_focus(struct pw_view *view)
+/* restack false: only the keyboard focus and activation move (tiled windows
+ * do not overlap, so there is nothing to raise). */
+static void view_focus(struct pw_view *view, bool restack)
 {
 	struct pw_server *server;
 	struct pw_view *prev;
@@ -117,9 +231,28 @@ void pw_view_focus(struct pw_view *view)
 	if (prev && prev != view)
 		view_set_activated(prev, false);
 
-	wlr_scene_node_raise_to_top(&view->scene_tree->node);
-	wl_list_remove(&view->link);
-	wl_list_insert(&server->views, &view->link);
+	if (restack) {
+		struct pw_view *first, *second, *partner = NULL;
+		struct wlr_box slots[2];
+
+		/* A tiled window brings its partner along, just below it, or a
+		 * maximized third app raised in between would hide one of them. */
+		if (tile_active(server, &first, &second, slots)) {
+			if (view == first)
+				partner = second;
+			else if (view == second)
+				partner = first;
+		}
+		if (partner)
+			wlr_scene_node_raise_to_top(&partner->scene_tree->node);
+		wlr_scene_node_raise_to_top(&view->scene_tree->node);
+		wl_list_remove(&view->link);
+		wl_list_insert(&server->views, &view->link);
+		if (partner) {
+			wl_list_remove(&partner->link);
+			wl_list_insert(&view->link, &partner->link);
+		}
+	}
 	server->focused_view = view;
 	if (prev != view)
 		server->panel_forced_visible = false;
@@ -129,9 +262,23 @@ void pw_view_focus(struct pw_view *view)
 	pw_panel_update(server);
 }
 
+void pw_view_focus(struct pw_view *view)
+{
+	view_focus(view, true);
+}
+
 void pw_view_cycle(struct pw_server *server)
 {
-	struct pw_view *front, *next;
+	struct pw_view *front, *next, *first, *second;
+	struct wlr_box slots[2];
+
+	/* With both tiled apps on screen, alt+Tab moves the keyboard between
+	 * them; both stay where they are. */
+	if (server->focused_view && tile_active(server, &first, &second, slots) &&
+			(server->focused_view == first || server->focused_view == second)) {
+		view_focus(server->focused_view == first ? second : first, false);
+		return;
+	}
 
 	if (wl_list_empty(&server->views) || server->views.next->next == &server->views)
 		return;
@@ -248,7 +395,11 @@ static void view_map(struct wl_listener *l, void *data)
 		wl_list_insert(&view->server->views, &view->link);
 	}
 	view_create_handles(view);
-	view_arrange(view);
+	/* A stacked app appearing changes its partner's slot too. */
+	if (view_stack_index(view) >= 0)
+		pw_view_arrange_all(view->server);
+	else
+		view_arrange(view);
 	pw_view_focus(view);
 
 	/* The hint is double-buffered state, so it is current once the surface
@@ -287,6 +438,9 @@ static void view_unmap(struct wl_listener *l, void *data)
 		}
 		pw_panel_update(server);
 	}
+	/* The partner of a stacked app gets the whole area back. */
+	if (view_stack_index(view) >= 0)
+		pw_view_arrange_all(server);
 }
 
 static void view_commit(struct wl_listener *l, void *data)
@@ -300,6 +454,10 @@ static void view_commit(struct wl_listener *l, void *data)
 		 * client still needs its first configure. */
 		wlr_xdg_surface_schedule_configure(view->xdg_toplevel->base);
 	}
+	/* min and max size take effect at commit; a stacked app which changes
+	 * them at run time changes the split. */
+	if (view_hint_changed(view) && view->mapped && view_stack_index(view) >= 0)
+		pw_view_arrange_all(view->server);
 }
 
 static void view_destroy(struct wl_listener *l, void *data)
@@ -368,6 +526,10 @@ static void view_set_app_id(struct wl_listener *l, void *data)
 	struct pw_view *view = wl_container_of(l, view, set_app_id);
 	(void)data;
 	view_update_title(view);
+	/* the new app_id may join or leave the stack; arranging is idempotent,
+	 * so views which are unaffected get no new configure */
+	if (view->mapped)
+		pw_view_arrange_all(view->server);
 }
 
 static void new_xdg_toplevel(struct wl_listener *l, void *data)
