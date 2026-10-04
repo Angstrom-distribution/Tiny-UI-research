@@ -2,6 +2,11 @@
  *   pw-tile-client landscape   output 1280x720, [layout] stack = tile-a, tile-b,
  *                              [app.tile-a] aspect = 1:2
  *   pw-tile-client portrait    the same output turned to 720x1280, no aspect
+ *   pw-tile-client nopan       the portrait run with a bottom anchored layer
+ *                              surface (namespace wvkbd, exclusive zone 100)
+ *                              standing in for the keyboard and [layout] pan
+ *                              empty: it shrinks the usable area, so the pair
+ *                              is laid out again, and hiding it restores them
  * One connection, two toplevels (app_ids tile-a and tile-b), and the configure
  * sizes the compositor sends are checked after every step. */
 #define _GNU_SOURCE
@@ -19,11 +24,13 @@
 #include <unistd.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
 static struct wl_display *dpy;
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
+static struct zwlr_layer_shell_v1 *layer_shell;
 
 struct win {
 	const char *name;
@@ -63,6 +70,8 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, wl_shm_interface.name))
 		shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
+	else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name))
+		layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface, 1);
 	else if (!strcmp(iface, xdg_wm_base_interface.name)) {
 		wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, ver < 2 ? ver : 2);
 		xdg_wm_base_add_listener(wm_base, &wm_listener, NULL);
@@ -203,6 +212,98 @@ static void expect_size(const char *step, struct win *w, int width, int height)
 	fflush(stdout);
 }
 
+/* ---- the keyboard stand-in -------------------------------------------- */
+
+/* A bottom anchored layer surface with an exclusive zone, in the namespace of
+ * wvkbd. Like wvkbd it is hidden by attaching no buffer and shown again by
+ * committing and attaching one after the configure that follows. */
+static struct {
+	struct wl_surface *surface;
+	struct zwlr_layer_surface_v1 *ls;
+	int zone;
+	int w, h;		/* last configure */
+	int n_configures;
+	bool wanted;		/* attach a buffer at the next configure */
+} kb;
+
+static void kbd_attach(void)
+{
+	int bw = kb.w > 0 ? kb.w : 64, bh = kb.h > 0 ? kb.h : kb.zone;
+	size_t size = (size_t)bw * bh * 4;
+	int fd = memfd_create("picowl-kbd", MFD_CLOEXEC);
+
+	if (fd < 0 || ftruncate(fd, size) < 0)
+		fail("memfd");
+	uint32_t *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED)
+		fail("mmap");
+	for (size_t i = 0; i < (size_t)bw * bh; i++)
+		map[i] = 0xff00ff00;
+	munmap(map, size);
+	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+	struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, bw, bh, bw * 4,
+		WL_SHM_FORMAT_XRGB8888);
+	wl_shm_pool_destroy(pool);
+	close(fd);
+	wl_surface_attach(kb.surface, buf, 0, 0);
+	wl_surface_damage_buffer(kb.surface, 0, 0, bw, bh);
+	wl_surface_commit(kb.surface);
+	wl_buffer_destroy(buf);
+}
+
+static void ls_configure(void *d, struct zwlr_layer_surface_v1 *ls, uint32_t serial,
+	uint32_t width, uint32_t height)
+{
+	(void)d;
+	zwlr_layer_surface_v1_ack_configure(ls, serial);
+	kb.w = width;
+	kb.h = height;
+	kb.n_configures++;
+	if (kb.wanted)
+		kbd_attach();
+}
+static void ls_closed(void *d, struct zwlr_layer_surface_v1 *ls)
+{
+	(void)d; (void)ls;
+	fail("keyboard layer surface was closed");
+}
+static const struct zwlr_layer_surface_v1_listener ls_listener = { ls_configure, ls_closed };
+
+static void kbd_show(int zone)
+{
+	int before = kb.n_configures;
+	int64_t end = now_ms() + 3000;
+
+	if (!layer_shell)
+		fail("no zwlr_layer_shell_v1");
+	kb.wanted = true;
+	if (!kb.ls) {
+		kb.zone = zone;
+		kb.surface = wl_compositor_create_surface(compositor);
+		kb.ls = zwlr_layer_shell_v1_get_layer_surface(layer_shell, kb.surface, NULL,
+			ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "wvkbd");
+		zwlr_layer_surface_v1_add_listener(kb.ls, &ls_listener, NULL);
+		zwlr_layer_surface_v1_set_size(kb.ls, 0, zone);
+		zwlr_layer_surface_v1_set_anchor(kb.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+		zwlr_layer_surface_v1_set_exclusive_zone(kb.ls, zone);
+	}
+	wl_surface_commit(kb.surface);
+	while (kb.n_configures == before && now_ms() < end)
+		pump(50);
+	if (kb.n_configures == before)
+		fail("the keyboard surface was never configured");
+	wl_display_roundtrip(dpy);
+}
+
+static void kbd_hide(void)
+{
+	kb.wanted = false;
+	wl_surface_attach(kb.surface, NULL, 0, 0);
+	wl_surface_commit(kb.surface);
+	wl_display_roundtrip(dpy);
+}
+
 static void expect_active(const char *step, struct win *w, bool active)
 {
 	if (w->activated != active)
@@ -276,10 +377,38 @@ static void portrait(void)
 	wl_display_roundtrip(dpy);
 }
 
+/* The keyboard takes 100 rows at the bottom of the 720x1280 portrait output. */
+#define KBD_ZONE 100
+
+/* [layout] pan empty: the keyboard shrinks the usable area for everyone. */
+static void nopan(void)
+{
+	struct win a, b;
+
+	open_win(&b, "tile-b");
+	open_win(&a, "tile-a");
+	expect_size("pair", &a, 720, 640);
+	expect_size("pair", &b, 720, 640);
+	kbd_show(KBD_ZONE);
+	expect_size("shrunk", &a, 720, 590);
+	expect_size("shrunk", &b, 720, 590);
+	kbd_hide();
+	expect_size("restored", &a, 720, 640);
+	expect_size("restored", &b, 720, 640);
+	close_win(&a);
+	close_win(&b);
+	wl_display_roundtrip(dpy);
+}
+
 int main(int argc, char **argv)
 {
-	if (argc != 2 || (strcmp(argv[1], "landscape") && strcmp(argv[1], "portrait"))) {
-		fprintf(stderr, "usage: pw-tile-client landscape|portrait\n");
+	static const char *const modes[] = { "landscape", "portrait", "nopan" };
+	bool known = false;
+
+	for (unsigned i = 0; argc >= 2 && i < sizeof(modes) / sizeof(modes[0]); i++)
+		known |= !strcmp(argv[1], modes[i]);
+	if (!known || argc != 2) {
+		fprintf(stderr, "usage: pw-tile-client landscape|portrait|nopan\n");
 		return 2;
 	}
 	alarm(30);
@@ -294,8 +423,10 @@ int main(int argc, char **argv)
 
 	if (!strcmp(argv[1], "landscape"))
 		landscape();
-	else
+	else if (!strcmp(argv[1], "portrait"))
 		portrait();
+	else
+		nopan();
 	printf("pw-tile-client: ok %s\n", argv[1]);
 	return 0;
 }

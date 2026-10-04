@@ -106,6 +106,13 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 			if (!s->initialized) {
 				continue;
 			}
+			/* The unmap event of a null buffer commit comes before wlroots
+			 * resets the surface for it. A configure sent from here is
+			 * dropped by that reset, and the client's ack of it is a
+			 * protocol error ("wrong configure serial"). */
+			if (ls->unmapping) {
+				continue;
+			}
 			if (exclusive != (s->current.exclusive_zone > 0)) {
 				continue;
 			}
@@ -219,6 +226,7 @@ static void handle_unmap(struct wl_listener *listener, void *data)
 	(void)data;
 	struct pw_layer_surface *ls = wl_container_of(listener, ls, unmap);
 	ls->mapped = false;
+	ls->unmapping = true;
 	restore_focus(ls);
 	if (ls->output) {
 		pw_layer_arrange(ls->output);
@@ -231,6 +239,9 @@ static void handle_commit(struct wl_listener *listener, void *data)
 	(void)data;
 	struct pw_layer_surface *ls = wl_container_of(listener, ls, commit);
 	struct wlr_layer_surface_v1 *s = ls->wlr_layer_surface;
+
+	/* The commit which unmapped it is over: the surface has been reset. */
+	ls->unmapping = false;
 
 	if (!ls->output) {
 		return;

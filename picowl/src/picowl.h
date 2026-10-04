@@ -301,6 +301,7 @@ struct pw_layer_surface {
 	struct wlr_scene_layer_surface_v1 *scene_layer;
 	struct wlr_scene_tree *scene_tree;
 	bool mapped;
+	bool unmapping;            /* between the unmap event and the end of its commit */
 
 	struct wl_listener map;
 	struct wl_listener unmap;

@@ -101,9 +101,18 @@ pw_im_client = executable('pw-im-client',
   ti_client_h, ti_client_c, im_client_h, im_client_c,
   dependencies: [wayland_client])
 
-# One process, two toplevels: the configure sizes of the tiled layout.
+ls_xml = files('../protocols/wlr-layer-shell-unstable-v1.xml')
+ls_client_h = custom_target('wlr-layer-shell-client-header',
+  input: ls_xml, output: 'wlr-layer-shell-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+ls_client_c = custom_target('wlr-layer-shell-client-code',
+  input: ls_xml, output: 'wlr-layer-shell-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
+# One process, a few toplevels and a keyboard stand-in: the configure sizes of
+# the tiled layout.
 pw_tile_client = executable('pw-tile-client',
-  'pw-tile-client.c', xdg_client_h, xdg_client_c,
+  'pw-tile-client.c', xdg_client_h, xdg_client_c, ls_client_h, ls_client_c,
   dependencies: [wayland_client])
 
 # A stand-in for wvkbd that logs the signals it gets, and a client which
