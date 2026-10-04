@@ -1,7 +1,7 @@
 option('tests', type: 'boolean', value: true, description: 'Build the unit tests (tests/)')
 option('systemd', type: 'feature', value: 'auto', description: 'Install the systemd unit')
 option('tools', type: 'boolean', value: true, description: 'Build and install host tools (picowl-cursor-convert, and picowl-commit-loop when wayland-client is found)')
-option('panel', type: 'feature', value: 'auto', description: 'Build and install picowl-panel, a layer-shell panel with clock, battery, backlight and volume sliders (needs wayland-client and alsa)')
+option('panel', type: 'feature', value: 'auto', description: 'Build and install picowl-panel, a layer-shell panel with clock, battery, backlight and volume, and pop-out slider rows (needs wayland-client and alsa)')
 option('rss_ceiling_kb', type: 'integer', value: 12288, description: 'VmHWM ceiling (kB) enforced by tests/rss.sh')
 option('udev', type: 'feature', value: 'auto', description: 'Install the backlight udev rule (dir from udev.pc udevdir)')
 option('udevrulesdir', type: 'string', value: '', description: 'udev rules install dir (default: <udevdir>/rules.d, else /usr/lib/udev/rules.d)')

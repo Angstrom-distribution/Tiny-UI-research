@@ -240,7 +240,7 @@ test('wvkbd-patches-sync', find_program('sh'),
 # picowl-panel without wayland: value mapping, text, layout, touch, font,
 # drawing and sysfs access.
 test('panel', executable('test-panel', 'test-panel.c',
-  link_with: pwpanel_lib,
+  link_with: pwpanel_lib, dependencies: libm,
   include_directories: include_directories('../panel')))
 
 # picowl-panel against headless picowl. pw-fake-ctl is an alsa-lib control

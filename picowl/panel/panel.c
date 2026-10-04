@@ -1,13 +1,21 @@
 /*
- * picowl-panel - a tiny layer-shell panel for picowl on 240x320 handhelds:
- * clock, battery, a backlight slider and a volume slider, drawn with wl_shm.
+ * picowl-panel - a tiny layer-shell panel for picowl on 240x320 handhelds: a
+ * slim bar with the clock, the battery and a backlight and a volume button.
+ * Tapping a button pops a slider row out under the bar. Drawn with wl_shm.
  *
  * One thread, one poll() loop. Nothing wakes it up without a reason: the
  * Wayland socket, the minute timer of the clock, a 30 s timer for the battery,
- * the mixer's descriptors, and a short deadline only while a drag has a value
- * waiting to be written. A redraw happens when a value changes, and only the
- * changed rectangles are damaged. The pure parts are in panel-logic.c,
- * panel-draw.c and panel-sys.c; this file is the glue.
+ * the mixer's descriptors, a timer that exists only while a slider row is open
+ * (it closes the row 3 s after the last touch), and a short deadline only
+ * while a drag has a value waiting to be written. A redraw happens when a value
+ * changes, and only the changed rectangles are damaged. The pure parts are in
+ * panel-logic.c, panel-gfx.c, panel-draw.c and panel-sys.c; this file is the
+ * glue.
+ *
+ * The row is part of the same layer surface: opening it asks the compositor
+ * for a taller surface (the exclusive zone stays the height of the bar, so no
+ * window moves), and the row is drawn when the configure for the new size has
+ * been acknowledged. Until then the old, smaller buffer stays on screen.
  */
 #define _GNU_SOURCE
 #include <alsa/asoundlib.h>
@@ -40,13 +48,20 @@
 #define MAX_DAMAGE 8
 #define MAX_INJECT 64
 
-enum { W_CLOCK = 1, W_BATTERY = 2, W_BACKLIGHT = 4, W_VOLUME = 8 };
+/* Widgets to redraw. W_ROW_VALUE is the track, thumb and value of the open
+ * row, W_ROW the whole row. */
+enum {
+	W_CLOCK = 1, W_BATTERY = 2, W_BACKLIGHT = 4, W_VOLUME = 8,
+	W_ROW_VALUE = 16, W_ROW = 32,
+};
 
 struct panel {
 	/* options */
-	int height;
+	int height;		/* the bar */
 	bool bottom;
-	int scale;
+	const char *font_path;
+	int font_px;
+	int bar_alpha, popup_alpha;
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
 
@@ -61,8 +76,9 @@ struct panel {
 	struct zwlr_layer_surface_v1 *ls;
 	int n_outputs;
 	bool shm_565;
-	bool configured, closed, need_buffer;
+	bool configured, closed, need_buffer, first;
 	int cfg_w, cfg_h;
+	int req_h;		/* the surface height last asked for */
 
 	/* the single buffer */
 	struct wl_buffer *buffer;
@@ -70,6 +86,8 @@ struct panel {
 	size_t map_size;
 	struct pl_canvas canvas;
 	struct pl_layout layout;
+	struct pl_assets assets;
+	bool font_ttf;
 
 	/* damage collected since the last commit, and the widgets to redraw */
 	unsigned dirty;
@@ -79,6 +97,7 @@ struct panel {
 	/* what is shown */
 	struct pl_state st;
 	struct pl_touch touch;
+	struct pl_popup pop;
 	int px, py;
 
 	/* writes waiting for the throttle */
@@ -95,7 +114,7 @@ struct panel {
 	struct pollfd mixer_fds[8];
 	int n_mixer_fds;
 
-	int clock_fd, battery_fd, sig_fd;
+	int clock_fd, battery_fd, popup_fd, sig_fd;
 	bool quit;
 	int exit_code;
 };
@@ -152,36 +171,65 @@ static void commit(struct panel *p)
 	wl_surface_commit(p->surface);
 }
 
+/* Ask for the surface the open or closed row needs. The exclusive zone is
+ * never touched: the bar keeps its strip, the row only covers windows. Done
+ * after a pending configure has been answered with its buffer, so that a
+ * commit never carries an acknowledged size and a buffer of another one. */
+static void sync_size(struct panel *p)
+{
+	int want = pl_surface_height(p->height, p->pop.open != PL_SLIDER_NONE);
+
+	if (want == p->req_h || !p->configured || p->need_buffer)
+		return;
+	p->req_h = want;
+	zwlr_layer_surface_v1_set_size(p->ls, 0, want);
+	wl_surface_commit(p->surface);
+}
+
 /* Draw the widgets that changed into the buffer and send them. */
 static void flush_redraw(struct panel *p)
 {
 	const struct pl_layout *l = &p->layout;
+	const struct pl_canvas *c = &p->canvas;
+	int open = p->pop.open;
 
+	sync_size(p);
 	if (!p->buffer || !p->dirty)
 		return;
 	if (p->dirty & W_CLOCK) {
-		pl_render_clock(&p->canvas, l, &p->st);
+		pl_render_clock(c, l, &p->assets, &p->st);
 		add_damage(p, l->clock);
 	}
 	if (p->dirty & W_BATTERY) {
-		pl_render_battery(&p->canvas, l, &p->st);
+		pl_render_battery(c, l, &p->assets, &p->st);
 		add_damage(p, l->battery);
 	}
-	if (p->dirty & W_BACKLIGHT) {
-		pl_render_slider(&p->canvas, l, PL_SLIDER_BACKLIGHT, p->st.bl_pct);
-		add_damage(p, l->slider[PL_SLIDER_BACKLIGHT].cell);
-	}
-	if (p->dirty & W_VOLUME) {
-		pl_render_slider(&p->canvas, l, PL_SLIDER_VOLUME, p->st.vol_pct);
-		add_damage(p, l->slider[PL_SLIDER_VOLUME].cell);
+	for (int s = 0; s < PL_SLIDERS; s++)
+		if (p->dirty & (W_BACKLIGHT << s)) {
+			pl_render_button(c, l, &p->assets, &p->st, open, s);
+			add_damage(p, pl_button_rect(l, s));
+		}
+	/* A row that is on its way out is left as it is until the smaller
+	 * surface arrives. */
+	if (l->row_shown && open != PL_SLIDER_NONE) {
+		if (p->dirty & W_ROW) {
+			pl_render_row(c, l, &p->assets, &p->st, open);
+			add_damage(p, l->row);
+		} else if (p->dirty & W_ROW_VALUE) {
+			pl_render_row_value(c, l, &p->assets, &p->st, open);
+			add_damage(p, pl_row_value_rect(l));
+		}
 	}
 	if (p->watch) {
-		static const char *const names[] = { "clock", "battery", "backlight", "volume" };
+		static const char *const names[] = { "clock", "battery", "backlight", "volume", "row" };
+		unsigned d = p->dirty;
 		char why[48] = "";
-		for (int i = 0; i < 4; i++)
-			if (p->dirty & (1u << i))
+		if (d & W_ROW)
+			d &= ~(unsigned)W_ROW_VALUE;
+		for (int i = 0; i < 6; i++)
+			if (d & (1u << i))
 				snprintf(why + strlen(why), sizeof(why) - strlen(why), "%s%s",
-					*why ? "," : "", names[i]);
+					*why ? "," : "", names[i > 4 ? 4 : i]);
 		p->dirty = 0;
 		commit(p);
 		dump_state(p, why);
@@ -214,11 +262,43 @@ static int make_shm_file(size_t size)
 	return fd;
 }
 
-/* Lay out for w x h, allocate a buffer of that size, draw everything and
- * commit. The old buffer is released after the new one is attached. */
+static void add_rects(struct wl_region *rg, const struct pl_rect *r, int n)
+{
+	for (int i = 0; i < n; i++)
+		wl_region_add(rg, r[i].x, r[i].y, r[i].w, r[i].h);
+}
+
+/* Touches land on the bar and the row only, whatever size the compositor made
+ * the surface; what is opaque is left to the compositor not to blend under. */
+static void set_regions(struct panel *p, int w, int h)
+{
+	const struct pl_layout *l = &p->layout;
+	struct pl_rect in = pl_input_rect(l, w, h), opaque[2];
+	int n = 0;
+
+	if (p->canvas.fmt != PL_FMT_ARGB8888)
+		opaque[n++] = (struct pl_rect){ 0, 0, w, h };
+	else
+		n = pl_opaque_rects(l, p->bar_alpha, p->popup_alpha, opaque);
+
+	struct wl_region *rg = wl_compositor_create_region(p->compositor);
+	add_rects(rg, opaque, n);
+	wl_surface_set_opaque_region(p->surface, rg);
+	wl_region_destroy(rg);
+	rg = wl_compositor_create_region(p->compositor);
+	add_rects(rg, &in, 1);
+	wl_surface_set_input_region(p->surface, rg);
+	wl_region_destroy(rg);
+}
+
+/* Lay out for w x h, allocate a buffer of that size and format, draw
+ * everything and commit. The old buffer is released after the new one is
+ * attached. */
 static bool rebuild(struct panel *p, int w, int h)
 {
-	int bpp = p->shm_565 ? 2 : 4;
+	bool row_shown = h >= pl_surface_height(p->height, true);
+	enum pl_fmt fmt = pl_pick_format(p->bar_alpha, p->popup_alpha, row_shown, p->shm_565);
+	int bpp = fmt == PL_FMT_RGB565 ? 2 : 4;
 	size_t stride = (size_t)w * bpp, size = stride * h;
 	struct wl_buffer *old = p->buffer;
 	void *old_map = p->map;
@@ -226,7 +306,7 @@ static bool rebuild(struct panel *p, int w, int h)
 
 	if (w < 1 || h < 2 || w > 8192 || h > 8192)
 		return false;
-	if (!old || p->canvas.w != w || p->canvas.h != h) {
+	if (!old || p->canvas.w != w || p->canvas.h != h || p->canvas.fmt != fmt) {
 		int fd = make_shm_file(size);
 		if (fd < 0) {
 			say("cannot allocate the %dx%d buffer: %s", w, h, strerror(errno));
@@ -240,21 +320,23 @@ static bool rebuild(struct panel *p, int w, int h)
 		}
 		struct wl_shm_pool *pool = wl_shm_create_pool(p->shm, fd, (int32_t)size);
 		p->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, (int32_t)stride,
-			p->shm_565 ? WL_SHM_FORMAT_RGB565 : WL_SHM_FORMAT_XRGB8888);
+			fmt == PL_FMT_RGB565 ? WL_SHM_FORMAT_RGB565 :
+			fmt == PL_FMT_ARGB8888 ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888);
 		wl_shm_pool_destroy(pool);
 		close(fd);
 		p->map = map;
 		p->map_size = size;
-		p->canvas = (struct pl_canvas){ map, w, h, (int)stride, p->shm_565 };
+		p->canvas = (struct pl_canvas){ map, w, h, (int)stride, fmt };
 	}
-	pl_layout_compute(&p->layout, w, h, p->scale);
-	pl_render_all(&p->canvas, &p->layout, &p->st);
-
-	/* Everything is opaque: the compositor need not blend under it. */
-	struct wl_region *rg = wl_compositor_create_region(p->compositor);
-	wl_region_add(rg, 0, 0, w, h);
-	wl_surface_set_opaque_region(p->surface, rg);
-	wl_region_destroy(rg);
+	struct pl_metrics m;
+	pl_assets_metrics(&p->assets, &m);
+	pl_layout_compute(&p->layout, w, p->height, row_shown, p->bottom, &m);
+	if (!pl_assets_prepare(&p->assets, &p->layout)) {
+		say("cannot allocate the icons");
+		return false;
+	}
+	pl_render_all(&p->canvas, &p->layout, &p->assets, &p->st, p->pop.open);
+	set_regions(p, w, h);
 
 	p->dirty = 0;
 	p->n_dmg = 0;
@@ -269,6 +351,18 @@ static bool rebuild(struct panel *p, int w, int h)
 }
 
 /* ---- backlight and volume ---- */
+
+static void popup_close(struct panel *p);
+
+/* The value of slider s changed on screen: its button (the volume icon shows
+ * the level) and, if it is the open one, its row. */
+static void mark_value(struct panel *p, int s)
+{
+	if (s == PL_SLIDER_VOLUME)
+		p->dirty |= W_VOLUME;
+	if (p->pop.open == s)
+		p->dirty |= W_ROW_VALUE;
+}
 
 /* The thumb shows what the device holds: picowl dims, caps on the LOW profile
  * and the user's own tools write the brightness behind the panel's back, and
@@ -285,7 +379,7 @@ static void backlight_refresh(struct panel *p)
 	int v = pl_bl_pct_from_raw(raw, p->bl.max);
 	if (v != p->st.bl_pct) {
 		p->st.bl_pct = v;
-		p->dirty |= W_BACKLIGHT;
+		mark_value(p, PL_SLIDER_BACKLIGHT);
 	}
 }
 
@@ -304,7 +398,7 @@ static void apply_backlight(struct panel *p, int pct)
 	int raw = pl_backlight_read(&p->bl);
 	if (raw >= 0) {
 		p->st.bl_pct = pl_bl_pct_from_raw(raw, p->bl.max);
-		p->dirty |= W_BACKLIGHT;
+		mark_value(p, PL_SLIDER_BACKLIGHT);
 	}
 }
 
@@ -414,7 +508,7 @@ static void apply_volume(struct panel *p, int pct)
 	int v = mixer_read_pct(p);
 	if (v >= 0) {
 		p->st.vol_pct = v;
-		p->dirty |= W_VOLUME;
+		mark_value(p, PL_SLIDER_VOLUME);
 	}
 }
 
@@ -432,6 +526,9 @@ static void mixer_events(struct panel *p, int fds_start, struct pollfd *pfd)
 		say("the mixer went away, the volume slider is disabled");
 		mixer_close(p);
 		p->dirty |= W_VOLUME;
+		/* A row for a slider that is gone has nothing to show. */
+		if (p->pop.open == PL_SLIDER_VOLUME)
+			popup_close(p);
 		return;
 	}
 	/* Our own drag would come back quantized and make the thumb jump. */
@@ -440,7 +537,7 @@ static void mixer_events(struct panel *p, int fds_start, struct pollfd *pfd)
 	int v = mixer_read_pct(p);
 	if (v >= 0 && v != p->st.vol_pct) {
 		p->st.vol_pct = v;
-		p->dirty |= W_VOLUME;
+		mark_value(p, PL_SLIDER_VOLUME);
 	}
 }
 
@@ -453,7 +550,7 @@ static void set_slider(struct panel *p, int s, int v)
 	if (*cur == v)
 		return;
 	*cur = v;
-	p->dirty |= s == PL_SLIDER_BACKLIGHT ? W_BACKLIGHT : W_VOLUME;
+	mark_value(p, s);
 	p->pending[s] = true;
 	p->pending_val[s] = v;
 }
@@ -493,30 +590,102 @@ static int apply_timeout_ms(const struct panel *p)
 	return t;
 }
 
+/* ---- the pop-out row ---- */
+
+/* The timer exists to close the row: armed while it is open only. A touch
+ * moves the deadline in pl_popup and not the timer; when the timer fires it is
+ * set again for what is left. */
+static void popup_arm(struct panel *p, int ms)
+{
+	struct itimerspec its = { .it_value = { ms / 1000, (ms % 1000) * 1000000L } };
+
+	if (!its.it_value.tv_sec && !its.it_value.tv_nsec)
+		its.it_value.tv_nsec = 1;	/* all zero would disarm it */
+	timerfd_settime(p->popup_fd, 0, &its, NULL);
+}
+
+static void popup_disarm(struct panel *p)
+{
+	struct itimerspec off = { { 0, 0 }, { 0, 0 } };
+
+	timerfd_settime(p->popup_fd, 0, &off, NULL);
+}
+
+/* The open slider went from prev to p->pop.open: the buttons and the row
+ * change, and the surface is asked for its new size on the next flush. */
+static void popup_changed(struct panel *p, int prev)
+{
+	int now = p->pop.open;
+
+	for (int s = 0; s < PL_SLIDERS; s++)
+		if (s == prev || s == now)
+			p->dirty |= W_BACKLIGHT << s;
+	if (now != PL_SLIDER_NONE)
+		p->dirty |= W_ROW;
+	if (now == PL_SLIDER_NONE)
+		popup_disarm(p);
+	else if (prev == PL_SLIDER_NONE)
+		popup_arm(p, PL_POPUP_MS);
+}
+
+static void popup_close(struct panel *p)
+{
+	int prev = p->pop.open;
+
+	if (prev == PL_SLIDER_NONE)
+		return;
+	p->pop.open = PL_SLIDER_NONE;
+	popup_changed(p, prev);
+}
+
+static void popup_timer(struct panel *p)
+{
+	int prev = p->pop.open;
+	int64_t now = now_ms();
+
+	if (pl_popup_expire(&p->pop, now, p->touch.down)) {
+		popup_changed(p, prev);
+		return;
+	}
+	int w = pl_popup_wait_ms(&p->pop, now, p->touch.down);
+	if (w > 0)
+		popup_arm(p, w);
+}
+
 static void touch_press(struct panel *p)
 {
 	bool en[PL_SLIDERS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0 };
+	struct pl_touch_out o;
 
 	/* set_slider ignores a value equal to the shown one, which must not be
 	 * a stale one. */
 	backlight_refresh(p);
-	int v, s = pl_touch_press(&p->touch, &p->layout, en, p->px, p->py, &v);
-
-	if (s != PL_SLIDER_NONE)
-		set_slider(p, s, v);
+	pl_touch_press(&p->touch, &p->layout, p->pop.open, en, p->px, p->py, &o);
+	pl_popup_touch(&p->pop, now_ms());
+	if (o.tap != PL_SLIDER_NONE) {
+		int prev = p->pop.open;
+		pl_popup_tap(&p->pop, o.tap, now_ms());
+		popup_changed(p, prev);
+	}
+	if (o.slider != PL_SLIDER_NONE)
+		set_slider(p, o.slider, o.value);
 }
 
 static void touch_motion(struct panel *p)
 {
-	int v, s = pl_touch_motion(&p->touch, &p->layout, p->px, &v);
+	struct pl_touch_out o;
 
-	if (s != PL_SLIDER_NONE)
-		set_slider(p, s, v);
+	pl_touch_motion(&p->touch, &p->layout, p->px, &o);
+	if (o.slider == PL_SLIDER_NONE)
+		return;
+	pl_popup_touch(&p->pop, now_ms());
+	set_slider(p, o.slider, o.value);
 }
 
 static void touch_release(struct panel *p)
 {
 	pl_touch_release(&p->touch);
+	pl_popup_touch(&p->pop, now_ms());
 	apply_pending(p, true);
 }
 
@@ -707,17 +876,62 @@ static void battery_update(struct panel *p)
 
 /* ---- test hooks ---- */
 
+static bool loop_once(struct panel *p, int max_ms);
+static bool handle_buffer(struct panel *p);
+
+/* A request for a new surface size is answered by a configure, and the row is
+ * drawn when the buffer for it is: let that happen before the next event. */
+static void settle(struct panel *p)
+{
+	for (int i = 0; i < 4 && !p->quit; i++) {
+		if (wl_display_roundtrip(p->dpy) < 0) {
+			p->quit = true;
+			return;
+		}
+		if (!p->need_buffer)
+			return;
+		if (!handle_buffer(p))
+			return;
+		flush_redraw(p);
+	}
+}
+
+static void wait_ms(struct panel *p, int ms)
+{
+	int64_t end = now_ms() + ms;
+
+	while (!p->quit) {
+		int64_t left = end - now_ms();
+		if (left <= 0 || !loop_once(p, (int)left))
+			break;
+	}
+}
+
+static void tap_button(struct panel *p, int slider)
+{
+	const struct pl_rect *b = &p->layout.button[slider];
+
+	p->px = b->x + b->w / 2;
+	p->py = b->y + b->h / 2;
+	touch_press(p);
+	flush_redraw(p);
+	if (p->touch.down)
+		touch_release(p);
+}
+
 /* "p X,Y" press, "m X,Y" motion, "e X,Y" pointer enter, "r" release,
- * separated by ; or space: the same handlers as the wl_pointer events, for
- * tests without a pointer. "b RAW" writes the backlight as another process
- * would. */
+ * "ibl" and "ivol" tap the backlight or the volume button, "w MS" run the
+ * event loop for MS milliseconds (the auto-close, for one), separated by ; or
+ * space: the same handlers as the wl_pointer events, for tests without a
+ * pointer. "b RAW" writes the backlight as another process would. */
 static void run_inject(struct panel *p)
 {
 	char buf[MAX_INJECT * 12];
 	char *save = NULL;
 
 	snprintf(buf, sizeof(buf), "%s", p->inject);
-	for (char *tok = strtok_r(buf, "; ", &save); tok; tok = strtok_r(NULL, "; ", &save)) {
+	for (char *tok = strtok_r(buf, "; ", &save); tok && !p->quit;
+			tok = strtok_r(NULL, "; ", &save)) {
 		int x, y;
 		if (tok[0] == 'e' && sscanf(tok + 1, "%d,%d", &x, &y) == 2) {
 			p->px = x;
@@ -726,6 +940,11 @@ static void run_inject(struct panel *p)
 		} else if (tok[0] == 'b' && sscanf(tok + 1, "%d", &x) == 1) {
 			/* Another process sets the backlight. */
 			pl_backlight_write(&p->bl, x);
+		} else if (!strcmp(tok, "ibl") || !strcmp(tok, "ivol")) {
+			tap_button(p, tok[1] == 'b' ? PL_SLIDER_BACKLIGHT : PL_SLIDER_VOLUME);
+		} else if (tok[0] == 'w' && sscanf(tok + 1, "%d", &x) == 1) {
+			flush_redraw(p);
+			wait_ms(p, x);
 		} else if (tok[0] == 'r') {
 			if (p->touch.down)
 				touch_release(p);
@@ -740,6 +959,7 @@ static void run_inject(struct panel *p)
 			say("bad --inject token '%s'", tok);
 		}
 		flush_redraw(p);
+		settle(p);
 	}
 }
 
@@ -752,6 +972,11 @@ static const char *bat_name(enum pl_bat_status st)
 	case PL_BAT_AC: return "ac";
 	default: return "none";
 	}
+}
+
+static const char *slider_name(int s)
+{
+	return s == PL_SLIDER_BACKLIGHT ? "backlight" : s == PL_SLIDER_VOLUME ? "volume" : "none";
 }
 
 static void print_rect(const char *name, struct pl_rect r)
@@ -767,9 +992,22 @@ static void dump_state(const struct panel *p, const char *why)
 
 	if (why)
 		printf("redraw %s\n", why);
-	printf("panel width=%d height=%d row=%d format=%s anchor=%s scale=%d text_scale=%d\n",
-		l->w, l->h, l->row_h, p->shm_565 ? "RGB565" : "XRGB8888",
-		p->bottom ? "bottom" : "top", l->scale, l->text_scale);
+	printf("panel width=%d height=%d bar=%d row=%d format=%s anchor=%s popup=%s\n",
+		l->w, l->h, l->bar_h, l->row_shown ? l->row_h : 0,
+		p->canvas.fmt == PL_FMT_RGB565 ? "RGB565" :
+		p->canvas.fmt == PL_FMT_ARGB8888 ? "ARGB8888" : "XRGB8888",
+		p->bottom ? "bottom" : "top", slider_name(p->pop.open));
+	printf("style font=%s%s%s size=%d bar_alpha=%d popup_alpha=%d\n",
+		p->font_ttf ? "ttf" : "bitmap", p->font_ttf ? ":" : "",
+		p->font_ttf ? p->assets.font.path : "",
+		p->font_ttf ? p->assets.font.face[0].px : p->assets.font.scale[0] * 7,
+		p->bar_alpha, p->popup_alpha);
+	/* What the compositor is told: the exclusive zone is the bar and never
+	 * the row; the input region is the bar and the row. */
+	struct pl_rect in = pl_input_rect(l, p->canvas.w, p->canvas.h);
+	printf("surface exclusive=%d", l->bar_h);
+	print_rect("input", in);
+	printf("\n");
 	pl_clock_text(text, sizeof(text), p->st.hour, p->st.min);
 	printf("clock text=%s", text);
 	print_rect("rect", l->clock);
@@ -781,14 +1019,19 @@ static void dump_state(const struct panel *p, const char *why)
 	printf("\n");
 	for (int s = 0; s < PL_SLIDERS; s++) {
 		int v = s == PL_SLIDER_BACKLIGHT ? p->st.bl_pct : p->st.vol_pct;
-		printf("%s available=%d value=%d", s == PL_SLIDER_BACKLIGHT ? "backlight" : "volume",
-			v >= 0, v);
+		printf("%s available=%d value=%d", slider_name(s), v >= 0, v);
 		if (s == PL_SLIDER_BACKLIGHT && p->have_bl)
 			printf(" raw=%d max=%d", pl_backlight_read(&p->bl), p->bl.max);
-		print_rect("cell", l->slider[s].cell);
-		print_rect("track", l->slider[s].track);
-		if (v >= 0)
-			print_rect("thumb", pl_slider_thumb(&l->slider[s], v));
+		print_rect("button", l->button[s]);
+		printf("\n");
+	}
+	if (l->row_shown && p->pop.open != PL_SLIDER_NONE) {
+		int v = p->pop.open == PL_SLIDER_BACKLIGHT ? p->st.bl_pct : p->st.vol_pct;
+		printf("row slider=%s", slider_name(p->pop.open));
+		print_rect("rect", l->row);
+		print_rect("cell", l->slider.cell);
+		print_rect("track", l->slider.track);
+		print_rect("thumb", pl_slider_thumb(l, v));
 		printf("\n");
 	}
 	fflush(stdout);
@@ -800,9 +1043,16 @@ static void usage(FILE *out)
 {
 	fprintf(out,
 		"usage: picowl-panel [options]\n"
-		"  --height N          surface height in pixels, 40..120 (default %d)\n"
+		"  --height N          height of the bar in pixels, 24..80 (default %d)\n"
 		"  --bottom            anchor at the bottom edge (default: top)\n"
-		"  --scale N           integer UI scale of text and thumb, 1..%d (default 1)\n"
+		"  --font PATH         TrueType font file (default: the first of the\n"
+		"                      Liberation Sans and DejaVu Sans files that exist);\n"
+		"                      without a usable one the built-in bitmap font is used\n"
+		"  --font-size PX      size of the text in pixels, 8..48 (default: 15 at the\n"
+		"                      default height)\n"
+		"  --bar-alpha N       opacity of the bar, 0..255 (default %d)\n"
+		"  --popup-alpha N     opacity of the slider row, 0..255 (default %d);\n"
+		"                      below 255 the surface needs ARGB8888 while the row is open\n"
 		"  --dump-state        print the widget values and geometry after the first\n"
 		"                      frame and exit (for tests)\n"
 		"  --watch             test only: like --dump-state, and print the state again\n"
@@ -810,9 +1060,10 @@ static void usage(FILE *out)
 		"  --exit-after-frame  exit after the first frame\n"
 		"  --inject SPEC       test only: feed pointer events after the first frame\n"
 		"                      (p X,Y press; m X,Y motion; e X,Y enter; r release;\n"
-		"                      b RAW sets the backlight), before the dump\n"
+		"                      ibl, ivol tap a button; w MS wait; b RAW sets the\n"
+		"                      backlight), before the dump\n"
 		"  --help              this text\n",
-		PL_HEIGHT_DEFAULT, PL_SCALE_MAX);
+		PL_HEIGHT_DEFAULT, PL_ALPHA_BAR_DEFAULT, PL_ALPHA_POPUP_DEFAULT);
 }
 
 static bool parse_int(const char *s, int *v)
@@ -843,15 +1094,23 @@ static int parse_args(struct panel *p, int argc, char **argv)
 			p->watch = true;
 		} else if (!strcmp(a, "--exit-after-frame")) {
 			p->exit_after_frame = true;
-		} else if ((!strcmp(a, "--height") || !strcmp(a, "--scale")) && i + 1 < argc) {
+		} else if ((!strcmp(a, "--height") || !strcmp(a, "--font-size") ||
+				!strcmp(a, "--bar-alpha") || !strcmp(a, "--popup-alpha")) &&
+				i + 1 < argc) {
 			if (!parse_int(argv[++i], &v)) {
 				say("%s: '%s' is not a number", a, argv[i]);
 				return -1;
 			}
 			if (!strcmp(a, "--height"))
 				p->height = pl_clamp_height(v);
+			else if (!strcmp(a, "--font-size"))
+				p->font_px = v < 8 ? 8 : v > 48 ? 48 : v;
+			else if (!strcmp(a, "--bar-alpha"))
+				p->bar_alpha = pl_clamp_alpha(v);
 			else
-				p->scale = v < 1 ? 1 : v > PL_SCALE_MAX ? PL_SCALE_MAX : v;
+				p->popup_alpha = pl_clamp_alpha(v);
+		} else if (!strcmp(a, "--font") && i + 1 < argc) {
+			p->font_path = argv[++i];
 		} else if (!strcmp(a, "--inject") && i + 1 < argc) {
 			p->inject = argv[++i];
 		} else {
@@ -890,118 +1149,141 @@ static void first_frame(struct panel *p)
 		p->quit = true;
 }
 
-static void run_loop(struct panel *p)
+/* A configure has been answered: draw for its size. */
+static bool handle_buffer(struct panel *p)
 {
-	bool first = true;
-	struct pollfd pfd[4 + 8];
+	p->need_buffer = false;
+	int w = p->cfg_w > 0 ? p->cfg_w : 240;
+	int h = p->cfg_h > 0 ? p->cfg_h : pl_surface_height(p->height, false);
 
-	while (!p->quit) {
-		while (wl_display_prepare_read(p->dpy) != 0)
-			if (wl_display_dispatch_pending(p->dpy) < 0) {
-				display_gone(p);
-				return;
-			}
-		int fl = wl_display_flush(p->dpy);
-		if (fl < 0 && errno != EAGAIN) {
-			wl_display_cancel_read(p->dpy);
-			display_gone(p);
-			return;
-		}
+	if (p->buffer && w == p->canvas.w && h == p->canvas.h) {
+		/* Same size again: nothing to draw, but the configure is
+		 * answered by a commit. */
+		commit(p);
+		return true;
+	}
+	if (!rebuild(p, w, h)) {
+		p->exit_code = 1;
+		p->quit = true;
+		return false;
+	}
+	if (p->first) {
+		p->first = false;
+		first_frame(p);
+	} else if (p->watch) {
+		dump_state(p, "resize");
+	}
+	return true;
+}
 
-		int n = 0;
-		pfd[n++] = (struct pollfd){ wl_display_get_fd(p->dpy),
-			POLLIN | (fl < 0 ? POLLOUT : 0), 0 };
-		pfd[n++] = (struct pollfd){ p->sig_fd, POLLIN, 0 };
-		pfd[n++] = (struct pollfd){ p->clock_fd, POLLIN, 0 };
-		pfd[n++] = (struct pollfd){ p->battery_fd, POLLIN, 0 };
-		int mixer_at = n;
-		for (int i = 0; i < p->n_mixer_fds; i++)
-			pfd[n++] = (struct pollfd){ p->mixer_fds[i].fd, p->mixer_fds[i].events, 0 };
+/* One turn of the loop, waiting at most max_ms (-1: as long as it takes).
+ * False when the loop is over. */
+static bool loop_once(struct panel *p, int max_ms)
+{
+	struct pollfd pfd[5 + 8];
 
-		int r = poll(pfd, n, apply_timeout_ms(p));
-		if (r < 0) {
-			wl_display_cancel_read(p->dpy);
-			if (errno == EINTR)
-				continue;
-			say("poll: %s", strerror(errno));
-			p->exit_code = 1;
-			return;
-		}
-		if (pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-			if (wl_display_read_events(p->dpy) < 0) {
-				display_gone(p);
-				return;
-			}
-		} else {
-			wl_display_cancel_read(p->dpy);
-		}
+	while (wl_display_prepare_read(p->dpy) != 0)
 		if (wl_display_dispatch_pending(p->dpy) < 0) {
 			display_gone(p);
-			return;
+			return false;
 		}
-
-		if (pfd[1].revents & POLLIN) {
-			struct signalfd_siginfo si;
-			if (read(p->sig_fd, &si, sizeof(si)) > 0) {
-				p->quit = true;
-				break;
-			}
-		}
-		if (pfd[2].revents & POLLIN) {
-			uint64_t exp;
-			/* ECANCELED: the system time was set. Either way, the next
-			 * minute is the next wake-up. */
-			if (read(p->clock_fd, &exp, sizeof(exp)) >= 0 || errno == ECANCELED) {
-				/* Armed first: a change of the time after the arming
-				 * cancels the timer, one before it is in the reading. */
-				clock_arm(p);
-				clock_update(p);
-			}
-		}
-		if (pfd[3].revents & POLLIN) {
-			uint64_t exp;
-			if (read(p->battery_fd, &exp, sizeof(exp)) > 0)
-				battery_update(p);
-		}
-		if (p->mixer && n > mixer_at) {
-			bool ready = false;
-			for (int i = mixer_at; i < n; i++)
-				ready |= pfd[i].revents != 0;
-			if (ready)
-				mixer_events(p, mixer_at, pfd);
-		}
-
-		if (p->closed) {
-			if (!p->configured) {
-				say("the compositor closed the panel surface");
-				p->exit_code = 1;
-			}
-			break;
-		}
-		if (p->need_buffer) {
-			p->need_buffer = false;
-			int w = p->cfg_w > 0 ? p->cfg_w : 240;
-			int h = p->cfg_h > 0 ? p->cfg_h : p->height;
-			if (p->buffer && w == p->canvas.w && h == p->canvas.h) {
-				/* Same size again: nothing to draw, but the configure
-				 * is answered by a commit. */
-				commit(p);
-			} else {
-				if (!rebuild(p, w, h)) {
-					p->exit_code = 1;
-					return;
-				}
-				if (first) {
-					first = false;
-					first_frame(p);
-				} else if (p->watch) {
-					dump_state(p, "resize");
-				}
-			}
-		}
-		apply_pending(p, false);
-		flush_redraw(p);
+	int fl = wl_display_flush(p->dpy);
+	if (fl < 0 && errno != EAGAIN) {
+		wl_display_cancel_read(p->dpy);
+		display_gone(p);
+		return false;
 	}
+
+	int n = 0;
+	pfd[n++] = (struct pollfd){ wl_display_get_fd(p->dpy),
+		POLLIN | (fl < 0 ? POLLOUT : 0), 0 };
+	pfd[n++] = (struct pollfd){ p->sig_fd, POLLIN, 0 };
+	pfd[n++] = (struct pollfd){ p->clock_fd, POLLIN, 0 };
+	pfd[n++] = (struct pollfd){ p->battery_fd, POLLIN, 0 };
+	pfd[n++] = (struct pollfd){ p->popup_fd, POLLIN, 0 };
+	int mixer_at = n;
+	for (int i = 0; i < p->n_mixer_fds; i++)
+		pfd[n++] = (struct pollfd){ p->mixer_fds[i].fd, p->mixer_fds[i].events, 0 };
+
+	int timeout = apply_timeout_ms(p);
+	if (max_ms >= 0 && (timeout < 0 || max_ms < timeout))
+		timeout = max_ms;
+	int r = poll(pfd, n, timeout);
+	if (r < 0) {
+		wl_display_cancel_read(p->dpy);
+		if (errno == EINTR)
+			return true;
+		say("poll: %s", strerror(errno));
+		p->exit_code = 1;
+		return false;
+	}
+	if (pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+		if (wl_display_read_events(p->dpy) < 0) {
+			display_gone(p);
+			return false;
+		}
+	} else {
+		wl_display_cancel_read(p->dpy);
+	}
+	if (wl_display_dispatch_pending(p->dpy) < 0) {
+		display_gone(p);
+		return false;
+	}
+
+	if (pfd[1].revents & POLLIN) {
+		struct signalfd_siginfo si;
+		if (read(p->sig_fd, &si, sizeof(si)) > 0) {
+			p->quit = true;
+			return false;
+		}
+	}
+	if (pfd[2].revents & POLLIN) {
+		uint64_t exp;
+		/* ECANCELED: the system time was set. Either way, the next
+		 * minute is the next wake-up. */
+		if (read(p->clock_fd, &exp, sizeof(exp)) >= 0 || errno == ECANCELED) {
+			/* Armed first: a change of the time after the arming
+			 * cancels the timer, one before it is in the reading. */
+			clock_arm(p);
+			clock_update(p);
+		}
+	}
+	if (pfd[3].revents & POLLIN) {
+		uint64_t exp;
+		if (read(p->battery_fd, &exp, sizeof(exp)) > 0)
+			battery_update(p);
+	}
+	if (pfd[4].revents & POLLIN) {
+		uint64_t exp;
+		if (read(p->popup_fd, &exp, sizeof(exp)) > 0)
+			popup_timer(p);
+	}
+	if (p->mixer && n > mixer_at) {
+		bool ready = false;
+		for (int i = mixer_at; i < n; i++)
+			ready |= pfd[i].revents != 0;
+		if (ready)
+			mixer_events(p, mixer_at, pfd);
+	}
+
+	if (p->closed) {
+		if (!p->configured) {
+			say("the compositor closed the panel surface");
+			p->exit_code = 1;
+		}
+		return false;
+	}
+	if (p->need_buffer && !handle_buffer(p))
+		return false;
+	apply_pending(p, false);
+	flush_redraw(p);
+	return !p->quit;
+}
+
+static void run_loop(struct panel *p)
+{
+	while (!p->quit && loop_once(p, -1))
+		;
 }
 
 static void run(struct panel *p)
@@ -1015,10 +1297,12 @@ static void run(struct panel *p)
 int main(int argc, char **argv)
 {
 	struct panel p = {
-		.height = PL_HEIGHT_DEFAULT, .scale = 1,
+		.height = PL_HEIGHT_DEFAULT, .first = true,
+		.bar_alpha = PL_ALPHA_BAR_DEFAULT, .popup_alpha = PL_ALPHA_POPUP_DEFAULT,
 		.last_apply = { -1, -1 }, .touch = { .slider = PL_SLIDER_NONE },
+		.pop = { .open = PL_SLIDER_NONE },
 		.st = { .bat = PL_BAT_NONE, .bat_pct = -1, .bl_pct = -1, .vol_pct = -1 },
-		.dirty = 0, .clock_fd = -1, .battery_fd = -1, .sig_fd = -1,
+		.dirty = 0, .clock_fd = -1, .battery_fd = -1, .popup_fd = -1, .sig_fd = -1,
 	};
 	int rc = parse_args(&p, argc, argv);
 
@@ -1058,10 +1342,20 @@ int main(int argc, char **argv)
 	p.sig_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
 	p.clock_fd = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC | TFD_NONBLOCK);
 	p.battery_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
-	if (p.sig_fd < 0 || p.clock_fd < 0 || p.battery_fd < 0) {
+	p.popup_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+	if (p.sig_fd < 0 || p.clock_fd < 0 || p.battery_fd < 0 || p.popup_fd < 0) {
 		say("cannot create timers: %s", strerror(errno));
 		return 1;
 	}
+
+	/* The font is read once, here: glyphs are rasterized into memory and the
+	 * file is let go. Without one the panel still works, in the bitmap font. */
+	int px = p.font_px ? p.font_px : pl_default_font_px(p.height);
+	p.font_ttf = pl_assets_init(&p.assets, p.font_path, px, p.bar_alpha, p.popup_alpha);
+	if (!p.font_ttf && p.font_path)
+		say("cannot use the font '%s', using the built-in bitmap font", p.font_path);
+	else if (!p.font_ttf)
+		say("no usable font file found, using the built-in bitmap font");
 
 	p.st.hour = p.st.min = -1;
 	clock_arm(&p);
@@ -1088,10 +1382,13 @@ int main(int argc, char **argv)
 	p.ls = zwlr_layer_shell_v1_get_layer_surface(p.layer_shell, p.surface, NULL,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
 	zwlr_layer_surface_v1_add_listener(p.ls, &ls_listener, &p);
+	p.req_h = p.height;
 	zwlr_layer_surface_v1_set_size(p.ls, 0, p.height);
 	zwlr_layer_surface_v1_set_anchor(p.ls,
 		(p.bottom ? ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM : ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) |
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+	/* The bar's strip only: the slider row is taller than that and covers
+	 * the windows instead of pushing them. */
 	zwlr_layer_surface_v1_set_exclusive_zone(p.ls, p.height);
 	zwlr_layer_surface_v1_set_keyboard_interactivity(p.ls,
 		ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
@@ -1106,6 +1403,7 @@ int main(int argc, char **argv)
 	zwlr_layer_surface_v1_destroy(p.ls);
 	wl_surface_destroy(p.surface);
 	mixer_close(&p);
+	pl_assets_free(&p.assets);
 	wl_display_disconnect(p.dpy);
 	return p.exit_code;
 }

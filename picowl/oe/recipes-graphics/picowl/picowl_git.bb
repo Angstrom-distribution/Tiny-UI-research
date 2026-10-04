@@ -50,8 +50,8 @@ RDEPENDS:${PN} += "seatd xkeyboard-config"
 EXTRA_OEMESON += "-Dtests=false -Dudev=disabled -Dudevrulesdir=${nonarch_base_libdir}/udev/rules.d"
 PACKAGECONFIG ??= "${@bb.utils.filter('DISTRO_FEATURES', 'systemd', d)} panel"
 PACKAGECONFIG[systemd] = "-Dsystemd=enabled,-Dsystemd=disabled,systemd"
-# picowl-panel (clock, battery, backlight and volume sliders) needs alsa-lib for
-# the mixer; libwayland-client comes with the wayland dependency above.
+# picowl-panel (a bar with clock, battery, backlight and volume, and slider rows)
+# needs alsa-lib for the mixer; libwayland-client comes with the wayland dependency above.
 PACKAGECONFIG[panel] = "-Dpanel=enabled,-Dpanel=disabled,alsa-lib"
 
 # The render paths are hand-tuned for ARM state; do not build with Thumb.

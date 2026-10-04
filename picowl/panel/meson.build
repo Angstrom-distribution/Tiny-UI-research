@@ -1,12 +1,19 @@
-# picowl-panel: a layer-shell client with a clock, the battery and two touch
-# sliders (backlight, volume).
+# picowl-panel: a layer-shell client with a slim bar (clock, battery, backlight
+# and volume buttons) and a slider row that pops out under it.
+
+# stb_truetype is third-party and has its own warnings, so it is built apart.
+pwpanel_stb = static_library('pwpanel-stb', 'panel-stb.c',
+  override_options: ['warning_level=0', 'werror=false'])
 
 # The parts that need neither wayland nor alsa, which are most of it: value
-# mapping, text, layout, the touch state machine, the 5x7 font, drawing into a
-# pixel buffer and sysfs access. A static library so that the unit test and
-# the program use the same code.
+# mapping, layout, the touch and pop-out state machines, the pixel layer (masks,
+# blending, text, the 5x7 fallback font), the drawing of the widgets and sysfs
+# access. A static library so that the unit test and the program use the same
+# code.
+libm = cc.find_library('m', required: false)
 pwpanel_lib = static_library('pwpanel',
-  'panel-logic.c', 'panel-draw.c', 'panel-sys.c')
+  'panel-logic.c', 'panel-gfx.c', 'panel-font.c', 'panel-draw.c', 'panel-sys.c',
+  link_with: pwpanel_stb, dependencies: libm)
 
 # The program needs libwayland-client and alsa-lib, not wlroots. The protocol
 # code is private to it.
@@ -30,7 +37,7 @@ if panel_alsa.found() and panel_wl.found()
   picowl_panel_exe = executable('picowl-panel',
     'panel.c', panel_proto,
     link_with: pwpanel_lib,
-    dependencies: [panel_wl, panel_alsa],
+    dependencies: [panel_wl, panel_alsa, libm],
     install: true,
   )
   panel_built = true

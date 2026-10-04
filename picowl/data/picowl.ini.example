@@ -25,11 +25,17 @@ color = #101010
 
 [autostart]
 # One shell command per line, run once at startup.
-# The panel: clock, battery, backlight and volume sliders. It is hidden while an
-# app has the focus, and with it the sliders, unless [zerocopy] panel_autohide
-# is false. Options: --height N (40..120), --bottom, --scale N.
+# The panel: a slim bar with clock, battery and backlight and volume buttons; a
+# tap on a button pops a slider row out under the bar (it covers windows, it
+# does not move them) and closes it again 3 s after the last touch. It is hidden
+# while an app has the focus, and with it the row, unless [zerocopy]
+# panel_autohide is false. Options: --height N (18..80, default 20), --bottom,
+# --font PATH and --font-size PX (the text is rasterized from a TrueType font,
+# by default the first Liberation Sans or DejaVu Sans file that exists, else a
+# built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
+# translucent) and --bar-alpha N (default 255).
 # cmd = picowl-panel
-# cmd = picowl-panel --bottom --height 64
+# cmd = picowl-panel --bottom --height 24 --popup-alpha 255
 
 [osk]
 # The on-screen keyboard: picowl starts it, restarts it when it dies and shows or
@@ -152,7 +158,7 @@ code:155 = rotate
 # single_buffer: allow single-buffer (non-double-buffered) clients on
 #   copy-type outputs where they are safe (default true).
 # panel_autohide: hide the panel while an app is focused (default true). The panel's
-#   sliders are hidden with it; set false to keep picowl-panel visible next to apps.
+#   slider row is hidden with it; set false to keep picowl-panel visible next to apps.
 # max_buffers_per_client: buffers one client may hold. Range 1..32 (default 3).
 # budget_kb: memory shared by all clients without an [app.*] buffer rule.
 #   Range 0..65536 (default 2048); 0 = none of them may allocate.
