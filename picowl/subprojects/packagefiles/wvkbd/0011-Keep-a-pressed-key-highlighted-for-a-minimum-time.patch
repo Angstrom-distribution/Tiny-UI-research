@@ -1,0 +1,731 @@
+From 6db74c35ecf55ce4834a9b80fbe28e13b88fc588 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 17:38:30 +0200
+Subject: [PATCH 11/11] Keep a pressed key highlighted for a minimum time
+
+The pressed-key highlight was invisible on the iPAQ h2200. A protocol log
+of a real session shows why: a tap lasts 35 to 76 ms between button press
+and release, the highlighted redraw is committed about 19 ms after the
+press and the plain one about 15 ms after the release, so the highlight is
+on screen for roughly 60 ms. That is too short for a panel with a slow
+response and an upload per frame. On top of that the ipaq colours changed
+a key only from grey 45 to grey 100.
+
+Two changes:
+
+The ipaq 'high' colour of both schemes is now a strong opaque blue
+(RGB 60,140,230). It is 4.0:1 against the key grey 45 (2.3:1 before) and
+4.7:1 against the darker function keys. The white pressed text on it is
+3.5:1, lower than on the old grey (5.9:1) but readable at the 13 px
+bitmap font; the key shape is what has to be seen.
+
+--highlight-ms MS (0 to 1000, 0 = off, as before) keeps the key drawn
+highlighted until MS after its press even when the button is released
+earlier. Only the redraw of the plain key waits; the virtual keyboard
+release still goes out at the true time, so typing is not delayed. A new
+press flushes the pending redraw first. A layer redraw, a resize and hide
+also drop it: a layer redraw repaints the held key itself, and hide
+draws it plain before the surface is unmapped, so nothing stale is shown
+when it is mapped again. The deadline is added to the main loop's poll
+timeout, next to the label cache wait, and checked after the Wayland
+events of the same wakeup so a press cancels it. The default comes from
+DEFAULT_HIGHLIGHT_MS in the layout config: 150 for ipaq, 0 elsewhere.
+
+The schedule is a Wayland-free unit (hold.c) that only sees the
+monotonic milliseconds it is given, with its own tests.
+---
+ config.deskintl.h        |  2 +
+ config.ipaq.h            |  8 +++-
+ config.mobintl.h         |  2 +
+ hold.c                   | 48 ++++++++++++++++++++++
+ hold.h                   | 42 +++++++++++++++++++
+ keyboard.c               | 45 +++++++++++++++++++-
+ keyboard.h               |  6 +++
+ main.c                   | 42 ++++++++++++++++++-
+ meson.build              |  1 +
+ tests/check-highlight.sh | 52 +++++++++++++++++++++++
+ tests/meson.build        | 19 ++++++---
+ tests/test-hold.c        | 89 ++++++++++++++++++++++++++++++++++++++++
+ wvkbd.1.scd              |  9 ++++
+ 13 files changed, 354 insertions(+), 11 deletions(-)
+ create mode 100644 hold.c
+ create mode 100644 hold.h
+ create mode 100755 tests/check-highlight.sh
+ create mode 100644 tests/test-hold.c
+
+diff --git a/config.deskintl.h b/config.deskintl.h
+index cfba684..0bc145d 100644
+--- a/config.deskintl.h
++++ b/config.deskintl.h
+@@ -6,6 +6,8 @@
+ /* Whether a held key is magnified in a popup unless --popup/--no-popup says
+  * otherwise; a layout for a small screen turns it off to save a surface. */
+ #define DEFAULT_SHOW_POPUP true
++/* 0: the plain key is drawn at the release, as soon as the button is up. */
++#define DEFAULT_HIGHLIGHT_MS 0
+ static const int transparency = 255;
+ 
+ struct clr_scheme schemes[] = {
+diff --git a/config.ipaq.h b/config.ipaq.h
+index a0dac40..75771fa 100644
+--- a/config.ipaq.h
++++ b/config.ipaq.h
+@@ -8,6 +8,10 @@
+ /* The popup is a second surface with two more buffers (384 kB at 240x100),
+  * too much for 64 MiB. While it is off none of them is made. */
+ #define DEFAULT_SHOW_POPUP false
++/* A tap lasts 35 to 76 ms and the panel needs most of that to show the
++ * highlight, so the plain key is drawn again no earlier than this long after
++ * the press. */
++#define DEFAULT_HIGHLIGHT_MS 150
+ /* An exclusive zone resizes the focused app on every show and hide, which is
+  * slow over the MediaQ bus. The keyboard overlaps the app instead. */
+ #define DEFAULT_EXCLUSIVE false
+@@ -21,7 +25,7 @@ struct clr_scheme schemes[] = {
+   /* colors */
+   .bg = {.bgra = {15, 15, 15, transparency}},
+   .fg = {.bgra = {45, 45, 45, transparency}},
+-  .high = {.bgra = {100, 100, 100, transparency}},
++  .high = {.bgra = {230, 140, 60, 255}},
+   .swipe = {.bgra = {100, 255, 100, 64}},
+   .text = {.color = UINT32_MAX},
+   .text_press = {.color = UINT32_MAX},
+@@ -33,7 +37,7 @@ struct clr_scheme schemes[] = {
+   /* function keys, darker so the letters stand out */
+   .bg = {.bgra = {15, 15, 15, transparency}},
+   .fg = {.bgra = {32, 32, 32, transparency}},
+-  .high = {.bgra = {100, 100, 100, transparency}},
++  .high = {.bgra = {230, 140, 60, 255}},
+   .swipe = {.bgra = {100, 255, 100, 64}},
+   .text_press = {.color = UINT32_MAX},
+   .text_swipe = {.color = UINT32_MAX},
+diff --git a/config.mobintl.h b/config.mobintl.h
+index 0e64883..acb7676 100644
+--- a/config.mobintl.h
++++ b/config.mobintl.h
+@@ -6,6 +6,8 @@
+ /* Whether a held key is magnified in a popup unless --popup/--no-popup says
+  * otherwise; a layout for a small screen turns it off to save a surface. */
+ #define DEFAULT_SHOW_POPUP true
++/* 0: the plain key is drawn at the release, as soon as the button is up. */
++#define DEFAULT_HIGHLIGHT_MS 0
+ #define SHIFT_SPACE_IS_TAB
+ static const int transparency = 255;
+ 
+diff --git a/hold.c b/hold.c
+new file mode 100644
+index 0000000..a9dcd8e
+--- /dev/null
++++ b/hold.c
+@@ -0,0 +1,48 @@
++#include "hold.h"
++
++void
++hold_init(struct hold *h)
++{
++    h->pending = false;
++    h->due = 0;
++}
++
++bool
++hold_release(struct hold *h, int64_t press, int64_t release, int ms)
++{
++    int64_t due = press + ms;
++
++    /* a bad ms must not hold a key for ever */
++    if (ms <= 0 || ms > HOLD_MAX_MS || release >= due) {
++        h->pending = false;
++        return true;
++    }
++    h->pending = true;
++    h->due = due;
++    return false;
++}
++
++void
++hold_cancel(struct hold *h)
++{
++    h->pending = false;
++}
++
++bool
++hold_expired(const struct hold *h, int64_t now)
++{
++    return h->pending && now >= h->due;
++}
++
++int
++hold_timeout(const struct hold *h, int64_t now, int other_ms)
++{
++    if (!h->pending)
++        return other_ms;
++    int64_t wait = h->due - now;
++    if (wait < 0)
++        wait = 0;
++    if (other_ms >= 0 && other_ms < wait)
++        return other_ms;
++    return (int)wait;
++}
+diff --git a/hold.h b/hold.h
+new file mode 100644
+index 0000000..95f7563
+--- /dev/null
++++ b/hold.h
+@@ -0,0 +1,42 @@
++#ifndef HOLD_H
++#define HOLD_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* How long a pressed key stays drawn highlighted, kept free of clocks and
++ * Wayland calls so the schedule can be tested: every time is a monotonic
++ * millisecond value that the caller passes in.
++ *
++ * A tap on a touchscreen lasts 35 to 76 ms, and the highlighted frame is
++ * replaced by the plain one right after the release. On a panel with a slow
++ * response that leaves the highlight on screen for far less than the eye
++ * needs, so the redraw of the plain key can be held back until a minimum time
++ * after the press. Only the redraw waits: the key event is sent at the true
++ * release time. */
++#define HOLD_MAX_MS 1000
++
++struct hold {
++    bool pending;
++    int64_t due; /* when the plain key is to be drawn again */
++};
++
++void hold_init(struct hold *h);
++
++/* The key went down at press and up at release. Returns true when the plain
++ * key is to be drawn at once (ms is 0, or the press lasted long enough),
++ * false when the redraw was scheduled and hold_expired will say when. */
++bool hold_release(struct hold *h, int64_t press, int64_t release, int ms);
++
++/* A new press, a hide or a redraw of the layer: whatever was scheduled is
++ * moot because the key is drawn right now or not at all. */
++void hold_cancel(struct hold *h);
++
++bool hold_expired(const struct hold *h, int64_t now);
++
++/* The poll() timeout: the nearer of the scheduled redraw and other_ms, the
++ * wait some other job needs (-1 for none, as poll takes it). -1 means wait
++ * for events only. */
++int hold_timeout(const struct hold *h, int64_t now, int other_ms);
++
++#endif
+diff --git a/keyboard.c b/keyboard.c
+index fe42d11..ef7a4a8 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -239,6 +239,22 @@ zwp_virtual_keyboard_v1_key_mods(struct zwp_virtual_keyboard_v1 *vkbd, uint32_t
+         zwp_virtual_keyboard_v1_key(vkbd, time, KEY_RIGHTALT, state);
+ }
+ 
++/* Draws the key that is still highlighted from a release plain. Safe on a
++ * surface that is hidden or has no buffers: drawing is then a no-op. */
++void
++kbd_hold_flush(struct kbd *kb)
++{
++    struct key *k = kb->held;
++
++    hold_cancel(&kb->hold);
++    kb->held = NULL;
++    if (!k)
++        return;
++    kbd_draw_key(kb, k, Unpress);
++    /* drawing a plain key puts it in the popup, which the release cleared */
++    kbd_clear_last_popup(kb);
++}
++
+ void
+ kbd_unpress_key(struct kbd *kb, uint32_t time)
+ {
+@@ -298,14 +314,30 @@ kbd_unpress_key(struct kbd *kb, uint32_t time)
+             zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+         }
+ 
++        /* The release above went out at its true time; only the picture of
++         * the plain key waits, so that a short tap is still seen. Swiping
++         * draws its own marks on the keys, which a late redraw would paint
++         * over. */
++        bool want = kb->highlight_ms > 0 && kb->show_highlight &&
++                    !kb->print_intersect && kb->compose < 2;
++        bool hold = want && !hold_release(&kb->hold, kb->press_ms, monotime(),
++                                          kb->highlight_ms);
+         if (kb->compose >= 2) {
+             kb->compose = 0;
+             kbd_switch_layout(kb, kb->last_abc_layout, kb->last_abc_index);
+         } else if (unlatch_shift||unlatch_ctrl||unlatch_alt||unlatch_super||unlatch_altgr||unlatch_tab) {
+             kbd_redraw_layout(kb);
+-        } else {
++            /* the redraw painted the key plain along with the new labels and
++             * dropped the schedule */
++            hold = want && !hold_release(&kb->hold, kb->press_ms, monotime(),
++                                         kb->highlight_ms);
++            if (hold)
++                kbd_draw_key(kb, kb->last_press, Press);
++        } else if (!hold) {
+             kbd_draw_key(kb, kb->last_press, Unpress);
+         }
++        if (hold)
++            kb->held = kb->last_press;
+ 
+         kb->last_press = NULL;
+     }
+@@ -362,6 +394,7 @@ kbd_motion_key(struct kbd *kb, uint32_t time, uint32_t x, uint32_t y)
+ void
+ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+ {
++    kbd_hold_flush(kb);
+     if ((kb->compose == 1) && (k->type != Compose) && (k->type != Mod)) {
+         if ((k->type == NextLayer) || (k->type == BackLayer) ||
+             ((k->type == Code) && (k->code == KEY_SPACE))) {
+@@ -398,6 +431,7 @@ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+         }
+         kb->last_swipe = kb->last_press = k;
+         kb->last_press_offset = time - monotime();
++        kb->press_ms = monotime();
+         kbd_draw_key(kb, k, Press);
+         if ((kb->shift_space_is_tab) && (k->code == KEY_SPACE) && (kb->mods & Shift)) {
+             // shift space is tab
+@@ -478,6 +512,7 @@ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+         // copy code as unicode chr by setting a temporary keymap
+         kb->last_swipe = kb->last_press = k;
+         kb->last_press_offset = time - monotime();
++        kb->press_ms = monotime();
+         kbd_draw_key(kb, k, Press);
+         if (kb->mods & Shift) {
+             if (kb->debug)
+@@ -683,6 +718,10 @@ kbd_draw_layout(struct kbd *kb)
+     }
+     /* A surface that could not be drawn on shows nothing, so it must not be
+      * trusted as a base for a partial redraw. */
++    /* every key was just drawn plain, and kb->held may point into a layer
++     * that is no longer the current one */
++    hold_cancel(&kb->hold);
++    kb->held = NULL;
+     kb->drawn_layout = drwsurf_usable(d) ? kb->layout : NULL;
+     kb->drawn_mods = kb->mods;
+     kb->drawn_compose = (bool)kb->compose;
+@@ -729,11 +768,13 @@ kbd_redraw_layout(struct kbd *kb)
+         /* A key still highlighted from a press is repainted even when its
+          * label stays the same, as a full draw would. */
+         if (was == now && ok->scheme == nk->scheme && ok != kb->last_press &&
+-            nk != kb->last_press &&
++            nk != kb->last_press && ok != kb->held && nk != kb->held &&
+             !strcmp(key_label(kb->drawn_mods, ok), key_label(kb->mods, nk)))
+             continue;
+         kbd_draw_key(kb, nk, now ? Press : None);
+     }
++    hold_cancel(&kb->hold);
++    kb->held = NULL;
+     kb->drawn_layout = kb->layout;
+     kb->drawn_mods = kb->mods;
+     kb->drawn_compose = compose;
+diff --git a/keyboard.h b/keyboard.h
+index 0758337..597535f 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -5,6 +5,7 @@
+ #include <stddef.h>
+ 
+ #include "drw.h"
++#include "hold.h"
+ 
+ #define MAX_LAYERS 25
+ 
+@@ -100,6 +101,7 @@ struct kbd {
+ 	bool debug;
+ 	bool show_popup;
+ 	bool show_highlight;
++	int highlight_ms; // minimum time a pressed key stays highlighted, 0 = off
+ 
+ 	struct layout *layout;
+ 	struct clr_scheme *schemes;
+@@ -121,6 +123,9 @@ struct kbd {
+ 	size_t layer_index;
+ 	struct layout *last_abc_layout; //the last alphabetical layout to fall back to (may be further away than prevlayout)
+ 	size_t last_abc_index; //the layer index of the last alphabetical layout
++	int64_t press_ms; // monotonic time of the press of last_press
++	struct key *held; // released key still drawn highlighted until hold is due
++	struct hold hold;
+ 	int64_t last_press_offset; // Delta between processor and compositor time during `last_press`
+ 
+ 	struct layout *layouts;
+@@ -153,6 +158,7 @@ void kbd_init(struct kbd *kb, struct layout *layouts,
+ void kbd_init_layout(struct layout *l, uint32_t width, uint32_t height);
+ struct key *kbd_get_key(struct kbd *kb, uint32_t x, uint32_t y);
+ size_t kbd_get_layer_index(struct kbd *kb, struct layout *l);
++void kbd_hold_flush(struct kbd *kb);
+ void kbd_unpress_key(struct kbd *kb, uint32_t time);
+ void kbd_release_key(struct kbd *kb, uint32_t time);
+ void kbd_motion_key(struct kbd *kb, uint32_t time, uint32_t x, uint32_t y);
+diff --git a/main.c b/main.c
+index 3e138d9..39797e6 100644
+--- a/main.c
++++ b/main.c
+@@ -22,6 +22,7 @@
+ #include "pointer.h"
+ #include "prerender.h"
+ #include "text.h"
++#include "hold.h"
+ #include "visibility.h"
+ #include "config.h"
+ 
+@@ -29,6 +30,9 @@
+ #ifndef DEFAULT_EXCLUSIVE
+ #define DEFAULT_EXCLUSIVE true
+ #endif
++#ifndef DEFAULT_HIGHLIGHT_MS
++#define DEFAULT_HIGHLIGHT_MS 0
++#endif
+ #ifndef DEFAULT_SHOW_POPUP
+ #define DEFAULT_SHOW_POPUP true
+ #endif
+@@ -925,6 +929,9 @@ usage(char *argv0)
+     fprintf(stderr, "  --no-popup             - Disable the key-press popup%s\n",
+             DEFAULT_SHOW_POPUP ? "" : " (default)");
+     fprintf(stderr, "  --no-highlight         - Don't highlight a key while pressed\n");
++    fprintf(stderr, "  --highlight-ms MS      - Keep a pressed key highlighted for at least MS "
++                    "milliseconds [0-%d], 0 = until released (default %d)\n",
++            HOLD_MAX_MS, DEFAULT_HIGHLIGHT_MS);
+     fprintf(stderr, "  --no-feedback          - Disable all key-press feedback "
+                     "(--no-popup and --no-highlight)\n");
+     fprintf(
+@@ -997,6 +1004,11 @@ hide()
+         return;
+     }
+ 
++    /* A key still drawn highlighted must not come back highlighted when the
++     * surface is mapped again, and nothing may be left to fire while it is
++     * unmapped. */
++    kbd_hold_flush(&keyboard);
++
+     // Ensure active keys are released, so they're not repeated infinitely.
+     if (vis.mapped) {
+         uint32_t time = (uint32_t) (monotime() + keyboard.last_press_offset);
+@@ -1168,6 +1180,7 @@ main(int argc, char **argv)
+     keyboard.corner_radius = 0;
+     keyboard.show_popup = DEFAULT_SHOW_POPUP;
+     keyboard.show_highlight = true;
++    keyboard.highlight_ms = DEFAULT_HIGHLIGHT_MS;
+ 
+     uint8_t alpha = 0;
+     bool alpha_defined = false;
+@@ -1375,6 +1388,21 @@ main(int argc, char **argv)
+         } else if ((!strcmp(argv[i], "-popup")) ||
+                    (!strcmp(argv[i], "--popup"))) {
+             keyboard.show_popup = true;
++        } else if (!strcmp(argv[i], "--highlight-ms")) {
++            char *end;
++            long ms;
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            errno = 0;
++            ms = strtol(argv[++i], &end, 10);
++            if (errno || end == argv[i] || *end || ms < 0 || ms > HOLD_MAX_MS) {
++                fprintf(stderr, "Invalid --highlight-ms: %s\n", argv[i]);
++                usage(argv[0]);
++                exit(1);
++            }
++            keyboard.highlight_ms = (int)ms;
+         } else if ((!strcmp(argv[i], "-no-highlight")) ||
+                    (!strcmp(argv[i], "--no-highlight"))) {
+             keyboard.show_highlight = false;
+@@ -1508,6 +1536,8 @@ main(int argc, char **argv)
+     if (keyboard.debug) {
+         fprintf(stderr, "wvkbd: key popup %s\n",
+                 keyboard.show_popup ? "on" : "off");
++        fprintf(stderr, "wvkbd: highlight hold %d ms\n",
++                keyboard.highlight_ms);
+         fprintf(stderr, "wvkbd: exclusive zone %s\n",
+                 keyboard.exclusive ? "on" : "off");
+     }
+@@ -1617,8 +1647,10 @@ main(int argc, char **argv)
+         wl_display_flush(display);
+         /* While labels are left to render, wake up at once after a short
+          * quiet spell and do a little of it. */
+-        int nready = poll(fds, 2, text_cache_pending() ? 10 : -1);
+-        if (nready == 0)
++        int nready = poll(fds, 2,
++                          hold_timeout(&keyboard.hold, monotime(),
++                                       text_cache_pending() ? 10 : -1));
++        if (nready == 0 && text_cache_pending())
+             text_cache_step(2);
+ 
+         if (fds[WAYLAND_FD].revents & POLLIN)
+@@ -1645,6 +1677,12 @@ main(int argc, char **argv)
+             else if (si.ssi_signo == SIGPIPE)
+                 pipewarn();
+         }
++
++        /* After the events above, so that a press that arrived with the
++         * timeout cancels the redraw instead of racing it. Not once the
++         * surfaces are gone. */
++        if (run_display && hold_expired(&keyboard.hold, monotime()))
++            kbd_hold_flush(&keyboard);
+     }
+ 
+     drwsurf_free(&popup_draw_surf);
+diff --git a/meson.build b/meson.build
+index 05631b6..4d2ba40 100644
+--- a/meson.build
++++ b/meson.build
+@@ -79,6 +79,7 @@ text_sources = text_backend == 'pango' ? files('text-pango.c', 'cache.c') : file
+ sources = files(
+   'drw.c',
+   'geometry.c',
++  'hold.c',
+   'keyboard.c',
+   'label.c',
+   'main.c',
+diff --git a/tests/check-highlight.sh b/tests/check-highlight.sh
+new file mode 100755
+index 0000000..c3bf307
+--- /dev/null
++++ b/tests/check-highlight.sh
+@@ -0,0 +1,52 @@
++#!/bin/sh
++# usage: check-highlight.sh BINARY CONFIG_HEADER
++# -D makes the binary report the resolved hold right after option parsing,
++# before it connects to Wayland, so this needs no compositor. The default is
++# read from the layout's config header, which proves the macro reaches the
++# binary.
++bin=$1
++cfg=$2
++want=$(sed -n 's/^#define DEFAULT_HIGHLIGHT_MS \([0-9][0-9]*\)$/\1/p' "$cfg")
++[ -n "$want" ] || { echo "no DEFAULT_HIGHLIGHT_MS in $cfg"; exit 1; }
++
++unset WAYLAND_DISPLAY WAYLAND_SOCKET
++export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}
++
++state() {
++	"$bin" -D "$@" 2>&1 | sed -n 's/^wvkbd: highlight hold \([0-9]*\) ms$/\1/p'
++}
++expect() {
++	exp=$1; shift
++	got=$(state "$@")
++	[ "$got" = "$exp" ] || { echo "args '$*': got '$got', want '$exp'"; exit 1; }
++}
++# Without a compositor even a good command line ends in a failed connect, so
++# the exit status says nothing: a rejected value is one that stops before the
++# resolved value is reported, and that says why.
++rejected() {
++	out=$("$bin" -D "$@" 2>&1)
++	case $out in
++	*"highlight hold"*) echo "args '$*' were accepted"; exit 1 ;;
++	esac
++	case $out in
++	*usage:*) ;;
++	*) echo "args '$*' were not answered with the usage"; exit 1 ;;
++	esac
++}
++
++expect "$want"
++expect 0 --highlight-ms 0
++expect 150 --highlight-ms 150
++expect 1000 --highlight-ms 1000
++expect 70 --highlight-ms 100 --highlight-ms 70
++
++rejected --highlight-ms
++rejected --highlight-ms -1
++rejected --highlight-ms 1001
++rejected --highlight-ms abc
++rejected --highlight-ms 12x
++rejected --highlight-ms ''
++
++help=$("$bin" --help 2>&1)
++echo "$help" | grep -- '--highlight-ms' | grep -q "default $want" ||
++	{ echo "--help does not name --highlight-ms with its default $want"; exit 1; }
+diff --git a/tests/meson.build b/tests/meson.build
+index 6ed4176..2084b7e 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -18,6 +18,10 @@ test('popup-default', test_sh,
+   args: [files('check-popup.sh'), exe,
+          files('../config.@0@.h'.format(kbd_layout))])
+ 
++test('highlight-ms-option', test_sh,
++  args: [files('check-highlight.sh'), exe,
++         files('../config.@0@.h'.format(kbd_layout))])
++
+ python = find_program('python3', required: false)
+ if python.found()
+   test('signals-during-startup', python,
+@@ -48,7 +52,7 @@ endif
+ # Draws a layer into plain memory, so it links the drawing and keyboard code
+ # without main.c and needs no compositor.
+ test_draw = executable('test-draw',
+-  'test-draw.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  'test-draw.c', '../drw.c', '../geometry.c', '../keyboard.c', '../hold.c', '../label.c',
+   '../mask.c', '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep])
+@@ -64,6 +68,11 @@ test('pointer', executable('test-pointer',
+   'test-pointer.c', '../pointer.c',
+   include_directories: test_inc))
+ 
++# The highlight hold schedule is pure: it takes the times it is given.
++test('hold', executable('test-hold',
++  'test-hold.c', '../hold.c',
++  include_directories: test_inc))
++
+ # Replaces allocate_shm_file to force the failures of a resize, so it links
+ # drw.c without shm_open.c.
+ test('buffer-failure', executable('test-buffer',
+@@ -74,14 +83,14 @@ test('buffer-failure', executable('test-buffer',
+ # Counts the buffers the drawing layer asks for, so it replaces
+ # allocate_shm_file and links without shm_open.c.
+ test('popup-memory', executable('test-popup',
+-  'test-popup.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  'test-popup.c', '../drw.c', '../geometry.c', '../keyboard.c', '../hold.c', '../label.c',
+   '../mask.c', '../os-compatibility.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+ 
+ # Same plain-memory setup as test-draw: no compositor, only the drawing code.
+ test('label-damage', executable('test-damage',
+-  'test-damage.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  'test-damage.c', '../drw.c', '../geometry.c', '../keyboard.c', '../hold.c', '../label.c',
+   '../mask.c', '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+@@ -90,7 +99,7 @@ test('label-damage', executable('test-damage',
+ # compiles keyboard.c again with the ipaq layout and keymap, and draws with the
+ # bitmap fonts because the glyph check is about them.
+ test_ipaq = executable('test-ipaq',
+-  'test-ipaq.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  'test-ipaq.c', '../drw.c', '../geometry.c', '../keyboard.c', '../hold.c', '../label.c',
+   '../mask.c', '../os-compatibility.c', '../shm_open.c', '../text-bitmap.c',
+   '../bmfont-data.c', proto_sources,
+   c_args: ['-ULAYOUT', '-DLAYOUT="layout.ipaq.h"',
+@@ -120,7 +129,7 @@ if text_backend == 'pango'
+     dependencies: [cairo, text_deps, m_dep]),
+     timeout: 120)
+   test('cache-draw', executable('test-cachedraw',
+-    'test-cachedraw.c', '../drw.c', '../geometry.c', '../keyboard.c',
++    'test-cachedraw.c', '../drw.c', '../geometry.c', '../keyboard.c', '../hold.c',
+     '../label.c', '../mask.c', '../os-compatibility.c', '../prerender.c',
+     '../shm_open.c', text_sources, proto_sources,
+     include_directories: test_inc,
+diff --git a/tests/test-hold.c b/tests/test-hold.c
+new file mode 100644
+index 0000000..bcd370d
+--- /dev/null
++++ b/tests/test-hold.c
+@@ -0,0 +1,89 @@
++/* The highlight hold schedule. Every time is a made-up monotonic value, so
++ * nothing here depends on a clock. The 40 and 200 ms taps follow what a real
++ * iPAQ session logged: a tap lasts 35 to 76 ms. */
++#include "check.h"
++#include "hold.h"
++
++static void
++test_quick_tap(void)
++{
++    struct hold h;
++    hold_init(&h);
++    bool now = hold_release(&h, 1000, 1040, 150);
++    CHECK(!now, "a 40 ms tap with 150 ms is not drawn plain at the release");
++    CHECK(h.pending, "it is scheduled");
++    CHECK(h.due == 1150, "due at press + 150, got %lld", (long long)h.due);
++    CHECK(!hold_expired(&h, 1149), "not expired a millisecond early");
++    CHECK(hold_expired(&h, 1150), "expired at the deadline");
++    CHECK(hold_expired(&h, 5000), "and stays expired");
++}
++
++static void
++test_slow_press(void)
++{
++    struct hold h;
++    hold_init(&h);
++    CHECK(hold_release(&h, 1000, 1200, 150),
++          "a press longer than the hold is drawn plain at once");
++    CHECK(!h.pending && !hold_expired(&h, 1200), "nothing is left scheduled");
++    CHECK(hold_release(&h, 1000, 1150, 150),
++          "released exactly at the deadline is already long enough");
++}
++
++static void
++test_off(void)
++{
++    struct hold h;
++    hold_init(&h);
++    CHECK(hold_release(&h, 1000, 1010, 0), "0 is off: plain at once");
++    CHECK(!h.pending, "and nothing is scheduled");
++    CHECK(hold_release(&h, 1010, 1000, 0),
++          "off stays off when the release looks earlier than the press");
++    CHECK(hold_release(&h, 1000, 1010, -5), "a negative value is off too");
++    CHECK(hold_release(&h, 1000, 1010, HOLD_MAX_MS + 1),
++          "a value past the maximum never holds a key");
++    CHECK(!h.pending, "nothing scheduled for it either");
++}
++
++static void
++test_new_press_cancels(void)
++{
++    struct hold h;
++    hold_init(&h);
++    hold_release(&h, 1000, 1040, 150);
++    hold_cancel(&h);
++    CHECK(!h.pending, "cancel clears the schedule");
++    CHECK(!hold_expired(&h, 9999), "a cancelled schedule never expires");
++    CHECK(hold_timeout(&h, 1050, -1) == -1,
++          "and poll waits for events only again");
++    CHECK(hold_timeout(&h, 1050, 10) == 10, "or for the other job alone");
++}
++
++static void
++test_timeout(void)
++{
++    struct hold h;
++    hold_init(&h);
++    CHECK(hold_timeout(&h, 0, -1) == -1, "nothing to wait for: -1");
++    CHECK(hold_timeout(&h, 0, 10) == 10, "no hold: the other deadline");
++
++    hold_release(&h, 1000, 1040, 150); /* due 1150 */
++    CHECK(hold_timeout(&h, 1050, -1) == 100, "only the hold: the time left");
++    CHECK(hold_timeout(&h, 1050, 10) == 10, "the nearer one wins: repeat");
++    CHECK(hold_timeout(&h, 1050, 500) == 100, "the nearer one wins: hold");
++    CHECK(hold_timeout(&h, 1050, 100) == 100, "equal deadlines");
++    CHECK(hold_timeout(&h, 1150, -1) == 0, "due now: do not wait");
++    CHECK(hold_timeout(&h, 1300, 10) == 0, "overdue: do not wait");
++    CHECK(hold_timeout(&h, 1300, 0) == 0, "overdue and other due");
++}
++
++int
++main(void)
++{
++    test_quick_tap();
++    test_slow_press();
++    test_off();
++    test_new_press_cancels();
++    test_timeout();
++    return failures ? 1 : 0;
++}
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 27a28bd..d9a6aa4 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -97,6 +97,15 @@ can be patched to add new features.
+ 	Don't highlight a key while it is pressed (draw it the same as an
+ 	unpressed key). Useful for privacy, e.g. when typing on a lockscreen.
+ 
++*--highlight-ms* _MS_
++	Keep a pressed key drawn highlighted until at least _MS_ milliseconds
++	after it was pressed, even when it is released sooner (0 to 1000, 0 draws
++	the plain key as soon as the button is up). A short tap lasts a few tens
++	of milliseconds, which a slow display may not show at all. Only the
++	redraw waits: the key release is still sent when it happens. The default
++	depends on the layout: 150 for the ipaq layout, 0 for the others. It has
++	no effect together with *--no-highlight*.
++
+ *--no-feedback*
+ 	Disable all visual key-press feedback; shorthand for *--no-popup* and
+ 	*--no-highlight* together.
+-- 
+2.51.0
+
