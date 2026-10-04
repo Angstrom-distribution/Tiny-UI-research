@@ -1,6 +1,6 @@
 # picowl design plans
 
-**Status:** all five plans (idle-inhibit, buffer-budget, caching-event, drm-lease, per-app-hold) are implemented.
+**Status:** the five media player plans (idle-inhibit, buffer-budget, caching-event, drm-lease, per-app-hold) are implemented. The OSK plan is design only.
 
 These are the picowl-side work items from [mediaplayer-integration.md](../mediaplayer-integration.md). Line references in the plans are against picowl commit b9eac6d and wlroots 0.19.0, so they drift as the code changes.
 
@@ -10,6 +10,7 @@ These are the picowl-side work items from [mediaplayer-integration.md](../mediap
 | [buffer-budget.md](buffer-budget.md) | **Implemented** (`src/zbquota.c`, `src/zerocopy.c`). Configurable `picowl-buffer-v1` limits with per-`app_id` rules, so the player can have 7 buffers. Bytes accounted at the real allocated size | `[zerocopy]` and `[app.*]` config | ~2.5 days |
 | [caching-event.md](caching-event.md) | **Implemented** (`src/zbproto.c`, `src/copytype.c`). `picowl-buffer-v1` version 2: a `caching` event that says whether a buffer may be read back or decoded into. Replaces the `copy_type` stand-in | Protocol v2 (`since="2"`) | ~1.5 days + boards |
 | [drm-lease.md](drm-lease.md) | **Implemented** (`src/lease.c`, `doc/lease.md`). Lease the output to the player (`--vo drm:lease`), with policy (focused `app_id` on an allow-list), output parking and take-back. Includes a wlroots patch 0004 (overlay planes, grant fix) | `wp_drm_lease_device_v1` (wlroots) | ~6.5 days |
+| [osk.md](osk.md) | Design only. wvkbd-ipaq (patch series on upstream wvkbd + OE recipe: meson, RGB565, bitmap text, iPAQ layout, no exclusive zone); picowl `[osk]` supervision, `osk show/hide/toggle` action, built-in `[layer.wvkbd] hold_action = none`; optional input-method-v2/text-input-v3 relay | `zwp_virtual_keyboard_v1`, layer-shell, signals | ~4.25 days (+1.5 optional) |
 | [per-app-hold.md](per-app-hold.md) | **Implemented** (`src/config.c`, `src/input.c`). Per-`app_id` and per-layer-namespace overrides of the `[touch]` hold keys, chosen at touch-down and fixed for the gesture | `[app.*]` / `[layer.*]` config | ~1 day |
 
 ## Suggested order
