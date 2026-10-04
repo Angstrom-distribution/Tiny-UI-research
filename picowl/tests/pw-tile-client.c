@@ -3,9 +3,12 @@
  *                              [app.tile-a] aspect = 1:2
  *   pw-tile-client portrait    the same output turned to 720x1280, no aspect
  *   pw-tile-client pan         portrait, with a bottom anchored layer surface
- *                              (namespace wvkbd, exclusive zone 100) standing in
+ *                              (namespace wvkbd, 100 rows high, no exclusive
+ *                              zone, like the shipped wvkbd-ipaq) standing in
  *                              for the keyboard: the tiled pair is panned, not
- *                              resized, other windows shrink
+ *                              resized, other windows are not touched
+ *   pw-tile-client pan-zone    the same keyboard with an exclusive zone of 100:
+ *                              the pair is panned, other windows shrink
  *   pw-tile-client nopan       the same with [layout] pan empty: all shrink
  *   pw-tile-client pan-landscape  the keyboard on the 1280x720 output: the side
  *                              by side pair shrinks
@@ -13,6 +16,7 @@
  *                              (tile-b), keyboard green; stops at each step for
  *                              tests/pan-e2e.sh, which takes a screenshot and
  *                              answers by creating a file in DIR
+ *   pw-tile-client pixels-zone DIR  the same with the keyboard's exclusive zone
  * One connection, toplevels (app_ids tile-a and tile-b, and other for a window
  * outside the stack), and the configure sizes the compositor sends are checked
  * after every step. */
@@ -230,9 +234,11 @@ static void expect_size(const char *step, struct win *w, int width, int height)
 
 /* ---- the keyboard stand-in -------------------------------------------- */
 
-/* A bottom anchored layer surface with an exclusive zone, in the namespace of
- * wvkbd. Like wvkbd it is hidden by attaching no buffer and shown again by
+/* A bottom anchored layer surface, in the namespace of wvkbd, with or without
+ * an exclusive zone: the shipped wvkbd-ipaq asks for none, so that is the main
+ * case, and the zone is the other. Like wvkbd it is hidden by attaching no buffer and shown again by
  * committing and attaching one after the configure that follows. */
+static bool kb_zoned;	/* ask for an exclusive zone of the keyboard's height */
 static struct {
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *ls;
@@ -302,7 +308,8 @@ static void kbd_show(int zone)
 		zwlr_layer_surface_v1_set_size(kb.ls, 0, zone);
 		zwlr_layer_surface_v1_set_anchor(kb.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
 			ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-		zwlr_layer_surface_v1_set_exclusive_zone(kb.ls, zone);
+		if (kb_zoned)
+			zwlr_layer_surface_v1_set_exclusive_zone(kb.ls, zone);
 	}
 	wl_surface_commit(kb.surface);
 	while (kb.n_configures == before && now_ms() < end)
@@ -420,6 +427,12 @@ static void portrait(void)
 /* The keyboard takes 100 rows at the bottom of the 720x1280 portrait output. */
 #define KBD_ZONE 100
 
+/* The rows the keyboard takes off the area of a window which is not panned. */
+static int kbd_shrink(void)
+{
+	return kb_zoned ? KBD_ZONE : 0;
+}
+
 static void pan(void)
 {
 	struct win a, b, o;
@@ -444,7 +457,7 @@ static void pan(void)
 	kbd_show(KBD_ZONE);
 	expect_untouched("shown again", &a, 720, 640, na);
 	close_win(&a);
-	expect_size("partner closed", &b, 720, 1280 - KBD_ZONE);
+	expect_size("partner closed", &b, 720, 1280 - kbd_shrink());
 	open_win(&a, "tile-a");
 	expect_size("partner back", &a, 720, 640);
 	expect_size("partner back", &b, 720, 640);
@@ -461,7 +474,7 @@ static void pan(void)
 	na = a.n_configures;
 	nb = b.n_configures;
 	kbd_show(KBD_ZONE);
-	expect_size("other shrunk", &o, 720, 1280 - KBD_ZONE);
+	expect_size("other shrunk", &o, 720, 1280 - kbd_shrink());
 	expect_untouched("other shown", &a, 720, 640, na);
 	expect_untouched("other shown", &b, 720, 640, nb);
 	kbd_hide();
@@ -475,7 +488,8 @@ static void pan(void)
 	wl_display_roundtrip(dpy);
 }
 
-/* [layout] pan empty: the keyboard shrinks the usable area for everyone. */
+/* [layout] pan empty: the keyboard, with a zone, shrinks the usable area for
+ * everyone. */
 static void nopan(void)
 {
 	struct win a, b;
@@ -557,15 +571,15 @@ static void pixels(const char *dir)
 
 int main(int argc, char **argv)
 {
-	static const char *const modes[] = { "landscape", "portrait", "pan", "nopan",
-		"pan-landscape", "pixels" };
+	static const char *const modes[] = { "landscape", "portrait", "pan", "pan-zone",
+		"nopan", "pan-landscape", "pixels", "pixels-zone" };
 	bool known = false;
 
 	for (unsigned i = 0; argc >= 2 && i < sizeof(modes) / sizeof(modes[0]); i++)
 		known |= !strcmp(argv[1], modes[i]);
-	if (!known || argc != (!strcmp(argv[1], "pixels") ? 3 : 2)) {
-		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|nopan|"
-			"pan-landscape|pixels DIR\n");
+	if (!known || argc != (!strncmp(argv[1], "pixels", 6) ? 3 : 2)) {
+		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|pan-zone|"
+			"nopan|pan-landscape|pixels DIR|pixels-zone DIR\n");
 		return 2;
 	}
 	alarm(30);
@@ -578,11 +592,12 @@ int main(int argc, char **argv)
 	if (!compositor || !shm || !wm_base)
 		fail("missing globals");
 
+	kb_zoned = strcmp(argv[1], "pan") && strcmp(argv[1], "pixels");
 	if (!strcmp(argv[1], "landscape"))
 		landscape();
 	else if (!strcmp(argv[1], "portrait"))
 		portrait();
-	else if (!strcmp(argv[1], "pan"))
+	else if (!strcmp(argv[1], "pan") || !strcmp(argv[1], "pan-zone"))
 		pan();
 	else if (!strcmp(argv[1], "nopan"))
 		nopan();

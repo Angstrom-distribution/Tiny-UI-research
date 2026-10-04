@@ -96,11 +96,27 @@ static void restore_focus(struct pw_layer_surface *ls)
 	}
 }
 
-/* pan, when not NULL, collects the zone that [layout] pan surfaces take at the
- * bottom: measured as what wlroots takes off the usable area, so margins and
- * the anchor rules of the protocol are the library's, not a second copy. */
+/* A mapped surface of a [layout] pan namespace anchored to the bottom edge and
+ * not to the top: what the keyboard is. */
+static bool pans(const struct pw_output *output, const struct wlr_layer_surface_v1 *s)
+{
+	return s->surface->mapped
+		&& (s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)
+		&& !(s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP)
+		&& pw_config_pan_match(output->server->config, s->namespace);
+}
+
+/* pan, when not NULL, collects how far [layout] pan surfaces push the stack
+ * up, and shrink how much of that wlroots also took off the usable area (the
+ * tile layout is computed without it). With an exclusive zone the amount is
+ * measured as what wlroots takes off the usable area, so margins and the
+ * anchor rules of the protocol are the library's, not a second copy. Without
+ * a zone (the shipped wvkbd asks for none) nothing is taken off, so the
+ * amount is the space the surface occupies at the bottom, and the layout must
+ * not be grown by it. A surface is counted in one pass only, by its zone. */
 static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
-		struct wlr_box *usable, bool exclusive, bool hide_top, int *pan)
+		struct wlr_box *usable, bool exclusive, bool hide_top, int *pan,
+		int *shrink)
 {
 	for (int i = 0; i < 4; i++) {
 		struct pw_layer_surface *ls;
@@ -116,7 +132,7 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 			if (ls->unmapping) {
 				continue;
 			}
-			if (exclusive !=(s->current.exclusive_zone > 0)) {
+			if (exclusive != (s->current.exclusive_zone > 0)) {
 				continue;
 			}
 			if (hide_top && layer_order[i] == ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
@@ -128,12 +144,16 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 			}
 			struct wlr_box before = *usable;
 			wlr_scene_layer_surface_v1_configure(ls->scene_layer, full, usable);
-			if (pan && s->surface->mapped
-					&& (s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)
-					&& !(s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP)
-					&& usable->y == before.y && usable->height < before.height
-					&& pw_config_pan_match(output->server->config, s->namespace))
-				*pan += before.height - usable->height;
+			if (!pan || !pans(output, s))
+				continue;
+			if (exclusive) {
+				if (usable->y == before.y && usable->height < before.height) {
+					*pan += before.height - usable->height;
+					*shrink += before.height - usable->height;
+				}
+			} else if (s->current.exclusive_zone == 0) {
+				*pan += s->current.desired_height + s->current.margin.bottom;
+			}
 		}
 	}
 }
@@ -145,11 +165,13 @@ void pw_layer_arrange(struct pw_output *output)
 	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &full);
 
 	struct wlr_box usable = full;
-	int pan = 0;
-	arrange_layers(output, &full, &usable, true, output->server->panel_hidden, &pan);
-	arrange_layers(output, &full, &usable, false, output->server->panel_hidden, NULL);
+	int pan = 0, shrink = 0;
+	arrange_layers(output, &full, &usable, true, output->server->panel_hidden,
+		&pan, &shrink);
+	arrange_layers(output, &full, &usable, false, output->server->panel_hidden,
+		&pan, &shrink);
 	struct wlr_box tile = usable;
-	tile.height += pan;
+	tile.height += shrink;
 
 	bool changed = full.x != output->full_area.x
 		|| full.y != output->full_area.y

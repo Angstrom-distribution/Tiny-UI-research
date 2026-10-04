@@ -257,9 +257,11 @@ struct pw_output {
 	struct wlr_box full_area;   /* layout coords, whole output */
 	struct wlr_box usable_area; /* layout coords, excluding exclusive zones */
 	/* The area a tiled stack is laid out on while a [layout] pan surface (the
-	 * keyboard) is shown: usable_area plus the zone those surfaces take at the
-	 * bottom. Equal to usable_area, and pan_zone 0, when none is. */
+	 * keyboard) is shown: usable_area plus the exclusive zone those surfaces
+	 * took off it, so a surface without a zone leaves it equal to usable_area. */
 	struct wlr_box tile_area;
+	/* How far such surfaces push the stack up, with or without a zone; 0 when
+	 * none is shown. */
 	int pan_zone;
 	struct wl_list layers[4];   /* struct pw_layer_surface, per zwlr_layer_shell layer */
 

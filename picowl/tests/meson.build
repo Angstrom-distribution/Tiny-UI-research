@@ -137,9 +137,11 @@ test('tile-e2e', find_program('sh'),
   args: [files('tile-e2e.sh'), picowl_exe, pw_tile_client],
   timeout: 60)
 
-test('pan-e2e', find_program('sh'),
-  args: [files('pan-e2e.sh'), picowl_exe, pw_tile_client],
-  timeout: 60)
+foreach mode : ['pixels', 'pixels-zone']
+  test('pan-e2e-' + mode, find_program('sh'),
+    args: [files('pan-e2e.sh'), picowl_exe, pw_tile_client, mode],
+    timeout: 60)
+endforeach
 
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client],

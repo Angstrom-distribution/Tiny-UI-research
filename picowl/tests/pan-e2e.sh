@@ -7,9 +7,13 @@
 # The headless backend has one fixed 1280x720 mode, so this is not 240x320, but
 # the layout is the same: an even split, the zone is 100 rows.
 # Skips (exit 77) without grim or python3 with PIL.
-# usage: pan-e2e.sh PICOWL PW_TILE_CLIENT
+# MODE is pixels (the keyboard asks for no exclusive zone, as the shipped one
+# does) or pixels-zone (it asks for a zone of its height): the picture is the
+# same.
+# usage: pan-e2e.sh PICOWL PW_TILE_CLIENT MODE
 PICOWL=$1
 CLIENT=$2
+MODE=${3:-pixels}
 command -v grim >/dev/null 2>&1 || { echo "pan-e2e: no grim, skipped"; exit 77; }
 python3 -c 'import PIL.Image' >/dev/null 2>&1 || { echo "pan-e2e: no python3 PIL, skipped"; exit 77; }
 DIR=$(mktemp -d)
@@ -48,7 +52,7 @@ done
 SOCK=$(ls "$DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1)
 export WAYLAND_DISPLAY=$(basename "$SOCK")
 
-"$CLIENT" pixels "$DIR/sync" >"$DIR/client.log" 2>&1 &
+"$CLIENT" "$MODE" "$DIR/sync" >"$DIR/client.log" 2>&1 &
 CPID=$!
 for step in before shown hidden; do
 	i=0
@@ -62,7 +66,7 @@ for step in before shown hidden; do
 done
 wait "$CPID" || fail "client failed"
 CPID=
-grep -q "pw-tile-client: ok pixels" "$DIR/client.log" || fail "client did not report ok"
+grep -q "pw-tile-client: ok $MODE" "$DIR/client.log" || fail "client did not report ok"
 
 python3 - "$DIR" <<'PYEOF' || fail "pixel check"
 import sys
@@ -111,4 +115,4 @@ wait "$PID"; RC=$?
 PID=
 [ "$RC" -eq 0 ] || fail "picowl exit status $RC"
 rm -rf "$DIR"
-echo "pan-e2e: ok"
+echo "pan-e2e: ok ($MODE)"
