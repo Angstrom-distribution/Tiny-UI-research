@@ -252,6 +252,7 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 		pw_osk_action(server, binding->osk_op);
 		break;
 	case PW_ACTION_QUIT:
+		pw_log(WLR_INFO, "picowl: quit key pressed, exiting");
 		wl_display_terminate(server->display);
 		break;
 	}

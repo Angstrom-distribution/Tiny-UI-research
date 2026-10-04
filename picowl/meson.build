@@ -125,6 +125,7 @@ sources = files(
   'src/leasepolicy.c',
   'src/osk.c',
   'src/oskstate.c',
+  'src/home.c',
 )
 
 pwcursorfit = static_library(

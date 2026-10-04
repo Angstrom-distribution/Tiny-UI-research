@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include "picowl.h"
+#include "home.h"
 #include "mem.h"
 
 static void print_help(const char *prog)
@@ -67,6 +68,15 @@ int main(int argc, char **argv)
 	}
 
 	wlr_log_init(debug_level, NULL);
+
+	/* Before the config load and before any client is spawned. */
+	const char *old_home = getenv("HOME");
+	char *was = old_home ? strdup(old_home) : NULL;
+	const char *home = pw_home_init();
+	if (home)
+		pw_log(WLR_INFO, "HOME was '%s', using the account's home %s",
+			was ? was : "(unset)", home);
+	free(was);
 
 	/* Load configuration, using defaults if config_path is NULL */
 	struct pw_config *config = pw_config_load(config_path);

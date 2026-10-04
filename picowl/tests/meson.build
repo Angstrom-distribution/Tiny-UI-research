@@ -139,6 +139,9 @@ test_touchhold_exe = executable('test-touchhold',
 )
 test('touchhold', test_touchhold_exe)
 
+test('home', executable('test-home', 'test-home.c', '../src/home.c',
+  include_directories: include_directories('../src')))
+
 test('oskstate', executable('test-oskstate', 'test-oskstate.c', '../src/oskstate.c',
   include_directories: include_directories('../src')))
 

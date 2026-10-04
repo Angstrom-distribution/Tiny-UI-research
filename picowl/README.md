@@ -191,6 +191,8 @@ cmd = picowl-panel
 
 The on-screen keyboard does not belong here: `[osk]` starts it and keeps it running.
 
+Autostarted commands, `spawn` commands and the keyboard run with picowl's environment. A service manager without a login session hands picowl `HOME=/` (or none), and clients such as a terminal then look for their `~/.config` in the wrong place. When `HOME` is unset, empty, relative or `/`, picowl sets it from the home directory of its effective user in the account database before anything is started, and logs the change. A usable `HOME` that was set on purpose is left alone, and an account without a home directory changes nothing.
+
 ### [osk] section
 
 picowl starts the on-screen keyboard, restarts it when it dies, signals it for the `osk` key action and stops it on exit. The keyboard is wvkbd; the iPAQ build of it is carried as a patch series and an OE recipe (`oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`, not yet built into an image or run on a board). Design: [doc/design/osk.md](doc/design/osk.md).
