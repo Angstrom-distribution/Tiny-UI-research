@@ -4,7 +4,7 @@
 
 The OSK is wvkbd, rebuilt for the iPAQ as a patch series on a pinned upstream commit, packaged in picowl's OE layer (Part 1). picowl starts and supervises it, shows and hides it by signal from a keybinding or the panel, and keeps its own tap-and-hold out of the way (Part 2). An input-method relay that shows the keyboard automatically on text focus is an optional Part 3.
 
-wvkbd citations are to upstream commit e14b53a (v0.20-9). picowl citations are to commit 3f74900.
+wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on 2026-10-04). picowl citations are to commit 3f74900.
 
 ## 1. Problem
 
@@ -19,13 +19,13 @@ wvkbd citations are to upstream commit e14b53a (v0.20-9). picowl citations are t
 | Behaviour | Upstream | Problem on the iPAQ |
 |---|---|---|
 | Build | Makefile, one binary per `LAYOUT` (`Makefile:3-6`, `config.mk:5`) | Our rule is meson |
-| Pixels | `WL_SHM_FORMAT_ARGB8888`, `CAIRO_FORMAT_ARGB32`, stride `width*4` (`drw.c:238-273`) | picowl alpha-blends it on the CPU on every repaint, and it blocks direct scanout of the app below. Twice the memory of RGB565 |
+| Pixels | `WL_SHM_FORMAT_ARGB8888`, `CAIRO_FORMAT_ARGB32`, stride `width*4` (`drw.c:237-272`) | picowl alpha-blends it on the CPU on every repaint, and it blocks direct scanout of the app below. Twice the memory of RGB565 |
 | Size | `KBD_PIXEL_HEIGHT 250`, landscape 120 (`layout.mobintl.h:3-6`) | 250 px is 78 % of a 320 px portrait screen |
 | Text | pangocairo, `"Sans 14"` (`Makefile:10`, `config.mobintl.h:4`) | fontconfig scan at start-up; pango shaping per label draw. GTK2 apps load the same libraries, but the OSK runs before and without them |
-| Exclusive zone | on by default (`main.c:920`; `--non-exclusive` at `:1104-1105`) | Every show and hide resizes the focused app and repaints the whole screen: slow on the MediaQ bus (~8 MB/s) |
-| Hide/show | `hide()` destroys the layer surface, the popup and both surfaces (`main.c:742-786`); `show()` creates them again | A configure round trip and two new shm buffers on every show |
-| Key preview popup | an `xdg_popup` with its own two buffers (`main.c:630-650`) | A second surface to composite and ~2× the buffer memory |
-| Signals | blocked only just before the main loop (`main.c:1281-1291`) | A SIGUSR1/2 or SIGRTMIN that arrives during start-up kills the process (default action) |
+| Exclusive zone | on by default (`main.c:920`; `--non-exclusive` at `:1104-1105`; the zone is only requested when `keyboard.exclusive` is set, `:830-831`) | Every show and hide resizes the focused app and repaints the whole screen: slow on the MediaQ bus (~8 MB/s) |
+| Hide/show | `hide()` destroys the layer surface, the popup and both surfaces (`main.c:742-786`), and leaks the popup's viewport; `show()` creates them again | A configure round trip and two new shm buffers on every show |
+| Key preview popup | an `xdg_popup` with its own two buffers (`main.c:630-650`), on by default (`:922`; upstream already has `--no-popup`) | A second surface to composite and ~2× the buffer memory |
+| Signals | blocked only just before the main loop (the mask is built at `main.c:1282-1287`, after `show()` and the Wayland round trips) | A SIGUSR1/2 or SIGRTMIN that arrives during start-up kills the process (default action) |
 | Damage | per-rectangle, with a back buffer (`drw.c:18-55`) | Already good; keep it |
 
 ## 2. Part 1: wvkbd-ipaq
@@ -35,8 +35,8 @@ wvkbd citations are to upstream commit e14b53a (v0.20-9). picowl citations are t
 - **Recipe** `picowl/oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`:
   - `SRC_URI = "git://github.com/jjsullivan5196/wvkbd.git;protocol=https;branch=master"` plus the patches; `SRCREV = "e14b53a..."` (full hash).
   - `S = "${UNPACKDIR}/${BP}"` per wrynose/blacksail conventions (as in `picowl_git.bb`).
-  - `LICENSE = "GPL-3.0-only & MIT"`: `LICENSE` is the GPLv3 text; `COPYING` says `os-compatibility.[ch]` are MIT (text in `COPYING_WESTON`). `LIC_FILES_CHKSUM` covers `LICENSE` and `COPYING_WESTON`.
-  - `inherit meson pkgconfig`; `DEPENDS = "wayland wayland-native wayland-protocols libxkbcommon"`, plus `pango cairo` only for `text=pango`.
+  - `LICENSE = "GPL-3.0-only & MIT"` is a first guess: `LICENSE` is the GPLv3 text; `COPYING` says `os-compatibility.[ch]` are MIT (text in `COPYING_WESTON`) and everything else GPL v3, without saying "only" or "or later". Check the per-file headers before settling it; `shm_open.[ch]` carry no header. `LIC_FILES_CHKSUM` covers `LICENSE` and `COPYING_WESTON`.
+  - `inherit meson pkgconfig`; `DEPENDS = "wayland wayland-native libxkbcommon cairo scdoc-native"`, plus `pango fontconfig` only for `text=pango`. Upstream links pangocairo unconditionally (`Makefile:10`), so a bitmap build has to remove the pango and fontconfig code paths first (patch 8). All protocol XMLs it needs are vendored in its `proto/` directory, so wayland-protocols is optional. `scdoc` builds the man page.
   - `picowl_git.bb` gets `RRECOMMENDS:${PN} += "wvkbd-ipaq"`, so a minimal image can leave it out.
 - **Wrap** `picowl/subprojects/wvkbd.wrap` (git, pinned revision, `diff_files` = the series), used only by the `osk_tests` meson option; nothing from it is installed.
 
@@ -45,12 +45,12 @@ wvkbd citations are to upstream commit e14b53a (v0.20-9). picowl citations are t
 |---|---|---|
 | 1 | meson build | `meson.build` and `meson_options.txt`: `kbd_layout` (`mobintl`, `deskintl`, `ipaq`; meson reserves `layout`), `text` (`bitmap`/`pango`), `tests`. Generates the protocol code with `wayland-scanner`. Installs one binary named after the layout (`wvkbd-ipaq`) and the man page from the existing `wvkbd.1.scd` |
 | 2 | start-up fixes | Block the handled signals at the top of `main()`, before any Wayland setup. Free the keymap string after upload |
-| 3 | RGB565 | `WL_SHM_FORMAT_RGB565`, `CAIRO_FORMAT_RGB16_565`, stride `width*2` rounded to 4 bytes; fall back to `XRGB8888` if the compositor doesn't advertise RGB565. All colours opaque; the `--alpha` option is ignored in RGB565 mode |
-| 4 | optional popup | Key preview popup only with `--popup`; off by default in the `ipaq` layout |
+| 3 | RGB565 | `WL_SHM_FORMAT_RGB565`, `CAIRO_FORMAT_RGB16_565`, stride `width*2` rounded to 4 bytes; fall back to `XRGB8888` if the compositor doesn't advertise RGB565. All colours opaque; the `--alpha` and `--bg-alpha` options are ignored in RGB565 mode |
+| 4 | popup default | Upstream already has `--no-popup` and defaults to a popup. Keep that flag, add `--popup`, and let the `ipaq` layout default to no popup |
 | 5 | keep the surface | `hide()` unmaps by attaching a NULL buffer and committing; `show()` re-attaches the display buffer. No surface, buffer or configure churn per toggle |
 | 6 | label damage | Redraw only keys whose label or state changed (shift, layer switch), not the whole keyboard |
-| 7 | `ipaq` layout | Portrait 240 px wide: 10 keys per row (24 px), 4 rows plus a function row, ~100 px total. Landscape 320 and VGA 480/640: same rows, wider keys, ~80 px (QVGA landscape) or ~160 px (VGA portrait). Layers: letters, shifted, numbers/symbols, a small Dutch/German/French accent layer. `--non-exclusive` is the default |
-| 8 | bitmap text | `text=bitmap`: two built-in public-domain X11 fonts, 6x13 (QVGA) and 10x20 (VGA), rasterised once into a glyph mask and blitted per label. No fontconfig, pango or harfbuzz at run time. Font chosen so the glyph is at most 85 % of the inner key height |
+| 7 | `ipaq` layout | Portrait 240 px wide: 10 keys per row (24 px), 4 rows plus a function row, ~100 px total. Landscape 320 and VGA 480/640: same rows, wider keys, ~80 px (QVGA landscape) or ~160 px (VGA portrait). Layers: letters, shifted, numbers/symbols, a small Dutch/German/French accent layer. `--non-exclusive` is the default. Upstream's `--dock`, `--ratio`, `--width` and `--corner-radius` (added in e14b53a) change the geometry too: either honour them in the `ipaq` layout or document that it ignores them |
+| 8 | bitmap text | `text=bitmap`: two built-in public-domain X11 fonts, 6x13 (QVGA) and 10x20 (VGA), rasterised once into a glyph mask and blitted per label. No fontconfig, pango or harfbuzz at run time: this means replacing every pango call (font setup at `main.c:1264`, layout drawing around `drw.c:281`) and the fontconfig lookup, while cairo stays for shapes and rounded corners. This is more than one small patch. Font chosen so the glyph is at most 85 % of the inner key height |
 | 9 | long press | Long press on a letter for its accented variants, at 500 ms by default (`--long-press MS`, 0 = off). It is shorter than picowl's `hold_ms` default (900 ms), but picowl leaves the OSK alone anyway (§3.3) |
 
 **Text path decision.** Bitmap by default. GTK2 apps do load pango and cairo, but the OSK starts before any of them and stays resident; with bitmap text it needs neither fontconfig's cache scan at start-up nor pango shaping per label. `text=pango` remains for builds that want scalable fonts or complex scripts.
@@ -104,10 +104,11 @@ The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until
 
 ## 4. Part 3 (optional): automatic show
 
+- **wvkbd already does its half.** With `--auto` it binds `zwp_input_method_manager_v2` and calls `show()` on `activate` and `hide()` on `deactivate` (`main.c:472-473`, `:1106-1108`, `:1257-1259`, `:525-535`); the other input-method events are empty stubs. It never uses text-input-v3 and types through virtual-keyboard only. No wvkbd patch is needed for this part. `activate` acts immediately, not on `done`.
 - picowl creates `wlr_input_method_manager_v2` and `wlr_text_input_manager_v3` (wlroots 0.19 `wlr/types/wlr_input_method_v2.h`, `wlr_text_input_v3.h`) and relays between them: focused surface ↔ text input `enter/leave`; `enable`/`commit`/`disable` → input method `activate`/`deactivate`/`done`; input method `commit` → `commit_string`, `delete_surrounding_text`, `preedit`. wvkbd then runs with `--auto` and shows itself on text focus.
 - Reference: labwc's `src/input/ime.c` (~720 lines with keyboard grab and popups). picowl needs no keyboard grab and no popups: ~300 lines [est].
 - **Who benefits:** only clients that speak text-input-v3, i.e. GTK3/4 and Qt apps, which are too large for these boards. GTK+2 apps get nothing until a GDK2 Wayland backend exists and gains an input-method module. Typing never needs this part; virtual-keyboard alone is enough.
-- Recommendation: defer until the GDK2 backend exists.
+- Recommendation: the relay is cheap now that wvkbd needs no change, so build it; it only helps clients that speak text-input-v3, and virtual-keyboard stays for everything else.
 
 ## 5. Cost on 64 MiB [est]
 | Item | Upstream wvkbd | wvkbd-ipaq |
