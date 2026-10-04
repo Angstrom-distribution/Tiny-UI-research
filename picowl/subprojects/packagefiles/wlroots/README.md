@@ -1,11 +1,12 @@
 # wlroots 0.19 patches for picowl
 
-Four patches against wlroots 0.19.0 (commit 13a62a23). They add what picowl
+Five patches against wlroots 0.19.0 (commit 13a62a23). They add what picowl
 needs on GPU-less iPAQ-class devices: the pixman renderer reads client
 DMA-BUFs, the pixman render pass copies and fills without per-frame
 allocations, the DRM backend can rotate in hardware and knows about
-copy-type drivers, and a DRM lease includes the overlay planes and no longer
-writes to freed memory. The patches only add mechanisms; policy (which output
+copy-type drivers, a DRM lease includes the overlay planes and no longer
+writes to freed memory, and the scene keeps the windows under a translucent
+layer surface visible. The patches only add mechanisms; policy (which output
 is copy-type, when to rotate in hardware, the single-buffer swapchain, who
 may lease) is picowl code in `src/output.c`, `src/copytype.c`,
 `src/zerocopy.c` and `src/lease.c`.
@@ -237,6 +238,29 @@ drivers are unverified: check `modetest -p` for their `possible_crtcs`.
 of picowl and wlroots it catches the use-after-free, and with
 `PW_LEASE_EXPECT_OVERLAY=1` it checks that the overlay is in the lease.
 
+## 0005-scene-update-a-buffer-node-when-its-opacity-changes.patch
+
+**What:** `wlr_scene_buffer_set_buffer_with_options()` updates the node (and
+with it the visible regions of the nodes below) when the new buffer is opaque
+and the old one was not, or the other way round.
+
+**Why:** a surface commit sets the opaque region and the size of its scene
+node before it swaps the buffer (`surface_reconfigure` in
+`types/scene/surface.c`). When a layer surface grows from an opaque RGB565
+buffer (picowl-panel's bar) to an ARGB8888 one (the bar with its translucent
+slider row), the update that the new size triggers still sees the opaque
+buffer, so the whole grown node occludes what is below it. The swap to the
+ARGB8888 buffer then changed `buffer_is_opaque` without an update: a window
+that was there before stays culled under the row, which is drawn over whatever
+the frame buffer held (black on the iPAQ). A window mapped after the surface
+grew, or one that is resized afterwards, is not affected, because their own
+updates recompute their regions.
+
+**Tests:** `tests/test-scene-opaque.c` replays the commit sequence on a bare
+scene and checks the visible region of a node below; `tests/panel-e2e.sh`
+section H opens the row over a window that was already playing and checks the
+pixel under the row.
+
 ## Updating the patches
 
 The patches apply with `patch -p1` to a pristine wlroots 0.19.0 tree, in order.
@@ -248,7 +272,7 @@ To change one:
 3. Regenerate each patch from its commit with the same `git format-patch` style
    header (keep the `From:`/`Subject:` lines and the description; `git diff
    --abbrev=8` for the body, `--stat=80` for the diffstat).
-4. Copy the four `.patch` files into both `subprojects/packagefiles/wlroots/`
+4. Copy the five `.patch` files into both `subprojects/packagefiles/wlroots/`
    and `oe/recipes-graphics/wlroots/files/`; the two sets must be
    byte-identical:
 

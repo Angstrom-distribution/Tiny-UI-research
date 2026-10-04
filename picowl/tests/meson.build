@@ -204,7 +204,9 @@ test('copyrel', executable('test-copyrel', 'test-copyrel.c', '../src/copyrel.c',
   include_directories: test_inc))
 test('pixman-pass', executable('test-pixman-pass', 'test-pixman-pass.c',
   dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
-test('pixman-dmabuf', executable('test-pixman-dmabuf', 'test-pixman-dmabuf.c',
+test('scene-opaque', executable('test-scene-opaque', 'test-scene-opaque.c',
+  dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
+test('pixman-dmabuf',executable('test-pixman-dmabuf', 'test-pixman-dmabuf.c',
   dependencies: [wlroots, pixman, wayland_server, libdrm], include_directories: test_inc))
 
 test('bufproto', executable('test-bufproto', 'test-bufproto.c', '../src/zbproto.c',

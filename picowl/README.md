@@ -26,7 +26,7 @@ ninja -C build
 - for `picowl-panel` only: `wayland-client` and `alsa-lib` (meson option `panel`, default `auto`: built when both are found, `-Dpanel=disabled` to skip it); its text needs a TrueType font file at run time, but not to build or start (see Panel)
 - C11 compiler, meson >= 1.3
 
-picowl carries four wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput (with libudev) is linked directly when found (touch calibration and its matrix for hardware rotation); without it that code is compiled out.
+picowl carries five wlroots patches (`subprojects/packagefiles/wlroots/`, applied by the wrap and by the OE recipe); see `subprojects/packagefiles/wlroots/README.md` for patch details and `doc/zero-copy.md` for the buffer model. libinput (with libudev) is linked directly when found (touch calibration and its matrix for hardware rotation); without it that code is compiled out.
 
 `wlroots 0.19` is configured minimally: DRM/libinput backends, pixman renderer only, no GLES2/Vulkan/GBM. On OpenEmbedded systems (wrynose/blacksail), see `oe/README.md` for a prebuilt wlroots recipe.
 

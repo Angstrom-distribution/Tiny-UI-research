@@ -19,6 +19,7 @@ SRC_URI += " \
     file://0002-pixman-pass-memcpy-and-fill-fast-paths.patch \
     file://0003-drm-hardware-rotation-and-copy-type.patch \
     file://0004-drm-lease-overlay-planes.patch \
+    file://0005-scene-update-a-buffer-node-when-its-opacity-changes.patch \
 "
 SRCREV = "13a62a23a258d96f902c740310d5c7c59784a4d1"
 

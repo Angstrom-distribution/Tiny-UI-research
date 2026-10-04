@@ -232,7 +232,7 @@ rotated image is produced by the display controller, not by the CPU.
   the output with `wlr_cursor_map_input_to_output`, so for software rotation
   wlr_cursor applies the output transform to the touch coordinates.
 
-## The four patches and their wiring
+## The five patches and their wiring
 
 Kept in `subprojects/packagefiles/wlroots/` and `oe/recipes-graphics/wlroots/files/`
 (byte identical, checked with `diff -r`).
@@ -241,10 +241,11 @@ Kept in `subprojects/packagefiles/wlroots/` and `oe/recipes-graphics/wlroots/fil
 2. `0002-pixman-pass-memcpy-and-fill-fast-paths.patch`
 3. `0003-drm-hardware-rotation-and-copy-type.patch`
 4. `0004-drm-lease-overlay-planes.patch` (DRM lease, see `doc/lease.md`)
+5. `0005-scene-update-a-buffer-node-when-its-opacity-changes.patch` (a translucent layer surface over an existing window)
 
-Meson: `subprojects/wlroots.wrap` has `diff_files = wlroots/0001..., 0002..., 0003..., 0004...`.
+Meson: `subprojects/wlroots.wrap` has `diff_files = wlroots/0001..., 0002..., 0003..., 0004..., 0005...`.
 OpenEmbedded: `wlroots_0.19.0.bb` has `FILESEXTRAPATHS:prepend := "${THISDIR}/files:"`
-and four `file://` entries in `SRC_URI`. They apply in order on a pristine
+and five `file://` entries in `SRC_URI`. They apply in order on a pristine
 0.19.0 (13a62a23) export with both `patch -p1` and `git apply`. A host prefix
 must be rebuilt with them for picowl to link (`wlr_drm_connector_set_hw_rotation`,
 `wlr_drm_connector_set_copy_type`, `wlr_drm_connector_supports_hw_rotation`).

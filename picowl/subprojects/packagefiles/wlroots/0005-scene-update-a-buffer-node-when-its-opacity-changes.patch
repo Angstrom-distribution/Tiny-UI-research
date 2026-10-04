@@ -1,0 +1,42 @@
+From: picowl <picowl@localhost>
+Subject: [PATCH 5/5] scene: update a buffer node when its opacity changes
+
+A surface commit sets the opaque region and the size of its scene node before
+it swaps the buffer (surface_reconfigure). The update which the new size
+triggers therefore sees the previous buffer, and for an opaque one the whole
+node, in its new size, occludes what is below it. When the buffer is then
+swapped for one that is not opaque, nothing updates the node again, so the
+visible regions of the nodes below keep the hole: they are culled where the
+new buffer only covers them translucently, and the renderer draws that buffer
+over whatever the frame buffer held.
+
+This is what happens to a layer surface that grows from an opaque RGB565 bar
+to an ARGB8888 bar with a translucent row, over a window that was already
+there: the window disappears under the row. Update the node when the opacity
+of the buffer changes.
+
+Upstream-Status: Pending
+---
+ types/scene/wlr_scene.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/types/scene/wlr_scene.c b/types/scene/wlr_scene.c
+--- a/types/scene/wlr_scene.c
++++ b/types/scene/wlr_scene.c
+@@ -875,6 +875,16 @@
+ 			scene_buffer->buffer_height != buffer->height;
+ 	}
+
++	// What the node occludes depends on whether its buffer is opaque, and the
++	// regions of the nodes below it are only recomputed by an update. A
++	// surface commit changes the size of the node before it swaps the buffer
++	// (surface_reconfigure), so that update has seen the previous buffer: an
++	// opaque RGB565 one that has made the whole of the larger node occluding.
++	// The nodes below would stay culled under a translucent ARGB8888 buffer.
++	if (buffer != NULL) {
++		update = update || scene_buffer->buffer_is_opaque != wlr_buffer_is_opaque(buffer);
++	}
++
+ 	// If this is a buffer change, check if it's a single pixel buffer.
+ 	// Cache that so we can still apply rendering optimisations even when
+ 	// the original buffer has been freed after texture upload.
