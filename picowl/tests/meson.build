@@ -188,6 +188,8 @@ test('tile', executable('test-tile', 'test-tile.c', '../src/tile.c',
   include_directories: test_inc))
 test('scenehit', executable('test-scenehit', 'test-scenehit.c', '../src/tile.c',
   dependencies: [wlroots, wayland_server], include_directories: test_inc))
+test('grab', executable('test-grab', 'test-grab.c', '../src/grab.c',
+  dependencies: [wlroots, wayland_server], include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('pointercal', executable('test-pointercal', 'test-pointercal.c', '../src/pointercal.c',

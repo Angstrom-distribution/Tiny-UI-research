@@ -8,6 +8,7 @@
  * this file performs the actions it returns.
  */
 #include "picowl.h"
+#include "grab.h"
 
 #include <stdlib.h>
 #include <time.h>
@@ -52,7 +53,7 @@ struct pw_input_state {
 	uint32_t btn_swallowed;        /* bit n: release of BTN_LEFT+n is dropped */
 	struct xkb_keymap *keymap;     /* shared by all physical keyboards */
 	bool frame_pending;            /* pointer events sent since last frame */
-	double grab_ox, grab_oy;       /* layout origin of the touch-grabbed surface */
+	struct pw_grab grab;           /* the touch-grabbed surface and its origin */
 	struct pw_touchhold th;        /* tap-and-hold state machine */
 	struct wl_event_source *th_timer;
 	int down_x, down_y;            /* layout coords of the touch-down point */
@@ -124,8 +125,8 @@ static void update_capabilities(struct pw_server *server)
 }
 
 /* Surface under layout point; fills surface-local coords. */
-static struct wlr_surface *surface_at(struct pw_server *server, double lx,
-	double ly, double *sx, double *sy)
+static struct wlr_surface *surface_node_at(struct pw_server *server, double lx,
+	double ly, double *sx, double *sy, struct wlr_scene_node **buffer)
 {
 	struct wlr_scene_node *node = wlr_scene_node_at(
 		&server->scene->tree.node, lx, ly, sx, sy);
@@ -133,15 +134,23 @@ static struct wlr_surface *surface_at(struct pw_server *server, double lx,
 		return NULL;
 	struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(
 		wlr_scene_buffer_from_node(node));
+	if (buffer)
+		*buffer = node;
 	return ss ? ss->surface : NULL;
+}
+
+static struct wlr_surface *surface_at(struct pw_server *server, double lx,
+	double ly, double *sx, double *sy)
+{
+	return surface_node_at(server, lx, ly, sx, sy, NULL);
 }
 
 static void focus_surface(struct pw_server *server, struct wlr_surface *surface);
 
 struct wlr_surface *pw_input_surface_at(struct pw_server *server, double lx,
-	double ly, double *sx, double *sy)
+	double ly, double *sx, double *sy, struct wlr_scene_node **node)
 {
-	return surface_at(server, lx, ly, sx, sy);
+	return surface_node_at(server, lx, ly, sx, sy, node);
 }
 
 void pw_input_focus_surface(struct pw_server *server, struct wlr_surface *surface)
@@ -698,7 +707,7 @@ void pw_input_lease_touch(struct pw_server *server, const struct wlr_box *box)
 {
 	st.lease_box = box ? *box : (struct wlr_box){ 0 };
 	/* a gesture in progress began in layout coordinates */
-	st.grab_ox = st.grab_oy = 0;
+	pw_grab_set(&st.grab, NULL, 0, 0);
 	if (!server->cursor)
 		return;
 	struct pw_touch_dev *t;
@@ -767,8 +776,10 @@ static void th_exec(unsigned a, uint32_t time)
 	if ((a & PW_TH_SEND_MOTION) && seat->pointer_state.focused_surface) {
 		/* keep the implicit grab's focus: report motion in its coordinates */
 		st.frame_pending = true;
+		double ox, oy;
+		pw_grab_origin(&st.grab, &ox, &oy);
 		wlr_seat_pointer_notify_motion(seat, time,
-			server->cursor->x - st.grab_ox, server->cursor->y - st.grab_oy);
+			server->cursor->x - ox, server->cursor->y - oy);
 	}
 	if (a & PW_TH_SEND_RIGHT_CLICK) {
 		st.frame_pending = true;
@@ -858,6 +869,7 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 	st.down_x = (int)server->cursor->x;
 	st.down_y = (int)server->cursor->y;
 	double sx, sy;
+	struct wlr_scene_node *node = NULL;
 	/* Leased: the scene no longer matches the screen. The lessee gets the
 	 * touch, in the coordinates of the lease region. */
 	struct wlr_surface *s = pw_lease_touch_target(server);
@@ -865,13 +877,13 @@ static void touch_handle_down(struct wl_listener *l, void *data)
 		sx = server->cursor->x;
 		sy = server->cursor->y;
 	} else {
-		s = surface_at(server, server->cursor->x, server->cursor->y, &sx, &sy);
+		s = surface_node_at(server, server->cursor->x, server->cursor->y, &sx, &sy,
+			&node);
 		if (s)
 			focus_surface(server, s);
 	}
 	if (s) {
-		st.grab_ox = server->cursor->x - sx;
-		st.grab_oy = server->cursor->y - sy;
+		pw_grab_set(&st.grab, node, server->cursor->x - sx, server->cursor->y - sy);
 		st.frame_pending = true;
 		wlr_seat_pointer_notify_enter(server->seat, s, sx, sy);
 		wlr_seat_pointer_notify_motion(server->seat, ev->time_msec, sx, sy);
@@ -920,6 +932,7 @@ static void touch_end(uint32_t time_msec, bool cancel)
 		th_exec(a & ~(unsigned)PW_TH_SWALLOW, time_msec);
 	}
 	th_rearm();
+	pw_grab_clear(&st.grab);
 	st.touch_id = PW_NO_TOUCH;
 	st.touch_swallowed = false;
 }

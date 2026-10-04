@@ -23,6 +23,7 @@
 #include <wlr/types/wlr_tablet_v2.h>
 
 #include "picowl.h"
+#include "grab.h"
 
 struct pw_tablet {
 	struct wl_list link;           /* T.tablets */
@@ -55,7 +56,7 @@ struct pw_tool {
 	/* While a tip or button is held the surface that got the press keeps the
 	 * tool, like the touch grab: motion is reported in its coordinates. */
 	bool grabbed;
-	double grab_ox, grab_oy;       /* layout origin of the grabbed surface */
+	struct pw_grab grab;           /* the grabbed surface and its layout origin */
 	struct wl_listener destroy;
 };
 
@@ -67,6 +68,12 @@ static struct {
 	struct wl_listener axis, proximity, tip, button;
 	bool added;
 } T;
+
+static void tool_ungrab(struct pw_tool *tool)
+{
+	tool->grabbed = false;
+	pw_grab_clear(&tool->grab);
+}
 
 /* The tool object is keyed by its wlr_tablet_tool through the destroy signal
  * of that tool, which is also what frees the tablet-v2 side. */
@@ -288,7 +295,7 @@ void pw_tablet_set_usable(struct wlr_input_device *dev, bool usable)
 				if (tool->tablet != tab)
 					continue;
 				wlr_tablet_v2_tablet_tool_notify_proximity_out(tool->v2);
-				tool->grabbed = false;
+				tool_ungrab(tool);
 				tool->tablet = NULL;
 			}
 			tablet_pads_focus(tab, NULL);
@@ -302,6 +309,7 @@ static void tool_handle_destroy(struct wl_listener *l, void *data)
 {
 	(void)data;
 	struct pw_tool_key *k = wl_container_of(l, k, tool.destroy);
+	pw_grab_clear(&k->tool.grab);
 	wl_list_remove(&k->tool.destroy.link);
 	wl_list_remove(&k->tool.link);
 	free(k);
@@ -336,10 +344,11 @@ static struct pw_tool *tool_get(struct wlr_tablet_tool *wlr)
 /* Hand the tool to the surface under the cursor if that client bound
  * tablet-v2, else take it away from the previous one. */
 static struct wlr_surface *tool_focus(struct pw_tablet *tab, struct pw_tool *tool,
-	double *sx, double *sy)
+	double *sx, double *sy, struct wlr_scene_node **node)
 {
 	struct wlr_cursor *cursor = T.server->cursor;
-	struct wlr_surface *s = pw_input_surface_at(T.server, cursor->x, cursor->y, sx, sy);
+	struct wlr_surface *s = pw_input_surface_at(T.server, cursor->x, cursor->y, sx, sy,
+		node);
 	if (s && !wlr_surface_accepts_tablet_v2(s, tab->v2))
 		s = NULL;
 	if (!s) {
@@ -364,16 +373,18 @@ static bool tool_motion(struct pw_tablet *tab, struct pw_tool *tool, bool press)
 	struct wlr_cursor *cursor = T.server->cursor;
 	double sx, sy;
 	if (tool->grabbed) {
-		sx = cursor->x - tool->grab_ox;
-		sy = cursor->y - tool->grab_oy;
+		double ox, oy;
+		pw_grab_origin(&tool->grab, &ox, &oy);
+		sx = cursor->x - ox;
+		sy = cursor->y - oy;
 	} else {
-		struct wlr_surface *s = tool_focus(tab, tool, &sx, &sy);
+		struct wlr_scene_node *node = NULL;
+		struct wlr_surface *s = tool_focus(tab, tool, &sx, &sy, &node);
 		if (!s)
 			return false;
 		if (press) {
 			tool->grabbed = true;
-			tool->grab_ox = cursor->x - sx;
-			tool->grab_oy = cursor->y - sy;
+			pw_grab_set(&tool->grab, node, cursor->x - sx, cursor->y - sy);
 			pw_input_focus_surface(T.server, s);
 		}
 	}
@@ -384,7 +395,7 @@ static bool tool_motion(struct pw_tablet *tab, struct pw_tool *tool, bool press)
 static void tool_release_check(struct pw_tool *tool)
 {
 	if (!tool->v2->is_down && tool->v2->num_buttons == 0)
-		tool->grabbed = false;
+		tool_ungrab(tool);
 }
 
 /* Tablet events are dropped while the output mapping is wrong, while the
@@ -406,7 +417,7 @@ static void handle_proximity(struct wl_listener *l, void *data)
 		return;
 	if (ev->state == WLR_TABLET_TOOL_PROXIMITY_OUT) {
 		wlr_tablet_v2_tablet_tool_notify_proximity_out(tool->v2);
-		tool->grabbed = false;
+		tool_ungrab(tool);
 		tool->tablet = NULL;
 		tablet_pads_focus(tab, NULL);
 		return;

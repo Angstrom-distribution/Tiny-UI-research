@@ -516,7 +516,7 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
  * true when the display was blanked and the event must be dropped. For
  * tablet.c, implemented in input.c. */
 struct wlr_surface *pw_input_surface_at(struct pw_server *server, double lx,
-	double ly, double *sx, double *sy);
+	double ly, double *sx, double *sy, struct wlr_scene_node **node);
 void pw_input_focus_surface(struct pw_server *server, struct wlr_surface *surface);
 bool pw_input_activity(struct pw_server *server);
 

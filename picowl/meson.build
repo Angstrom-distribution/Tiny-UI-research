@@ -102,6 +102,7 @@ sources = files(
   'src/tile.c',
   'src/layer.c',
   'src/input.c',
+  'src/grab.c',
   'src/pointercal.c',
   'src/imrelay.c',
   'src/implace.c',
