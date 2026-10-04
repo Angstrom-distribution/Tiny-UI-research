@@ -4,7 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wlr/interfaces/wlr_buffer.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
+#include <wlr/types/wlr_tablet_v2.h>
 #include <wlr/util/log.h>
 #include "picowl.h"
 #include "cursor-builtin.h"
@@ -232,8 +234,13 @@ static bool shape_request_allowed(struct pw_server *server,
 	switch (ev->device_type) {
 	case WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER:
 		return ev->seat_client == server->seat->pointer_state.focused_client;
-	case WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL:
-		return false; /* no tablet support yet, so no such device exists */
+	case WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL: {
+		/* the tool's focus is the surface its proximity_in went to */
+		const struct wlr_surface *s = ev->tablet_tool ?
+			ev->tablet_tool->focused_surface : NULL;
+		return s && s->resource &&
+			wl_resource_get_client(s->resource) == ev->seat_client->client;
+	}
 	}
 	return false;
 }

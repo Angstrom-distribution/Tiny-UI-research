@@ -43,6 +43,8 @@ struct pw_server;
 struct pw_cursor;
 struct wlr_linux_dmabuf_v1;
 struct wlr_content_type_manager_v1;
+struct wlr_tablet_manager_v2;
+struct wlr_input_device;
 struct wlr_swapchain;
 
 /* ---- configuration ---------------------------------------------------- */
@@ -302,6 +304,7 @@ struct pw_server {
 	struct wlr_cursor *cursor;
 	struct pw_cursor *hold_cursor; /* owned by cursor.c, NULL until pw_cursor_init */
 	struct wl_list keyboards;  /* struct pw_keyboard */
+	struct wlr_tablet_manager_v2 *tablet_mgr; /* owned by tablet.c state; NULL: no tablets */
 	struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_mgr;
@@ -433,6 +436,37 @@ void pw_input_finish(struct pw_server *server);
 /* Execute binding->action (spawn, cycle, close, blank, rotate, quit). Called
  * by input.c's key handler when a keybinding matches; also usable by tests. */
 void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *binding);
+
+/* Surface under layout point (surface-local coords in *sx, *sy), or NULL;
+ * click-to-focus for a view or layer surface; activity report that returns
+ * true when the display was blanked and the event must be dropped. For
+ * tablet.c, implemented in input.c. */
+struct wlr_surface *pw_input_surface_at(struct pw_server *server, double lx,
+	double ly, double *sx, double *sy);
+void pw_input_focus_surface(struct pw_server *server, struct wlr_surface *surface);
+bool pw_input_activity(struct pw_server *server);
+
+/*
+ * tablet.c
+ */
+
+/* Create the tablet-v2 global and listen for tablet tool events on the
+ * cursor. Called by pw_input_init() once the cursor exists. Failure is logged
+ * and leaves tablets unsupported. */
+void pw_tablet_init(struct pw_server *server);
+
+/* Remove the cursor listeners; wlroots asserts they are gone when the cursor
+ * is destroyed. Idempotent. Called by pw_input_finish(). */
+void pw_tablet_finish(struct pw_server *server);
+
+/* Create the tablet-v2 objects for a new tablet or tablet pad device. Return
+ * false if that failed and the device must be ignored. Called by input.c. */
+bool pw_tablet_add(struct pw_server *server, struct wlr_input_device *dev);
+bool pw_tablet_pad_add(struct pw_server *server, struct wlr_input_device *dev);
+
+/* Whether the output mapping of the tablet is right (input.c decides, see
+ * tablet_check_mapping); events of an unusable tablet are dropped. */
+void pw_tablet_set_usable(struct wlr_input_device *dev, bool usable);
 
 /*
  * cursor.c (see cursor.h)

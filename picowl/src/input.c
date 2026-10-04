@@ -72,6 +72,8 @@ struct pw_touch_dev {
 	struct wl_listener destroy;
 	float def_matrix[6];           /* device default calibration (udev) */
 	bool have_default;
+	bool tablet;                   /* a tablet shares the mapping, not the touch state */
+	bool tablet_mapped;            /* tablet: rotation can be applied (tablet.c) */
 };
 
 static struct wl_list touch_devs; /* initialised in pw_input_init */
@@ -123,6 +125,24 @@ static struct wlr_surface *surface_at(struct pw_server *server, double lx,
 	struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(
 		wlr_scene_buffer_from_node(node));
 	return ss ? ss->surface : NULL;
+}
+
+static void focus_surface(struct pw_server *server, struct wlr_surface *surface);
+
+struct wlr_surface *pw_input_surface_at(struct pw_server *server, double lx,
+	double ly, double *sx, double *sy)
+{
+	return surface_at(server, lx, ly, sx, sy);
+}
+
+void pw_input_focus_surface(struct pw_server *server, struct wlr_surface *surface)
+{
+	focus_surface(server, surface);
+}
+
+bool pw_input_activity(struct pw_server *server)
+{
+	return activity(server);
 }
 
 static void focus_surface(struct pw_server *server, struct wlr_surface *surface)
@@ -481,16 +501,33 @@ static void apply_touch_matrix(struct pw_touch_dev *t, struct pw_output *o)
 }
 #endif
 
+/* A tablet under a hardware-rotated output is only right with a calibration
+ * matrix; without one its coordinates would be rotated wrongly, so it is
+ * ignored instead (tablet.c) until the output is back to normal. */
+static void tablet_check_mapping(struct pw_touch_dev *t, struct pw_output *o)
+{
+	bool ok = !o->hw_rotation || o->rotation == WL_OUTPUT_TRANSFORM_NORMAL ||
+		t->have_default;
+	if (ok != t->tablet_mapped)
+		pw_log(ok ? WLR_INFO : WLR_ERROR, "tablet '%s': %s", t->dev->name,
+			ok ? "mapped to the output" : "cannot follow the hardware "
+			"rotation of the output (no calibration matrix), ignored");
+	t->tablet_mapped = ok;
+	pw_tablet_set_usable(t->dev, ok);
+}
+
 void pw_input_apply_rotation(struct pw_server *server, struct pw_output *o)
 {
 	struct pw_touch_dev *t;
 	wl_list_for_each(t, &touch_devs, link) {
-		/* wlr_cursor applies the output transform to touch coordinates
-		 * of devices mapped to an output (software rotation) */
+		/* wlr_cursor applies the output transform to touch and tablet
+		 * coordinates of devices mapped to an output (software rotation) */
 		wlr_cursor_map_input_to_output(server->cursor, t->dev, o->wlr_output);
 #ifdef PW_HAVE_LIBINPUT
 		apply_touch_matrix(t, o);
 #endif
+		if (t->tablet)
+			tablet_check_mapping(t, o);
 	}
 #ifndef PW_HAVE_LIBINPUT
 	static bool logged;
@@ -770,9 +807,12 @@ static void touch_dev_destroy(struct wl_listener *l, void *data)
 {
 	(void)data;
 	struct pw_touch_dev *t = wl_container_of(l, t, destroy);
+	bool tablet = t->tablet;
 	wl_list_remove(&t->destroy.link);
 	wl_list_remove(&t->link);
 	free(t);
+	if (tablet)
+		return;
 	if (--st.n_touch == 0) {
 		if (st.touch_id != PW_NO_TOUCH && !st.touch_swallowed)
 			th_exec(pw_touchhold_cancel(&st.th) & ~(unsigned)PW_TH_SWALLOW,
@@ -785,6 +825,34 @@ static void touch_dev_destroy(struct wl_listener *l, void *data)
 }
 
 /* ---- devices / seat --------------------------------------------------- */
+
+/* Track a touch or tablet device for calibration and output mapping and attach
+ * it to the cursor. */
+static struct pw_touch_dev *absolute_dev_add(struct pw_server *server,
+	struct wlr_input_device *dev, bool tablet)
+{
+	struct pw_touch_dev *t = calloc(1, sizeof(*t));
+	if (!t)
+		return NULL;
+	t->dev = dev;
+	t->tablet = tablet;
+	t->tablet_mapped = true;
+#ifdef PW_HAVE_LIBINPUT
+	touch_read_default(t);
+#endif
+	wl_list_insert(&touch_devs, &t->link);
+	t->destroy.notify = touch_dev_destroy;
+	wl_signal_add(&dev->events.destroy, &t->destroy);
+	wlr_cursor_attach_input_device(server->cursor, dev);
+	if (pw_lease_active(server))
+		touch_lease_apply(t);
+	/* Without an output the mapping follows when the first one appears. */
+	if (!wl_list_empty(&server->outputs)) {
+		struct pw_output *o = wl_container_of(server->outputs.next, o, link);
+		pw_input_apply_rotation(server, o);
+	}
+	return t;
+}
 
 static void handle_new_input(struct wl_listener *l, void *data)
 {
@@ -806,28 +874,26 @@ static void handle_new_input(struct wl_listener *l, void *data)
 		update_capabilities(server);
 		break;
 	}
-	case WLR_INPUT_DEVICE_TOUCH: {
-		struct pw_touch_dev *t = calloc(1, sizeof(*t));
-		if (!t)
+	case WLR_INPUT_DEVICE_TOUCH:
+		if (!absolute_dev_add(server, dev, false))
 			break;
-		t->dev = dev;
-#ifdef PW_HAVE_LIBINPUT
-		touch_read_default(t);
-#endif
-		wl_list_insert(&touch_devs, &t->link);
-		t->destroy.notify = touch_dev_destroy;
-		wl_signal_add(&dev->events.destroy, &t->destroy);
-		wlr_cursor_attach_input_device(server->cursor, dev);
 		st.n_touch++;
 		update_capabilities(server);
-		if (pw_lease_active(server))
-			touch_lease_apply(t);
-		if (!wl_list_empty(&server->outputs)) {
-			struct pw_output *o = wl_container_of(server->outputs.next, o, link);
-			pw_input_apply_rotation(server, o);
+		break;
+	case WLR_INPUT_DEVICE_TABLET:
+		if (!pw_tablet_add(server, dev)) {
+			pw_log(WLR_ERROR, "tablet '%s': not usable, ignored", dev->name);
+			break;
+		}
+		if (!absolute_dev_add(server, dev, true)) {
+			pw_log(WLR_ERROR, "tablet '%s': cannot map it, ignored", dev->name);
+			pw_tablet_set_usable(dev, false);
 		}
 		break;
-	}
+	case WLR_INPUT_DEVICE_TABLET_PAD:
+		if (!pw_tablet_pad_add(server, dev))
+			pw_log(WLR_ERROR, "tablet pad '%s': not usable, ignored", dev->name);
+		break;
 	default:
 		break;
 	}
@@ -884,6 +950,8 @@ bool pw_input_init(struct pw_server *server)
 	}
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
+	pw_tablet_init(server);
+
 	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
 		server->config->hold_delay_ms, server->config->hold_ms,
 		server->config->slop_px);
@@ -939,6 +1007,7 @@ void pw_input_finish(struct pw_server *server)
 		xkb_keymap_unref(st.keymap);
 		st.keymap = NULL;
 	}
+	pw_tablet_finish(server);
 	if (!server->cursor)
 		return;
 	wl_list_remove(&st.cursor_motion.link);

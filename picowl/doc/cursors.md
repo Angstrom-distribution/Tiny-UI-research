@@ -55,7 +55,7 @@ Picowl displays a cursor **only during the tap-and-hold animation**. No cursor i
 | `wait`, `progress` | the hold animation, centred on the cursor position |
 | every other shape, including `default` | no image (picowl draws no pointer) |
 
-Requests from clients without pointer focus are dropped. The animation a client started stops when the client asks for any other shape or when the pointer focus changes. A running tap-and-hold animation is never restarted, replaced or stopped by a client; the touch state machine alone ends it. Image cursors set through `wl_pointer.set_cursor` remain ignored.
+Requests from clients without pointer focus are dropped; a tablet tool request is heard from the client whose surface the tool is in. The animation a client started stops when the client asks for any other shape or when the pointer focus changes. A client wait request does not replace a running animation, and a tap-and-hold animation is never stopped by a client, even one that fired while a client's own wait animation was running (the touch takes it over); the touch state machine alone ends it. Image cursors set through `wl_pointer.set_cursor` remain ignored.
 
 ### Configuration Keys
 

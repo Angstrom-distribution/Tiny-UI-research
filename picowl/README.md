@@ -357,7 +357,8 @@ Picowl advertises and implements (via wlroots 0.19):
 - `wl_seat`, `wl_keyboard`, `wl_pointer`, `wl_touch` (if available): input focus.
 - `zwp_virtual_keyboard_manager_v1`: on-screen keyboards (software input methods).
 - `xdg_activation_v1`: app activation requests.
-- `wp_cursor_shape_manager_v1` (version 1): only the client with pointer focus is heard. `wait` and `progress` show the hold animation (stopped when the client asks for another shape or loses focus); every other shape shows no image, as picowl draws no pointer. The animation of a touch hold is never replaced or stopped by a client request.
+- `zwp_tablet_manager_v2`: drawing tablets with libinput (`tablet.c`). Proximity, tip, motion, pressure, distance, tilt, rotation, slider, wheel and button events go to the surface under the tool when its client bound tablet-v2, and that surface keeps the tool while a tip or button is down; pads get focus with the tool and forward buttons, rings and strips. Tablet coordinates are mapped to the output and follow its rotation like touch does (software rotation by wlroots, hardware rotation by the libinput calibration matrix). A tablet that cannot follow a hardware rotation because it has no calibration matrix is logged and ignored until the output is unrotated. Events are dropped while the display is leased or blanked (the waking event is swallowed). There is no pointer emulation for clients without tablet-v2, no configuration keys, and tablet tools do not set the cursor image.
+- `wp_cursor_shape_manager_v1` (version 1): only the client with pointer focus (or the surface a tablet tool is in) is heard. `wait` and `progress` show the hold animation (stopped when the client asks for another shape or loses focus); every other shape shows no image, as picowl draws no pointer. The animation of a touch hold is never replaced or stopped by a client request.
 
 **Output & Rendering:**
 - `wl_output`: output geometry, mode, subpixel, transform.
