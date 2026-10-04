@@ -9,7 +9,7 @@ Contents:
 | Recipe | Why |
 |---|---|
 | `recipes-graphics/wlroots/wlroots_0.19.0.bb` | oe-core, meta-openembedded and meta-angstrom ship no wlroots recipe for these releases. Minimal build: DRM and libinput backends, pixman renderer only, no GLES2/Vulkan/GBM/Xwayland. |
-| `recipes-graphics/picowl/picowl_git.bb` | picowl itself, built from the `picowl` subfolder of the research repository. Installs `picowl.service` (not auto-enabled) and `/etc/picowl.ini` (conffile), and builds `picowl-panel` (PACKAGECONFIG `panel`, on by default, needs `alsa-lib`) into the package `picowl-panel`, which an image installs and `[autostart] cmd = picowl-panel` starts. |
+| `recipes-graphics/picowl/picowl_git.bb` | picowl itself, built from the `picowl` subfolder of the research repository. Installs `picowl.service` (not auto-enabled) and `/etc/picowl.ini` (conffile), and builds `picowl-panel` (PACKAGECONFIG `panel`, on by default, needs `alsa-lib`) into the package `picowl-panel`, which an image installs and `[autostart] cmd = picowl-panel` starts; the package recommends `liberation-fonts` for the panel text, without which the panel falls back to a built-in bitmap font. |
 | `recipes-graphics/wvkbd/wvkbd-ipaq_git.bb` | The on-screen keyboard: upstream wvkbd plus an eleven patch series, built with the `ipaq` layout. See the wvkbd-ipaq section below. |
 | `recipes-graphics/havoc/files/` | A patch only, no recipe: the havoc recipe lives in meta-handhelds. The patch binds text-input-v3 so the terminal brings up the on-screen keyboard. See `recipes-graphics/havoc/README.md`. |
 

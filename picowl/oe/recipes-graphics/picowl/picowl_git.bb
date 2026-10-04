@@ -74,6 +74,9 @@ FILES:${PN} += "${nonarch_base_libdir}/udev/rules.d/90-picowl-backlight.rules"
 # as root) has.
 PACKAGES =+ "${PN}-panel"
 FILES:${PN}-panel = "${bindir}/picowl-panel"
+# The panel draws its text from a TrueType font it finds at run time; without one it falls back
+# to a blocky built-in bitmap font. liberation-fonts installs the faces it looks for.
+RRECOMMENDS:${PN}-panel = "liberation-fonts"
 
 CONFFILES:${PN} += "${sysconfdir}/picowl.ini"
 
