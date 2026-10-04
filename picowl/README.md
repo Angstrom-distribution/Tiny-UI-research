@@ -565,6 +565,7 @@ Key points:
 - `S = "${UNPACKDIR}/picowl"` (git subpath: will change when picowl moves to its own repo).
 - Requires `wayland` DISTRO_FEATURE; `systemd` for the unit file.
 - Installs `picowl.service` (not auto-enabled by default) and `/etc/picowl.ini`.
+- The panel is built by default (PACKAGECONFIG `panel`, depends on `alsa-lib`) and packaged as `picowl-panel`; add that package to the image and start it from `[autostart]`.
 - Avoid Thumb mode on ARM (set `ARM_INSTRUCTION_SET = "arm"` globally or per-package).
 
 ## License

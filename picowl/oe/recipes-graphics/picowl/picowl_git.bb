@@ -36,6 +36,7 @@ DEPENDS = " \
     libdrm \
     libinput \
     udev \
+    alsa-lib \
 "
 # libwlroots, libwayland-server, libxkbcommon, libpixman and libdrm are picked
 # up at runtime through the automatic shlibs dependencies. libinput and libudev
@@ -43,12 +44,15 @@ DEPENDS = " \
 # of the touch device); libseat is used inside wlroots only.
 RDEPENDS:${PN} += "seatd xkeyboard-config"
 
-# meson.options: 'tests' (boolean) and 'systemd' (feature). The unit file is
-# installed by meson itself (into systemdsystemunitdir of systemd.pc), so no
-# manual install is done for it below.
+# meson.options: 'tests' (boolean), 'systemd' and 'panel' (features). The unit
+# file is installed by meson itself (into systemdsystemunitdir of systemd.pc),
+# so no manual install is done for it below.
 EXTRA_OEMESON += "-Dtests=false -Dudev=disabled -Dudevrulesdir=${nonarch_base_libdir}/udev/rules.d"
-PACKAGECONFIG ??= "${@bb.utils.filter('DISTRO_FEATURES', 'systemd', d)}"
+PACKAGECONFIG ??= "${@bb.utils.filter('DISTRO_FEATURES', 'systemd', d)} panel"
 PACKAGECONFIG[systemd] = "-Dsystemd=enabled,-Dsystemd=disabled,systemd"
+# picowl-panel (clock, battery, backlight and volume sliders) needs alsa-lib for
+# the mixer; libwayland-client comes with the wayland dependency above.
+PACKAGECONFIG[panel] = "-Dpanel=enabled,-Dpanel=disabled,alsa-lib"
 
 # The render paths are hand-tuned for ARM state; do not build with Thumb.
 ARM_INSTRUCTION_SET:arm = "arm"
@@ -60,6 +64,16 @@ do_install:append() {
 
 # Backlight udev rule (installed by meson into the udev rules dir).
 FILES:${PN} += "${nonarch_base_libdir}/udev/rules.d/90-picowl-backlight.rules"
+
+# The panel is a package of its own, so an image can leave it out. It is a
+# separate client: the image installs it and picowl.ini starts it with
+# "[autostart] cmd = picowl-panel". PACKAGES is extended at the front so that
+# the file does not end up in ${PN}, which takes ${bindir}/* by default. Its
+# libraries (libwayland-client, libasound) come in through the automatic shlibs
+# dependencies. The mixer needs the sound device, which picowl.service (it runs
+# as root) has.
+PACKAGES =+ "${PN}-panel"
+FILES:${PN}-panel = "${bindir}/picowl-panel"
 
 CONFFILES:${PN} += "${sysconfdir}/picowl.ini"
 
