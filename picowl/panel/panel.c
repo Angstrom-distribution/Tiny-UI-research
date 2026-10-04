@@ -890,7 +890,7 @@ static void first_frame(struct panel *p)
 		p->quit = true;
 }
 
-static void run(struct panel *p)
+static void run_loop(struct panel *p)
 {
 	bool first = true;
 	struct pollfd pfd[4 + 8];
@@ -1002,7 +1002,13 @@ static void run(struct panel *p)
 		apply_pending(p, false);
 		flush_redraw(p);
 	}
-	/* A drag cut short by a signal still leaves the last value applied. */
+}
+
+static void run(struct panel *p)
+{
+	run_loop(p);
+	/* Every way out, not only a signal: a drag cut short still leaves the
+	 * last value applied. */
 	apply_pending(p, true);
 }
 
