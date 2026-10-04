@@ -7,6 +7,10 @@
  *   --expect-global NAME  fail unless the registry advertises NAME (repeatable)
  *   --probe               print what the picowl-buffer global announced and exit
  *   --readback            with --zerocopy: time 32-bit reads of buffer 0
+ *   --color RRGGBB        the colour of the window (default 00ff00)
+ *   --video FPS           after the first frame, redraw the window (a stripe
+ *                         moves over the colour) and commit it FPS times a
+ *                         second for the --linger time, as a video player does
  *   --expect-keymap       bind wl_seat, require the keyboard capability, create
  *                         a wl_keyboard and fail unless it gets an xkb_v1
  *                         keymap with a size above 0 */
@@ -42,6 +46,8 @@ static uint32_t format = WL_SHM_FORMAT_XRGB8888;
 /* --pattern: a gradient with a checkerboard instead of one colour, so that
  * what a translucent surface lets through can be seen. */
 static bool pattern;
+static uint32_t window_color = 0x00ff00;
+static int video_fps;
 static int32_t cfg_w, cfg_h;
 static struct zwp_linux_dmabuf_v1 *dmabuf;
 static struct picowl_buffer_manager_v1 *pbm;
@@ -218,6 +224,30 @@ static int timeout_exit(void)
 {
 	fprintf(stderr, "picowl-test-client: timeout\n");
 	return 1;
+}
+
+/* The window's pixels: one colour, or the --pattern. With a frame number above
+ * 0 a dark stripe moves over it, so that every video frame differs. */
+static void fill_window(void *map, int w, int h, int bpp, int frame)
+{
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			uint32_t r = (window_color >> 16) & 255, g = (window_color >> 8) & 255,
+				b = window_color & 255;
+			if (pattern) {
+				r = (uint32_t)x * 255 / (uint32_t)w;
+				g = (uint32_t)y * 255 / (uint32_t)h;
+				b = ((x / 6 + y / 6) & 1) ? 235 : 40;
+			}
+			/* below the area the pixel checks look at */
+			if (frame > 0 && y > 200 && (x + frame * 3) % w < 4)
+				r = g = b = 0;
+			if (bpp == 2)
+				((uint16_t *)map)[(size_t)y * w + x] =
+					(uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+			else
+				((uint32_t *)map)[(size_t)y * w + x] = 0xff000000u | (r << 16) | (g << 8) | b;
+		}
 }
 
 /* ---- zero-copy mode ---- */
@@ -519,6 +549,10 @@ int main(int argc, char **argv)
 			want_keymap = true;
 		else if (!strcmp(argv[i], "--pattern"))
 			pattern = true;
+		else if (!strcmp(argv[i], "--color") && i + 1 < argc)
+			window_color = (uint32_t)strtoul(argv[++i], NULL, 16);
+		else if (!strcmp(argv[i], "--video") && i + 1 < argc)
+			video_fps = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
 			linger = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
@@ -622,20 +656,7 @@ int main(int argc, char **argv)
 		perror("mmap");
 		return 1;
 	}
-	for (int y = 0; y < h; y++)
-		for (int x = 0; x < w; x++) {
-			uint32_t r = 0, g = 255, b = 0;
-			if (pattern) {
-				r = (uint32_t)x * 255 / (uint32_t)w;
-				g = (uint32_t)y * 255 / (uint32_t)h;
-				b = ((x / 6 + y / 6) & 1) ? 235 : 40;
-			}
-			if (bpp == 2)
-				((uint16_t *)map)[(size_t)y * w + x] =
-					(uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-			else
-				((uint32_t *)map)[(size_t)y * w + x] = 0xff000000u | (r << 16) | (g << 8) | b;
-		}
+	fill_window(map, w, h, bpp, 0);
 	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
 	struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride, format);
 	wl_shm_pool_destroy(pool);
@@ -655,6 +676,35 @@ int main(int argc, char **argv)
 	fflush(stdout);
 	/* --linger S: stay connected (answering pings) for S s after the first frame. */
 	alarm(linger + 5);
+	if (video_fps > 0) {
+		for (int f = 1; f <= linger * video_fps; f++) {
+			usleep(1000000 / video_fps);
+			/* a player follows the size the compositor configured */
+			if (cfg_w > 0 && cfg_h > 0 && (cfg_w != w || cfg_h != h)) {
+				w = cfg_w;
+				h = cfg_h;
+				stride = w * bpp;
+				size = (size_t)stride * h;
+				int nfd = memfd_create("picowl-test", MFD_CLOEXEC);
+				if (nfd < 0 || ftruncate(nfd, size) < 0)
+					return 1;
+				map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, nfd, 0);
+				if (map == MAP_FAILED)
+					return 1;
+				pool = wl_shm_create_pool(shm, nfd, size);
+				buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride, format);
+				wl_shm_pool_destroy(pool);
+				close(nfd);
+			}
+			fill_window(map, w, h, bpp, f);
+			wl_surface_attach(surface, buf, 0, 0);
+			wl_surface_damage_buffer(surface, 0, 0, w, h);
+			wl_surface_commit(surface);
+			if (wl_display_roundtrip(dpy) < 0)
+				return timeout_exit();
+		}
+		return 0;
+	}
 	for (int i = 0; i < linger * 10; i++) {
 		usleep(100000);
 		if (wl_display_roundtrip(dpy) < 0)

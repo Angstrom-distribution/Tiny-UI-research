@@ -17,6 +17,7 @@
 #  F: errors and exit codes: no compositor, no layer shell, no output, SIGTERM,
 #     the compositor going away; a font that is not there.
 #  G: a translucent row lets the window behind it show through (capture).
+#  H: the same over a video window that was playing before the panel started.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -695,6 +696,42 @@ g_pixel 3,$RY
 g_end
 stop_picowl
 echo "panel-e2e: G ok"
+
+# ---- H: the same over a window which was there before the panel ----
+# A video is playing in an RGB565 window when the panel starts, and the row
+# opens long after the window last changed size. The row grows the layer
+# surface from the opaque bar buffer to the ARGB8888 one: the window must not be
+# culled under it (wlroots patch 0005). The window is redrawn at 30 frames a
+# second, as a player does, and follows the size it is configured for.
+start_picowl
+"$CLIENT" --color ffba5a --video 30 --linger 20 >"$DIR/client.out" 2>&1 &
+CLIENTPID=$!
+wait_for "$DIR/client.out" 'mapped' 5 "H client"
+# The injected script holds the event loop while it waits, so the panel is
+# not waited for with start_panel.
+"$PANEL" --watch --height 18 --popup-alpha 150 --inject 'w1500;ibl;w9000' >"$DIR/h.out" 2>"$DIR/h.err" &
+PANELPID=$!
+sleep 2.5
+g_pixel 3,21
+BLEND=$RGB
+# Row ground (28,31,36) at 150/255 over (255,186,90): about (121,95,58).
+[ "$R" -gt 90 ] && [ "$R" -lt 160 ] && [ "$G" -gt 70 ] && [ "$G" -lt 130 ] && [ "$B" -gt 40 ] && [ "$B" -lt 90 ] ||
+	fail "H: the pixel under the row is #$RGB: not a blend of the row ground and the playing window (premultiplied ground alone is #101818, the window #ffba5a)"
+g_pixel 200,40
+[ "$R" -gt 90 ] && [ "$R" -lt 160 ] && [ "$G" -gt 70 ] && [ "$G" -lt 130 ] || fail "H: the row at 200,40 is #$RGB, not a blend"
+g_pixel 3,5
+[ "$R" -lt 50 ] && [ "$G" -lt 50 ] || fail "H: the opaque bar is #$RGB"
+echo "panel-e2e: H row pixel #$BLEND is a blend of the video and the row ground"
+# Once the row has closed by itself the window is there again.
+sleep 3
+g_pixel 3,21
+[ "$G" -gt 150 ] || fail "H: after the row closed the video does not show where it was (#$RGB)"
+kill -9 "$PANELPID" 2>/dev/null
+wait "$PANELPID" 2>/dev/null
+PANELPID=
+kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=
+stop_picowl
+echo "panel-e2e: H ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then
