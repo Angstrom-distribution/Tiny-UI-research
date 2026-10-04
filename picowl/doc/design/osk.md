@@ -1,8 +1,8 @@
 # On-screen keyboard
 
-**Status:** design only. Nothing in this document is implemented yet.
+**Status:** design only, except Part 3 (section 4), which is implemented in `src/imrelay.c` without the keyboard grab and the popup hold rules.
 
-The OSK is wvkbd, rebuilt for the iPAQ as a patch series on a pinned upstream commit, packaged in picowl's OE layer (Part 1). picowl starts and supervises it, shows and hides it by signal from a keybinding or the panel, and keeps its own tap-and-hold out of the way (Part 2). An input-method relay that shows the keyboard automatically on text focus is an optional Part 3.
+The OSK is wvkbd, rebuilt for the iPAQ as a patch series on a pinned upstream commit, packaged in picowl's OE layer (Part 1). picowl starts and supervises it, shows and hides it by signal from a keybinding or the panel, and keeps its own tap-and-hold out of the way (Part 2). An input-method relay that shows the keyboard automatically on text focus is Part 3, implemented apart from the keyboard grab and the popup hold rules.
 
 wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on 2026-10-04). picowl citations are to commit 3f74900.
 
@@ -113,11 +113,20 @@ The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until
 
 ## 4. Part 3 (optional): automatic show
 
+**Status:** implemented (`src/imrelay.c`, `src/implace.c`), except the keyboard grab. Tested by `tests/pw-im-client.c` (run from `tests/smoke.sh`) and `tests/test-implace.c`.
+
 - **wvkbd already does its half.** With `--auto` it binds `zwp_input_method_manager_v2` and calls `show()` on `activate` and `hide()` on `deactivate` (`main.c:472-473`, `:1106-1108`, `:1257-1259`, `:525-535`); the other input-method events are empty stubs. It never uses text-input-v3 and types through virtual-keyboard only. No wvkbd patch is needed for this part. `activate` acts immediately, not on `done`.
-- picowl creates `wlr_input_method_manager_v2` and `wlr_text_input_manager_v3` (wlroots 0.19 `wlr/types/wlr_input_method_v2.h`, `wlr_text_input_v3.h`) and relays between them: focused surface ↔ text input `enter/leave`; `enable`/`commit`/`disable` → input method `activate`/`deactivate`/`done`; input method `commit` → `commit_string`, `delete_surrounding_text`, `preedit`. wvkbd then runs with `--auto` and shows itself on text focus.
-- Reference: labwc's `src/input/ime.c` (~720 lines with keyboard grab and popups). picowl needs no keyboard grab and no popups: ~300 lines [est].
+- picowl creates `wlr_input_method_manager_v2` and `wlr_text_input_manager_v3` (wlroots 0.19 `wlr/types/wlr_input_method_v2.h`, `wlr_text_input_v3.h`) and relays between them: focused surface ↔ text input `enter/leave`; `enable`/`commit`/`disable` → input method `activate`/`deactivate`/`done` with surrounding text, content type and change cause; input method `commit` → `delete_surrounding_text`, `commit_string`, `preedit_string` and `done`. An OSK that speaks input-method-v2 (squeekboard) shows itself on text focus; wvkbd stays on virtual-keyboard and does not use any of this.
+- `zwp_virtual_keyboard_manager_v1` is untouched and stays next to the new globals: GTK+2 applications have no text-input and OSK function keys (Ctrl, Esc, arrows) still need key events.
+- Focus follows the seat's keyboard `focus_change` signal, so all four focus paths (touch, exclusive layer surface, view focus, unmap) are covered without hooks. At most one text input is active, and only one whose surface has the keyboard focus. After every focus change and every new input method the relay looks for an enabled, focused text input, because wlroots keeps `current_enabled` across leave and enter.
+- One input method per seat. A second `get_input_method` gets `unavailable`. If the input method client dies, the text inputs keep their state and the next one is activated at once.
+- Popups: `zwp_input_popup_surface_v2` surfaces are placed in the overlay layer below the text cursor rectangle (above it when there is no room), clamped to the usable area of the output the cursor is on, and told the cursor rectangle in popup coordinates. They are placed again on popup commit, text input commit and `pw_view_arrange_all` (rotation, panel changes). wlroots maps them only while the input method is active; the scene node follows map and unmap.
+- **Not implemented: the input method keyboard grab** (`zwp_input_method_v2.grab_keyboard`, used by engines such as fcitx and ibus that want raw keys). A grab request is logged and the grab object is destroyed in the compositor, so it stays inert and keys always go to the focused application. Implementing it needs the key and modifier handlers in `input.c` to forward to the grab (after the keybindings, skipping keys that come from the input method's own virtual keyboard to avoid an echo loop), plus `wlr_input_method_keyboard_grab_v2_set_keyboard`.
+- **Not implemented: hold-action rules for popups.** A touch on an input method popup falls back to the global `[touch]` hold defaults (`hold_identity` in `input.c` knows no popup role); a long press could send a right click to the candidate list.
+- **OSK requirement:** the OSK must use layer-shell keyboard interactivity `none`. With `on_demand` or `exclusive` a tap on its keys moves the keyboard focus to the OSK, the text input gets `leave`, the input method gets `deactivate` and the OSK hides itself.
+- Reference: labwc's `src/input/ime.c` (~720 lines with keyboard grab and popups).
 - **Who benefits:** only clients that speak text-input-v3, i.e. GTK3/4 and Qt apps, which are too large for these boards. GTK+2 apps get nothing until a GDK2 Wayland backend exists and gains an input-method module. Typing never needs this part; virtual-keyboard alone is enough.
-- Recommendation: the relay is cheap now that wvkbd needs no change, so build it; it only helps clients that speak text-input-v3, and virtual-keyboard stays for everything else.
+- Recommendation: the relay is built because wvkbd needs no change for it; it only helps clients that speak text-input-v3, and virtual-keyboard stays for everything else.
 
 ## 5. Cost on 64 MiB [est]
 | Item | Upstream wvkbd | wvkbd-ipaq |
@@ -156,5 +165,5 @@ The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until
 | Part 1: recipe, wrap, `osk.sh`, `patches-sync.sh` | 0.5 day |
 | Part 2: `oskstate.c`/`osk.c`, `[osk]`, `osk` action, built-in rule, tests | 1 day |
 | Part 2: docs (README, ini example, cursors.md, panel.md) | 0.25 day |
-| Part 3 (optional) | 1.5 days |
+| Part 3 (done, without keyboard grab and popup hold rules) | 1.5 days |
 | Hardware checklist, 5 boards | 0.5 day |

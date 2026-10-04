@@ -1,9 +1,10 @@
 #!/bin/sh
 # Headless smoke test: picowl + wl_shm xdg-shell client.
-# usage: smoke.sh PICOWL PW_TEST_CLIENT PW_CAPTURE_CLIENT
+# usage: smoke.sh PICOWL PW_TEST_CLIENT PW_CAPTURE_CLIENT PW_IM_CLIENT
 PICOWL=$1
 CLIENT=$2
 CAPTURE=$3
+IMCLIENT=$4
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
@@ -67,6 +68,11 @@ OUT=$("$CLIENT" --expect-global zwp_text_input_manager_v3 2>&1) || fail "text-in
 OUT=$("$CLIENT" --expect-global zwp_input_method_manager_v2 2>&1) || fail "input-method global missing: $OUT"
 # The older path stays for GTK+2 clients and OSK function keys.
 OUT=$("$CLIENT" --expect-global zwp_virtual_keyboard_manager_v1 2>&1) || fail "virtual-keyboard global missing: $OUT"
+
+# text-input to input-method relay: activate, commit_string and deactivate.
+OUT=$("$IMCLIENT" 2>&1) || fail "input method client failed: $OUT"
+echo "$OUT"
+case "$OUT" in *"pw-im-client: ok"*) ;; *) fail "input method client did not report ok" ;; esac
 
 # [capture] is off by default: no screencopy global.
 OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"

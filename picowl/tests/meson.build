@@ -53,6 +53,22 @@ lease_client_c = custom_target('drm-lease-client-code',
   input: lease_xml, output: 'drm-lease-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
+ti_xml = wl_proto_dir / 'unstable' / 'text-input' / 'text-input-unstable-v3.xml'
+ti_client_h = custom_target('text-input-client-header',
+  input: ti_xml, output: 'text-input-unstable-v3-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+ti_client_c = custom_target('text-input-client-code',
+  input: ti_xml, output: 'text-input-unstable-v3-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
+im_xml = files('../protocols/input-method-unstable-v2.xml')
+im_client_h = custom_target('input-method-client-header',
+  input: im_xml, output: 'input-method-unstable-v2-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+im_client_c = custom_target('input-method-client-code',
+  input: im_xml, output: 'input-method-unstable-v2-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 pw_test_client = executable('pw-test-client',
   'pw-test-client.c', xdg_client_h, xdg_client_c,
   pb_client_h, pb_client_c, dmabuf_client_h, dmabuf_client_c,
@@ -78,8 +94,14 @@ pw_lease_client = executable('pw-lease-client',
   lease_client_h, lease_client_c,
   dependencies: [wayland_client, libdrm])
 
+# One process with two connections: an application and an input method.
+pw_im_client = executable('pw-im-client',
+  'pw-im-client.c', xdg_client_h, xdg_client_c,
+  ti_client_h, ti_client_c, im_client_h, im_client_c,
+  dependencies: [wayland_client])
+
 test('smoke', find_program('sh'),
-  args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client],
+  args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client],
   timeout: 30)
 
 test_touchhold_exe = executable('test-touchhold',
@@ -111,6 +133,8 @@ test('leasepolicy', executable('test-leasepolicy', 'test-leasepolicy.c',
 test('cursorshape', executable('test-cursorshape', 'test-cursorshape.c',
   '../src/cursorshape.c', protocol_headers, dependencies: [wayland_server],
   include_directories: [test_inc, include_directories('..')]))
+test('implace', executable('test-implace', 'test-implace.c', '../src/implace.c',
+  include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('copytype', executable('test-copytype', 'test-copytype.c', '../src/copytype.c',
