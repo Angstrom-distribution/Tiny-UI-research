@@ -46,9 +46,9 @@ The deltas are between consecutive `presented` timestamps. `late` counts deltas 
 | Metric | How |
 |---|---|
 | picowl CPU | `/proc/<pid>/stat` utime+stime over the run, divided by wall time |
-| Frame time | picowl's per-commit timing log, or the `presented` deltas from `picowl-commit-loop` |
+| Frame time | the `presented` deltas from `picowl-commit-loop`. They are only valid when the kernel's user alignment mode is fixup (`echo 2 > /proc/cpu/alignment`) or libdrm is built without its unaligned 64-bit load, otherwise the timestamps advance once a second (see `doc/rotation-results.md`) |
 | Dropped or late frames | the `late` and `discarded` columns of `picowl-commit-loop` |
-| Bus bytes per commit | the mq11xx `mq11xx_vram_flush` counters or trace points; expect 153,600 bytes for a full frame, so anything near that for W4 means damage clips are not honoured |
+| Bus bytes per commit | the `bytes:` and `copies:` lines of the debugfs file `dri/0/mq11xx_copy_stats`, enabled by writing `Y` to `mq11xx_copy_stats_enable` (mount debugfs first). The `engine fills` line counts small rectangles that the 2D engine filled instead of uploading. Expect 153,600 bytes for a full frame, so anything near that for W4 means damage clips are not honoured |
 | Alignment traps | `/proc/cpu/alignment` before and after (the player saw traps that differ by layout) |
 | Touch correctness | tap the four corners and a centre target at each transform and check the reported coordinates against the matrix in `src/rotate.c` |
 | Fallback | any `hw rotation commit failed` log line fails the run |
@@ -71,6 +71,5 @@ The deltas are between consecutive `presented` timestamps. `late` counts deltas 
 
 ## Open items before running
 
-- Check whether picowl already logs per-commit timing. If not, add it behind a debug option.
-- Confirm where the mq11xx flush counters are exposed on the current kernel.
+- Repeat the comparison on a kernel with the `mq11xx_vram_flush` alignment fix, and with correct flip timestamps.
 - Optional hardening: log the kernel release at startup (`uname`), so every picowl log is attributable to a kernel build.
