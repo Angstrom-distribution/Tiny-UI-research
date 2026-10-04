@@ -136,6 +136,8 @@ test('cursorshape', executable('test-cursorshape', 'test-cursorshape.c',
   include_directories: [test_inc, include_directories('..')]))
 test('implace', executable('test-implace', 'test-implace.c', '../src/implace.c',
   include_directories: test_inc))
+test('tile', executable('test-tile', 'test-tile.c', '../src/tile.c',
+  include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('pointercal', executable('test-pointercal', 'test-pointercal.c', '../src/pointercal.c',
