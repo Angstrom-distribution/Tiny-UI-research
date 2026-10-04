@@ -87,7 +87,7 @@ sc_client_c = custom_target('wlr-screencopy-client-code',
 
 pw_capture_client = executable('pw-capture-client',
   'pw-capture-client.c', sc_client_h, sc_client_c,
-  dependencies: [wayland_client])
+  dependencies: [wayland_client, cc.find_library('m', required: false)])
 
 # Opt-in (PW_LEASE_VKMS=1), needs root, the vkms module and /dev/dri; skips
 # (exit 77) otherwise.

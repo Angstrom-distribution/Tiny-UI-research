@@ -1559,6 +1559,26 @@ static void test_lcd_text(void)
 		}
 	CHECK(fringes_sub > 8, "subpixel text has colour at its edges");
 	CHECK_EQ(fringes_gray, 0, "grayscale text has none");
+
+	/* The order is the panel's: on the left edge of a light stem the first
+	 * coverage is under the stripe nearest the stem, the rightmost of the
+	 * pixel, which is blue on an RGB panel and red on a BGR one. */
+	for (int order = 0; order < 2; order++) {
+		struct canvas_buf one;
+		canvas_init(&one, 40, 20, PL_FMT_XRGB8888);
+		pl_fill(&one.c, (struct pl_rect){ 0, 0, 40, 20 }, PL_COL_BG, 255);
+		pl_font_draw(&one.c, f, 0, 10, 0, 20, "1", PL_COL_FG, order ? PL_SUB_BGR : PL_SUB_RGB);
+		int x = 0, row = 10, dr = 0, db = 0;
+		while (x < 40 && rgb_of(&one, x, row) == PL_COL_BG)
+			x++;
+		if (x < 40) {
+			dr = (int)((rgb_of(&one, x, row) >> 16) & 0xff) - (int)((PL_COL_BG >> 16) & 0xff);
+			db = (int)(rgb_of(&one, x, row) & 0xff) - (int)(PL_COL_BG & 0xff);
+		}
+		CHECK(order ? dr > db : db > dr, order ? "BGR: the left edge of a stem is red" :
+			"RGB: the left edge of a stem is blue");
+		free(one.mem);
+	}
 	free(b.mem);
 	free(gcv.mem);
 	env_free(&e);

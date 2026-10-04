@@ -17,7 +17,10 @@
 #  F: errors and exit codes: no compositor, no layer shell, no output, SIGTERM,
 #     the compositor going away; a font that is not there.
 #  G: a translucent row lets the window behind it show through (capture).
-#  H: the same over a video window that was playing before the panel started.
+#  H: subpixel text: the output advertises horizontal RGB stripes and the clock
+#     has colour fringes (capture), without the advertisement, with
+#     --subpixel none and on a rotated output it is grayscale.
+#  I: the same over a video window that was playing before the panel started.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -575,7 +578,7 @@ dump f.out --font "$DIR/notafont.ttf"
 has "$DIR/f.out" '^style font=bitmap ' "F a file that is not a font falls back"
 dump f.out --font "$DIR"
 has "$DIR/f.out" '^style font=bitmap ' "F a directory falls back"
-start_panel fb --font /nonexistent/font.ttf
+start_panel fb --subpixel none --font /nonexistent/font.ttf
 sleep 0.3
 "$CAPTURE" --distinct 8,2,60,16 >"$DIR/f.cap" 2>&1 || fail "F: capture failed: $(cat "$DIR/f.cap")"
 D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/f.cap")
@@ -583,7 +586,7 @@ D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/f.cap")
 stop_panel fb
 # A real font gives an anti-aliased clock: more than two colours.
 if [ -n "$(sed -n 's/^style font=ttf.*/ttf/p' "$DIR/a.out")" ]; then
-	start_panel tt
+	start_panel tt --subpixel none
 	sleep 0.3
 	"$CAPTURE" --distinct 8,2,40,16 >"$DIR/f.cap" 2>&1 || fail "F: capture failed"
 	D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/f.cap")
@@ -701,7 +704,109 @@ g_end
 stop_picowl
 echo "panel-e2e: G ok"
 
-# ---- H: the same over a window which was there before the panel ----
+# ---- H: subpixel text ----
+# The clock is white-ish on a dark ground. Grayscale text only moves along the
+# line between the two, so the channels of every pixel have the same coverage;
+# subpixel text has a different coverage under each stripe. pw-capture-client
+# --spread reports the largest difference between the coverages of one pixel.
+cp "$DIR/picowl.ini" "$DIR/picowl.base"
+# h_picowl SUBPIXEL: picowl whose output advertises that layout ("": none given)
+h_picowl() {
+	cp "$DIR/picowl.base" "$DIR/picowl.ini"
+	[ -n "$1" ] && printf '\n[output]\nsubpixel = %s\n' "$1" >>"$DIR/picowl.ini"
+	start_picowl
+}
+# h_spread X,Y,W,H: the spread and the ink of the rectangle in the capture
+h_spread() {
+	"$CAPTURE" --spread "$1" --bg 1c1f24 --fg e8eaed >"$DIR/h.cap" 2>&1 || fail "H: capture failed: $(cat "$DIR/h.cap")"
+	HSPREAD=$(sed -n 's/.*spread max=\([0-9.]*\) ink=.*/\1/p' "$DIR/h.cap")
+	HINK=$(sed -n 's/.* ink=\([0-9]*\)/\1/p' "$DIR/h.cap")
+	[ -n "$HSPREAD" ] || fail "H: no spread in the capture"
+}
+# h_clock NAME MODE LOW|HIGH: the panel's last text mode, and the spread of its clock
+h_clock() {
+	has "$DIR/h.out" "^text subpixel=$2\$" "$1 text mode"
+	CR=$(val "$DIR/h.out" clock rect)
+	h_spread "$(comp "$CR" 1),$(comp "$CR" 2),$(comp "$CR" 3),$(comp "$CR" 4)"
+	[ "$HINK" -gt 30 ] || fail "H $1: the clock has $HINK ink pixels in the capture (#$CR)"
+	if [ "$3" = HIGH ]; then
+		awk "BEGIN { exit !($HSPREAD > 0.35) }" || fail "H $1: spread $HSPREAD: no colour fringes on the clock"
+	else
+		awk "BEGIN { exit !($HSPREAD < 0.15) }" || fail "H $1: spread $HSPREAD: the clock is not grayscale"
+	fi
+	echo "panel-e2e: H $1: mode $2, spread $HSPREAD over $HINK pixels"
+}
+
+# The h2200: horizontal RGB advertised, the clock has fringes.
+h_picowl horizontal_rgb
+"$PANEL" --dump-state >"$DIR/h.out" 2>"$DIR/h.err" || fail "H: --dump-state failed"
+has "$DIR/h.out" '^text subpixel=rgb$' "H rgb advertised"
+start_panel h --subpixel auto
+sleep 0.3
+h_clock rgb rgb HIGH
+stop_panel H
+# Forced off, the same output is grayscale.
+start_panel h --subpixel none
+sleep 0.3
+h_clock forced-none none LOW
+stop_panel H
+# Forced BGR on the same output draws fringes too.
+start_panel h --subpixel bgr
+sleep 0.3
+h_clock forced-bgr bgr HIGH
+stop_panel H
+# Opaque row: the value in it has fringes too; the translucent one does not.
+start_panel h --subpixel auto --popup-alpha 255 --inject "ibl;w600"
+wait_for "$DIR/h.out" '^row slider=' 5 "H row open"
+sleep 0.3
+RV=$(val "$DIR/h.out" row rect)
+h_spread "$((240 - 60)),$(comp "$RV" 2),60,$(comp "$RV" 4)"
+[ "$HINK" -gt 20 ] || fail "H: the value in the opaque row has $HINK ink pixels"
+awk "BEGIN { exit !($HSPREAD > 0.35) }" || fail "H: the value in an opaque row has no fringes (spread $HSPREAD)"
+stop_panel H
+start_panel h --subpixel auto --inject "ibl;w600"
+wait_for "$DIR/h.out" '^row slider=' 5 "H row open"
+sleep 0.3
+h_spread "$((240 - 60)),$(comp "$RV" 2),60,$(comp "$RV" 4)"
+awk "BEGIN { exit !($HSPREAD < 0.2) }" || fail "H: the value in the translucent row has fringes (spread $HSPREAD)"
+stop_panel H
+# Rotated: the output tells the stripes are across the other axis, grayscale.
+start_panel h --subpixel auto
+"$KEYS" 397 || fail "H: key client failed"
+i=0
+while [ "$(grep '^text subpixel=' "$DIR/h.out" | tail -n1)" != "text subpixel=none" ]; do
+	i=$((i + 1)); [ $i -gt 100 ] && fail "H: the panel did not go grayscale on a rotated output"
+	sleep 0.05
+done
+sleep 0.3
+# The capture is in the panel's own orientation, so the bar is an 18 px strip on
+# the left or the right side; the other strip is the desktop background.
+h_spread "0,0,18,320"
+if [ "$HINK" -gt 30 ]; then
+	STRIP=left
+else
+	h_spread "222,0,18,320"
+	STRIP=right
+fi
+[ "$HINK" -gt 30 ] || fail "H: no text in either strip of the rotated capture"
+LS=$HSPREAD
+awk "BEGIN { exit !($LS < 0.15) }" || fail "H: the rotated output shows fringes (spread $LS, $STRIP strip)"
+echo "panel-e2e: H rotated: grayscale, spread $LS in the $STRIP strip"
+stop_panel H
+stop_picowl
+# Nothing advertised (unknown), or none: grayscale.
+for sp in "" none; do
+	h_picowl "$sp"
+	start_panel h
+	sleep 0.3
+	h_clock "advertised-${sp:-nothing}" none LOW
+	stop_panel H
+	stop_picowl
+done
+cp "$DIR/picowl.base" "$DIR/picowl.ini"
+echo "panel-e2e: H ok"
+
+# ---- I: the same over a window which was there before the panel ----
 # A video is playing in an RGB565 window when the panel starts, and the row
 # opens long after the window last changed size. The row grows the layer
 # surface from the opaque bar buffer to the ARGB8888 one: the window must not be
@@ -710,7 +815,7 @@ echo "panel-e2e: G ok"
 start_picowl
 "$CLIENT" --color ffba5a --video 30 --linger 20 >"$DIR/client.out" 2>&1 &
 CLIENTPID=$!
-wait_for "$DIR/client.out" 'mapped' 5 "H client"
+wait_for "$DIR/client.out" 'mapped' 5 "I client"
 # The injected script holds the event loop while it waits, so the panel is
 # not waited for with start_panel.
 "$PANEL" --watch --popup-alpha 150 --inject 'w1500;ibl;w9000' >"$DIR/h.out" 2>"$DIR/h.err" &
@@ -720,22 +825,22 @@ g_pixel 3,21
 BLEND=$RGB
 # Row ground (28,31,36) at 150/255 over (255,186,90): about (121,95,58).
 [ "$R" -gt 90 ] && [ "$R" -lt 160 ] && [ "$G" -gt 70 ] && [ "$G" -lt 130 ] && [ "$B" -gt 40 ] && [ "$B" -lt 90 ] ||
-	fail "H: the pixel under the row is #$RGB: not a blend of the row ground and the playing window (premultiplied ground alone is #101818, the window #ffba5a)"
+	fail "I: the pixel under the row is #$RGB: not a blend of the row ground and the playing window (premultiplied ground alone is #101818, the window #ffba5a)"
 g_pixel 200,40
-[ "$R" -gt 90 ] && [ "$R" -lt 160 ] && [ "$G" -gt 70 ] && [ "$G" -lt 130 ] || fail "H: the row at 200,40 is #$RGB, not a blend"
+[ "$R" -gt 90 ] && [ "$R" -lt 160 ] && [ "$G" -gt 70 ] && [ "$G" -lt 130 ] || fail "I: the row at 200,40 is #$RGB, not a blend"
 g_pixel 3,5
-[ "$R" -lt 50 ] && [ "$G" -lt 50 ] || fail "H: the opaque bar is #$RGB"
-echo "panel-e2e: H row pixel #$BLEND is a blend of the video and the row ground"
+[ "$R" -lt 50 ] && [ "$G" -lt 50 ] || fail "I: the opaque bar is #$RGB"
+echo "panel-e2e: I row pixel #$BLEND is a blend of the video and the row ground"
 # Once the row has closed by itself the window is there again.
 sleep 3
 g_pixel 3,21
-[ "$G" -gt 150 ] || fail "H: after the row closed the video does not show where it was (#$RGB)"
+[ "$G" -gt 150 ] || fail "I: after the row closed the video does not show where it was (#$RGB)"
 kill -9 "$PANELPID" 2>/dev/null
 wait "$PANELPID" 2>/dev/null
 PANELPID=
 kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=
 stop_picowl
-echo "panel-e2e: H ok"
+echo "panel-e2e: I ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

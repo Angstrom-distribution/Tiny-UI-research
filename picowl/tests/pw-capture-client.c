@@ -8,9 +8,16 @@
  * 0 when the compositor does not advertise zwlr_screencopy_manager_v1.
  * --at X,Y also prints "pw-capture-client: at X,Y rgb=RRGGBB" (the pixel
  * converted to 8 bits per channel), --distinct X,Y,W,H prints
- * "pw-capture-client: distinct N" for the rectangle. Exit status 1 on a
+ * "pw-capture-client: distinct N" for the rectangle. --spread X,Y,W,H with
+ * --bg RRGGBB and --fg RRGGBB prints "pw-capture-client: spread max=F ink=N":
+ * for each pixel of the rectangle that is not the ground, the coverage of the
+ * text colour is worked out per channel in linear light, and F is the largest
+ * difference between the channels of one pixel (0 for grayscale text, whose
+ * channels all have the same coverage; subpixel text has up to 1) over N
+ * pixels. Exit status 1 on a
  * failed capture, a timeout or a missing output/shm.
  */
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -127,14 +134,29 @@ static uint32_t rgb_at(int x, int y, size_t bpp)
 	return v & 0xffffff;
 }
 
+static double lin(uint32_t v)
+{
+	double c = v / 255.0;
+
+	return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
 int main(int argc, char **argv)
 {
 	int at_x = -1, at_y = -1, dx = -1, dy = 0, dw = 0, dh = 0;
+	int sx = -1, sy = 0, sw = 0, sh = 0;
+	uint32_t bg = 0, fg = 0xffffff;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--at") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d", &at_x, &at_y);
 		else if (!strcmp(argv[i], "--distinct") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d,%d,%d", &dx, &dy, &dw, &dh);
+		else if (!strcmp(argv[i], "--spread") && i + 1 < argc)
+			sscanf(argv[++i], "%d,%d,%d,%d", &sx, &sy, &sw, &sh);
+		else if (!strcmp(argv[i], "--bg") && i + 1 < argc)
+			bg = (uint32_t)strtoul(argv[++i], NULL, 16);
+		else if (!strcmp(argv[i], "--fg") && i + 1 < argc)
+			fg = (uint32_t)strtoul(argv[++i], NULL, 16);
 	}
 	alarm(5);
 	struct wl_display *dpy = wl_display_connect(NULL);
@@ -199,6 +221,33 @@ int main(int argc, char **argv)
 					seen[n++] = v;
 			}
 		printf("pw-capture-client: distinct %d\n", n);
+	}
+	if (sx >= 0) {
+		double max = 0;
+		int ink = 0;
+		for (int y = sy; y < sy + sh && (uint32_t)y < height; y++)
+			for (int x = sx; x < sx + sw && (uint32_t)x < width; x++) {
+				uint32_t v = rgb_at(x, y, bpp);
+				double t[3], lo = 2, hi = -1;
+				bool text = false;
+				for (int k = 0; k < 3; k++) {
+					int sh8 = 16 - 8 * k;
+					double b = lin((bg >> sh8) & 0xff), f = lin((fg >> sh8) & 0xff);
+					t[k] = (lin((v >> sh8) & 0xff) - b) / (f - b);
+					if (t[k] < lo)
+						lo = t[k];
+					if (t[k] > hi)
+						hi = t[k];
+					if (t[k] > 0.1 || t[k] < -0.1)
+						text = true;
+				}
+				if (!text)
+					continue;
+				ink++;
+				if (hi - lo > max)
+					max = hi - lo;
+			}
+		printf("pw-capture-client: spread max=%.3f ink=%d\n", max, ink);
 	}
 	fflush(stdout);
 	return 0;
