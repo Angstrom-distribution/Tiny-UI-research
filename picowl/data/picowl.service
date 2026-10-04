@@ -21,6 +21,10 @@ RestartSec=3
 SupplementaryGroups=video
 TTYPath=/dev/tty1
 StandardInput=tty
+# StandardInput=tty would send the log to the console too, where nobody reads it after boot:
+# a quit or an error must be findable in the journal.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 # multi-user.target as well, because the pico-init images have no graphical.target.
