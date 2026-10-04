@@ -332,6 +332,8 @@ int pw_server_run(struct pw_server *server)
 	setenv("WAYLAND_DISPLAY", socket, 1);
 	pw_log(WLR_INFO, "running on WAYLAND_DISPLAY=%s", socket);
 
+	pw_osk_init(server);
+
 	if (server->config) {
 		struct pw_autostart *a;
 		wl_list_for_each(a, &server->config->autostart, link) {
@@ -370,6 +372,9 @@ void pw_server_finish(struct pw_server *server)
 	listener_drop(&server->new_idle_inhibitor); /* wlroots asserts it is empty at display destroy */
 	listener_drop(&server->output_power_set_mode);
 
+	/* Before the clients are destroyed: the keyboard then exits because it
+	 * was told to, not because it lost its connection, and is not restarted. */
+	pw_osk_finish(server);
 	pw_zerocopy_finish(server);
 	pw_lease_finish(server);
 

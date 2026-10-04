@@ -42,7 +42,7 @@ picowl has no outputs (wlroots destroys the `wlr_output` and creates it again wh
 |---|---|
 | Power | Dimming and blanking are held (`PW_INHIBIT_LEASE`, see `doc/power.md`). A blanked screen is unblanked before the grant. Normal timeouts restart from the end of the lease |
 | Keyboard | Unchanged: the lessee's toplevel keeps the focus and gets the keys |
-| Keybindings | `blank` (the power key), `cycle`, `spawn`, `panel`: end the lease first, then run. `close` and `quit` run as usual (the lease ends with the client or the compositor). `rotate` is ignored: the player owns scanout |
+| Keybindings | `blank` (the power key), `cycle`, `spawn`, `panel`, `osk`: end the lease first, then run. `close` and `quit` run as usual (the lease ends with the client or the compositor). `rotate` is ignored: the player owns scanout |
 | Touch | Every touch device is mapped to the region `{0,0,W,H}` in panel-native mode pixels and gets its default calibration matrix, so the player receives pointer coordinates in the frame its KMS code renders in, on hardware- and software-rotation boards alike. The lessee's toplevel is the target. Tap-and-hold follows the lessee's `[app.<app_id>]` hold settings (`BTN_RIGHT` by default, nothing with `hold_action = none`), without the animation. A blanked screen that cannot be unblanked rejects the lease |
 | Focus | New toplevels and activation requests (xdg-activation, foreign-toplevel) do not take the focus. New toplevels stack behind the lessee, so a pop-up does not end playback |
 | Views and panel | No configures go out. The panel's layer surface is closed with the output, as after a VT switch; it re-creates its surface on the next `wl_output` |
@@ -54,7 +54,7 @@ picowl has no outputs (wlroots destroys the `wlr_output` and creates it again wh
 |---|---|
 | Player destroys the `wp_drm_lease_v1` object, exits or crashes | wlroots revokes at once; picowl repaints |
 | Player closes the fd only | The kernel sends a LEASE uevent; wlroots rescans, which needs a working udev monitor in picowl. Without one the screen stays dark until the object is destroyed. The player always destroys the object |
-| Key (power, cycle, spawn, panel), lessee unmapped | picowl revokes |
+| Key (power, cycle, spawn, panel, osk), lessee unmapped | picowl revokes |
 | VT switch away | picowl revokes in the session `active` handler, while it is still master, and the player gets `finished` |
 | picowl exits | `pw_lease_finish` revokes before the backend is destroyed. If picowl crashes the kernel revokes when its master fd closes |
 

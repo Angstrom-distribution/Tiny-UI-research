@@ -123,6 +123,8 @@ sources = files(
   'src/power.c',
   'src/lease.c',
   'src/leasepolicy.c',
+  'src/osk.c',
+  'src/oskstate.c',
 )
 
 pwcursorfit = static_library(

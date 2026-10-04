@@ -36,6 +36,7 @@
 #include "zerocopy.h"
 #include "mem.h"
 #include "powerprofile.h"
+#include "oskstate.h"
 
 #define pw_log(level, ...) wlr_log(level, __VA_ARGS__)
 
@@ -56,6 +57,7 @@ enum pw_action {
 	PW_ACTION_TOGGLE_BLANK,
 	PW_ACTION_ROTATE,
 	PW_ACTION_TOGGLE_PANEL,     /* config name "panel" */
+	PW_ACTION_OSK,              /* "osk show|hide|toggle" */
 	PW_ACTION_QUIT,
 };
 
@@ -68,6 +70,7 @@ struct pw_keybinding {
 	uint32_t modifiers;        /* WLR_MODIFIER_* mask that must be held */
 	enum pw_action action;
 	char *command;             /* for PW_ACTION_SPAWN, else NULL */
+	enum pw_osk_op osk_op;     /* for PW_ACTION_OSK */
 };
 
 struct pw_output_transform {
@@ -184,6 +187,10 @@ struct pw_config {
 	int mmap_threshold_kb;     /* M_MMAP_THRESHOLD in kB (default 128) */
 	int top_pad_kb;            /* M_TOP_PAD in kB (default 16) */
 	bool trim_after_start;     /* malloc_trim() once after startup (default true) */
+
+	/* [osk] on-screen keyboard process picowl starts and supervises. */
+	char *osk_cmd;             /* NULL = none (default) */
+	bool osk_restart;          /* restart after an exit (default true) */
 
 	/* [power]. idle_timeout_ms above is kept for backwards compatibility:
 	 * if set and no [power.*] blank_after_s is configured it becomes the
@@ -566,6 +573,15 @@ void pw_server_finish(struct pw_server *server);
 /* Fork and exec "/bin/sh -c cmd" detached (double fork, no zombies). Returns
  * 0 on success, -1 on failure. Called by server.c (autostart) and input.c. */
 int pw_spawn(const char *cmd);
+
+/* On-screen keyboard supervision (osk.c, policy in oskstate.c). init starts
+ * the [osk] cmd and does nothing without one; finish stops it and must run
+ * before the clients are destroyed so that its exit is not a crash. action
+ * runs a keybinding: it signals the keyboard, or starts it when it is not
+ * running. */
+void pw_osk_init(struct pw_server *server);
+void pw_osk_finish(struct pw_server *server);
+void pw_osk_action(struct pw_server *server, enum pw_osk_op op);
 
 /*
  * Rotation, panel and config lookups (contract additions).

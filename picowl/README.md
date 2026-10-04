@@ -4,7 +4,7 @@ A tiny wlroots 0.19 Wayland compositor optimized for GPU-less handhelds: HP iPAQ
 
 ## Status
 
-- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is focused, on-screen keyboard input (virtual-keyboard protocol), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking (held off while a visible client holds an idle inhibitor), DRM lease of the output to the media player (`wp_drm_lease_device_v1`, `doc/lease.md`), per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
+- **Working**: basic window management (xdg-shell toplevels maximized to usable area), layer-shell (panel, overlay, background), panel autohide while an app is focused, on-screen keyboard input (virtual-keyboard protocol) with the keyboard process started, supervised and toggled by picowl (`[osk]`, `osk` key action), keyboard navigation (alt+Tab to cycle, logo+Escape to quit, Power key to blank), idle timeout and screen blanking (held off while a visible client holds an idle inhibitor), DRM lease of the output to the media player (`wp_drm_lease_device_v1`, `doc/lease.md`), per-output rotation (hardware via the DRM plane `rotation` property where available, else software), copy-type detection (mq11xx, w100, sa1100-lcdc) with a single-buffer swapchain, picowl-buffer-v1 zero-copy client buffers, linux-dmabuf feedback, direct scanout, malloc tuning, frame-damage commits only, pixman rendering with RGB565/XRGB8888/ARGB8888 format selection.
 - **Planned**: video playback offload handshake (apps signal raw buffer availability for direct-to-framebuffer paths), C8 (8-bpp palettised) output on MediaQ (design and options documented in `doc/zero-copy.md`), fixing the per-commit `wlr_client_buffer` allocation in wlroots core. Hardware rotation, copy-type swapchain, and direct scanout are compiled and unit tested; the hardware paths still need the checklist in `doc/zero-copy.md` run on a device.
 - **Known constraints**: no general cursor theme (only the tap-and-hold wait animation is drawn by picowl), no window animations or transitions, no composited blur/fade (CPU cost), single fixed render format per build.
 
@@ -187,10 +187,28 @@ Example:
 ```ini
 [autostart]
 cmd = picowl-panel
-cmd = wvkbd-mobintl --hidden --non-exclusive
 ```
 
-wvkbd (the on-screen keyboard) is shown and hidden with signals, e.g. a keybinding `code:<key> = spawn pkill -RTMIN wvkbd`. The iPAQ build of wvkbd is carried as a patch series and an OE recipe (`oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`, not yet built into an image or run on a board). Supervision and an `osk` action are planned in [doc/design/osk.md](doc/design/osk.md).
+The on-screen keyboard does not belong here: `[osk]` starts it and keeps it running.
+
+### [osk] section
+
+picowl starts the on-screen keyboard, restarts it when it dies, signals it for the `osk` key action and stops it on exit. The keyboard is wvkbd; the iPAQ build of it is carried as a patch series and an OE recipe (`oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`, not yet built into an image or run on a board). Design: [doc/design/osk.md](doc/design/osk.md).
+
+- `cmd = <command>`: the command line of the keyboard (default: empty, picowl does not handle a keyboard). picowl runs it as `/bin/sh -c "exec <command>"` and stays its parent, so the process that runs is the keyboard itself. Start it hidden: picowl assumes a freshly started keyboard is hidden. An empty value disables the section. Example: `cmd = /usr/bin/wvkbd-ipaq --hidden --auto`; `--auto` lets the keyboard show itself when a text input gets the focus (see the input method relay below).
+- `restart = yes|no` (default `yes`): start the keyboard again after it exits. An exit within 10 s of the start is quick; after quick exits number 1, 2, 3 and 4 picowl waits 1, 2, 4 and 8 s, and after the fifth quick exit in a row it logs an error and gives up. A run of 10 s or more resets the count. picowl waits on a timer, never blocks, and keeps serving clients meanwhile.
+
+```ini
+[osk]
+cmd = /usr/bin/wvkbd-ipaq --hidden --auto
+restart = yes
+```
+
+- **Key action**: `osk show` (SIGUSR2), `osk hide` (SIGUSR1) and `osk toggle` (SIGRTMIN, looked up at run time; `osk` alone means toggle). When the keyboard is not running (it gave up, is waiting to restart, or `restart = no` and it exited), `osk show` and `osk toggle` start it right away with a fresh count, and it comes up hidden, so the key press that started it does not show it; press again. `osk hide` never starts it. Without a `cmd`, the action is logged and ignored. While a DRM lease is active (`doc/lease.md`) the key ends the lease first.
+- **Visibility** is a guess: picowl notes what its own keys did and assumes hidden after every start. If the keyboard is signalled from elsewhere (or shows itself with `--auto`) the guess is wrong; `show` and `hide` are sent regardless, and the next `toggle` is the one that can be off.
+- **Shutdown**: picowl sends SIGTERM when it exits, waits up to half a second and then kills the keyboard. It is not restarted. If picowl itself is killed, the keyboard gets SIGTERM from the kernel.
+- **Tap-and-hold**: a built-in `[layer.wvkbd]` rule sets `hold_action = none`, so key presses are not delayed until the finger lifts. Your own `[layer.wvkbd]` section merges over it, see below.
+- Children started by `[autostart]` and `spawn` are not touched by any of this and keep working as before.
 
 ### [keybindings] section
 
@@ -198,15 +216,16 @@ Keyboard shortcuts. Format: `<modifiers>+<key> = <action> [command]`.
 
 - `<modifiers>`: zero or more of `alt`, `ctrl`, `shift`, `logo` separated by `+`.
 - `<key>`: XKB keysym name (e.g., `Tab`, `F4`, `Return`), or a numeric evdev keycode as `code:116` (KEY_POWER).
-- `<action>`: `spawn`, `cycle`, `close`, `blank`, `rotate`, `panel`, `quit`.
+- `<action>`: `spawn`, `cycle`, `close`, `blank`, `rotate`, `panel`, `osk`, `quit`.
   - `spawn <command>`: fork and exec `/bin/sh -c <command>` (detached, no zombies).
   - `cycle`: raise the next mapped toplevel in stacking order.
   - `close`: send a close request to the focused toplevel.
   - `blank`: toggle screen on/off (same as Power key or output-power-management requests).
   - `rotate`: cycle output rotation of the first output (normal, 90, 180, 270; keeps the flipped bit).
   - `panel`: toggle the panel while panel autohide is active (forces it visible until focus changes).
+  - `osk <show|hide|toggle>`: show, hide or toggle the on-screen keyboard started by `[osk]` (default `toggle`); see the `[osk]` section.
   - `quit`: exit the compositor.
-- `[command]`: optional shell command for the `spawn` action.
+- `[command]`: the shell command for the `spawn` action, or `show`, `hide` or `toggle` for the `osk` action (an unknown one drops the binding with an error).
 
 **Built-in defaults** (always present: bindings from the config are added to them, and a config entry cannot remove one):
 
@@ -222,6 +241,7 @@ Example config overrides:
 alt+F4 = close
 code:116 = blank
 logo+Return = spawn foot
+code:397 = osk toggle
 ```
 
 ## Touch calibration
@@ -283,6 +303,7 @@ hold_ms = 1200
 [app.havoc]
 hold_button = middle
 
+# built in, shown here to say how to change it: the keyboard times its own presses
 [layer.wvkbd]
 hold_action = none
 ```

@@ -248,6 +248,9 @@ void pw_input_run_action(struct pw_server *server, const struct pw_keybinding *b
 	case PW_ACTION_TOGGLE_PANEL:
 		pw_panel_toggle(server);
 		break;
+	case PW_ACTION_OSK:
+		pw_osk_action(server, binding->osk_op);
+		break;
 	case PW_ACTION_QUIT:
 		wl_display_terminate(server->display);
 		break;

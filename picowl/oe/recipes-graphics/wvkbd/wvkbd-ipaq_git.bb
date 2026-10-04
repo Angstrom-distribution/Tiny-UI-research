@@ -1,20 +1,19 @@
 # wvkbd-ipaq: the on-screen keyboard for picowl (doc/design/osk.md, part 1).
 #
 # Launching it: start it hidden, and let it show itself when a text field gets
-# the focus (--auto needs the zwp_input_method_v2 relay, which picowl has):
+# the focus (--auto needs the zwp_input_method_v2 relay, which picowl has).
+# picowl starts and restarts it from its [osk] section and shows or hides it
+# with the "osk" key action (SIGUSR2 shows, SIGUSR1 hides, SIGRTMIN toggles):
 #
-#     wvkbd-ipaq --hidden --auto
+#     [osk]
+#     cmd = /usr/bin/wvkbd-ipaq --hidden --auto
 #
-# It can also be driven by signal: SIGUSR2 shows, SIGUSR1 hides and SIGRTMIN
-# toggles, until picowl supervises it (osk.md part 2).
+# picowl's built-in [layer.wvkbd] rule sets hold_action = none, because
+# picowl's own tap-and-hold would fight the keyboard's long press.
 #
-# picowl config it needs, because the keyboard must never take the keyboard
-# focus away from the application it types into (that would also hide the
-# keyboard again when the input method relay is used), and because picowl's
-# own tap-and-hold would fight the keyboard's long press:
-#
-#     [layer.wvkbd]
-#     hold_action = none
+# The keyboard must never take the keyboard focus away from the application
+# it types into (that would also hide the keyboard again when the input
+# method relay is used).
 #
 # The layer-shell keyboard interactivity of the keyboard must be none. The
 # patched main.c requests none, but that is to be confirmed on a board: check

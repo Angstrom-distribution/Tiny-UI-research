@@ -88,6 +88,7 @@ You can configure different tap-and-hold behaviour for specific apps and layer-s
 [app.mediaplayer]
 hold_action = none
 
+# built in: picowl ships this rule for the on-screen keyboard
 [layer.wvkbd]
 hold_action = none
 ```

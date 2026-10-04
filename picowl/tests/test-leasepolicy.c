@@ -108,6 +108,7 @@ static void test_key_policy(void)
 	EQ(pw_lease_key_policy(PW_ACTION_CYCLE_VIEWS), PW_LEASE_KEY_REVOKE_FIRST);
 	EQ(pw_lease_key_policy(PW_ACTION_SPAWN), PW_LEASE_KEY_REVOKE_FIRST);
 	EQ(pw_lease_key_policy(PW_ACTION_TOGGLE_PANEL), PW_LEASE_KEY_REVOKE_FIRST);
+	EQ(pw_lease_key_policy(PW_ACTION_OSK), PW_LEASE_KEY_REVOKE_FIRST);
 	EQ(pw_lease_key_policy(PW_ACTION_ROTATE), PW_LEASE_KEY_DROP);
 	EQ(pw_lease_key_policy(PW_ACTION_CLOSE_VIEW), PW_LEASE_KEY_PASS);
 	EQ(pw_lease_key_policy(PW_ACTION_QUIT), PW_LEASE_KEY_PASS);

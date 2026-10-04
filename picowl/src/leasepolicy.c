@@ -65,6 +65,7 @@ enum pw_lease_key pw_lease_key_policy(enum pw_action action)
 	case PW_ACTION_CYCLE_VIEWS:
 	case PW_ACTION_SPAWN:
 	case PW_ACTION_TOGGLE_PANEL:
+	case PW_ACTION_OSK: /* a keyboard shown under the lease would be invisible */
 		return PW_LEASE_KEY_REVOKE_FIRST;
 	case PW_ACTION_ROTATE:
 		return PW_LEASE_KEY_DROP;

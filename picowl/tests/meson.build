@@ -106,6 +106,24 @@ pw_tile_client = executable('pw-tile-client',
   'pw-tile-client.c', xdg_client_h, xdg_client_c,
   dependencies: [wayland_client])
 
+# A stand-in for wvkbd that logs the signals it gets, and a client which
+# presses keys through virtual-keyboard so that a keybinding fires headless.
+vk_xml = files('../protocols/virtual-keyboard-unstable-v1.xml')
+vk_client_h = custom_target('virtual-keyboard-client-header',
+  input: vk_xml, output: 'virtual-keyboard-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+vk_client_c = custom_target('virtual-keyboard-client-code',
+  input: vk_xml, output: 'virtual-keyboard-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+pw_osk_fake = executable('pw-osk-fake', 'pw-osk-fake.c')
+pw_key_client = executable('pw-key-client',
+  'pw-key-client.c', vk_client_h, vk_client_c,
+  dependencies: [wayland_client, xkbcommon])
+
+test('osk-e2e', find_program('sh'),
+  args: [files('osk-e2e.sh'), picowl_exe, pw_key_client, pw_osk_fake],
+  timeout: 90)
+
 test('tile-e2e', find_program('sh'),
   args: [files('tile-e2e.sh'), picowl_exe, pw_tile_client],
   timeout: 60)
@@ -120,6 +138,9 @@ test_touchhold_exe = executable('test-touchhold',
   include_directories: include_directories('../src'),
 )
 test('touchhold', test_touchhold_exe)
+
+test('oskstate', executable('test-oskstate', 'test-oskstate.c', '../src/oskstate.c',
+  include_directories: include_directories('../src')))
 
 test_cursorfit_exe = executable('test-cursorfit',
   'test-cursorfit.c',

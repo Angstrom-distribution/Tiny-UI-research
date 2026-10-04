@@ -30,7 +30,7 @@ Popups and menus are xdg popups on the panel's layer surface. picowl handles lay
 | **Network** | **iwd** over D-Bus (`net.connman.iwd` is iwd's own bus name, not ConnMan): station state, `Scan`, `GetOrderedNetworks`, `Connect`, passphrase agent, known networks. **systemd-networkd** over D-Bus (`org.freedesktop.network1`): per-link state and addresses for `wlan0`, `bnep0` (Bluetooth PAN) and `usb0` (EEM gadget) | Current link, signal, IP; scan list; tap a network to connect (passphrase prompt through the agent) | Wi-Fi on/off (iwd `Device.Powered`), flight mode (rfkill all), forget network, Network settings… |
 | **Bluetooth** | **BlueZ** over D-Bus plus `/dev/rfkill` events. PAN via `org.bluez.Network1.Connect("nap")`, with networkd doing DHCP on `bnep0` | Radio on/off | Devices, pair new (PIN agent; BT 1.1 hardware needs legacy PIN pairing), visibility, connect PAN |
 | **Volume** | alsa-lib control events (UDA1380 / UDA1341 / AK4535); no PulseAudio or PipeWire at 64 MiB | Volume slider popup | Mute, mixer, output selection |
-| **Keyboard** | wvkbd, controlled by signals (SIGUSR1 hide, SIGUSR2 show, SIGRTMIN toggle) | Show/hide the on-screen keyboard | Layout choice, keyboard size |
+| **Keyboard** | wvkbd, controlled by signals (SIGUSR1 hide, SIGUSR2 show, SIGRTMIN toggle); picowl owns the process, see `doc/design/osk.md` §3.5 | Show/hide the on-screen keyboard | Layout choice, keyboard size |
 | **Rotation** | `picowl-control-v1` (§4) | Rotate 90° | Choose orientation, rotation lock |
 | **Storage** | udev `block` events and `/proc/self/mountinfo`; mounting via `systemd-mount` | List SD/CF cards, with eject | Card details, format… (optional) |
 

@@ -26,12 +26,23 @@ color = #101010
 [autostart]
 # One shell command per line, run once at startup.
 # cmd = picowl-panel
-# cmd = wvkbd-mobintl --hidden --non-exclusive
+
+[osk]
+# The on-screen keyboard: picowl starts it, restarts it when it dies and shows or
+# hides it for the "osk" key action. Not needed in [autostart].
+# cmd: the command line, run as "exec <cmd>" so picowl knows the pid. Start it
+#   hidden. Empty (default) = picowl does not handle a keyboard.
+# restart: yes (default) or no. A restart waits 1, 2, 4, 8 s after an exit within
+#   10 s of the start; after 5 such exits in a row picowl gives up until an
+#   "osk show" or "osk toggle" key starts it again.
+# cmd = /usr/bin/wvkbd-ipaq --hidden --auto
+# restart = yes
 
 [keybindings]
 # "<modifiers>+<key> = <action> [command]"
 # key is an xkb keysym name (Tab) or a numeric evdev keycode (code:116).
-# modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, panel, quit.
+# modifiers: alt, ctrl, shift, logo.  Actions: spawn, cycle, close, blank, rotate, panel, osk, quit.
+# "osk show|hide|toggle" (default toggle) controls the keyboard from [osk].
 # Built-in defaults (always present, your entries are added to them): code:116 = blank,
 # alt+Tab = cycle, logo+Escape = quit.
 # alt+Tab = cycle
@@ -41,6 +52,8 @@ color = #101010
 # The iPAQ email button (KEY_MAIL, 155) cycles the output rotation, as in the media player;
 # it does nothing on models without that button.
 code:155 = rotate
+# The iPAQ calendar button (KEY_CALENDAR, 397) toggles the on-screen keyboard.
+# code:397 = osk toggle
 
 [touch]
 # Tap-and-hold gesture detection (default: enabled with right-click behaviour).
@@ -85,6 +98,9 @@ code:155 = rotate
 # Example: holding in havoc pastes the primary selection (middle click).
 # [app.havoc]
 # hold_button = middle
+#
+# picowl has a built-in [layer.wvkbd] with hold_action = none for the keyboard;
+# a [layer.wvkbd] section of your own merges over it.
 
 [cursor]
 # Cursor appearance during hold animation (only visible during the hold animation).

@@ -96,8 +96,30 @@ static bool parse_action(const char *str, enum pw_action *action)
 		*action = PW_ACTION_TOGGLE_PANEL;
 		return true;
 	}
+	if (strcmp(str, "osk") == 0) {
+		*action = PW_ACTION_OSK;
+		return true;
+	}
 	if (strcmp(str, "quit") == 0) {
 		*action = PW_ACTION_QUIT;
+		return true;
+	}
+	return false;
+}
+
+/* The argument of the osk action; none means toggle. */
+static bool parse_osk_op(const char *str, enum pw_osk_op *op)
+{
+	if (!str || !*str || strcmp(str, "toggle") == 0) {
+		*op = PW_OSK_TOGGLE;
+		return true;
+	}
+	if (strcmp(str, "show") == 0) {
+		*op = PW_OSK_SHOW;
+		return true;
+	}
+	if (strcmp(str, "hide") == 0) {
+		*op = PW_OSK_HIDE;
 		return true;
 	}
 	return false;
@@ -355,6 +377,7 @@ struct pw_config *pw_config_default(void)
 	c->slop_px = 8;
 	c->pointercal = strdup("/etc/pointercal");
 	wl_list_init(&c->app_rules);
+	c->osk_restart = true;
 	c->hold_animation = NULL;
 	c->cursor_fill = 0x2050c0;
 	c->cursor_outline = 0xffffff;
@@ -386,6 +409,19 @@ struct pw_config *pw_config_default(void)
 	c->lease_enable = true;
 	c->lease_allow = strdup("mediaplayer");
 	c->capture_enable = false;
+	/* The keyboard times its own long presses (key repeat, accents), so a hold
+	 * must not delay its key presses. A user [layer.wvkbd] merges over this.
+	 * The other keys are resolved from [touch] by pw_config_load(); they are
+	 * filled in here too for a config that is never loaded from a file. */
+	struct pw_app_rule *osk_rule = find_or_add_rule(c, PW_RULE_LAYER, "wvkbd");
+	if (osk_rule) {
+		osk_rule->hold.action = PW_HOLD_NONE;
+		osk_rule->hold.button = c->hold_button;
+		osk_rule->hold.delay_ms = c->hold_delay_ms;
+		osk_rule->hold.hold_ms = c->hold_ms;
+		osk_rule->hold.slop_px = c->slop_px;
+		osk_rule->set |= PW_HOLD_SET_ACTION;
+	}
 	add_default_keybindings(c);
 	return c;
 }
@@ -522,6 +558,16 @@ struct pw_config *pw_config_load(const char *path)
 					wl_list_insert(c->autostart.prev, &as->link);
 				}
 			}
+		} else if (strcmp(section, "osk") == 0) {
+			if (strcmp(key, "cmd") == 0) {
+				char *dup = *val ? strdup(val) : NULL;
+				if (dup || !*val) {
+					free(c->osk_cmd);
+					c->osk_cmd = dup;
+				}
+			} else if (strcmp(key, "restart") == 0) {
+				parse_bool_log(val, "osk.restart", &c->osk_restart);
+			}
 		} else if (strcmp(section, "keybindings") == 0) {
 			/* modifiers+key = action [cmd] */
 			char *key_dup = strdup(key);
@@ -549,11 +595,20 @@ struct pw_config *pw_config_load(const char *path)
 				continue;
 			}
 
+			enum pw_osk_op osk_op = PW_OSK_TOGGLE;
+			if (action == PW_ACTION_OSK && !parse_osk_op(cmd_str, &osk_op)) {
+				pw_log(WLR_ERROR, "Unknown osk argument: %s (valid: show, hide, toggle)", cmd_str);
+				free(key_dup);
+				free(val_dup);
+				continue;
+			}
+
 			/* Parse modifiers and key */
 			struct pw_keybinding *kb = calloc(1, sizeof(*kb));
 			if (kb) {
 				kb->action = action;
-				kb->command = cmd_str ? strdup(cmd_str) : NULL;
+				kb->command = action != PW_ACTION_OSK && cmd_str ? strdup(cmd_str) : NULL;
+				kb->osk_op = osk_op;
 				kb->modifiers = 0;
 
 				/* Parse modifiers */
@@ -1069,6 +1124,7 @@ void pw_config_free(struct pw_config *config)
 		free(rule);
 	}
 
+	free(config->osk_cmd);
 	free(config->render_format_pref);
 	free(config->hold_animation);
 	free(config);

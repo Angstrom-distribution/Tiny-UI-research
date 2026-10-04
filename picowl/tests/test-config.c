@@ -22,7 +22,11 @@ static int test_default_config(void)
 
 	/* Check default keybindings exist */
 	assert(!wl_list_empty(&c->keybindings));
-	assert(wl_list_empty(&c->app_rules));
+	/* the only rule is the built-in one for the keyboard's layer surface */
+	assert(!wl_list_empty(&c->app_rules));
+	assert(c->app_rules.next->next == &c->app_rules);
+	struct pw_app_rule *builtin = wl_container_of(c->app_rules.next, builtin, link);
+	assert(builtin->kind == PW_RULE_LAYER && strcmp(builtin->name, "wvkbd") == 0);
 
 	struct pw_keybinding *kb;
 	int kb_count = 0;
@@ -226,14 +230,14 @@ static int test_app_rules(void)
 	assert(hp.hold_ms == 900);
 	assert(hp.slop_px == 8);
 
-	/* empty [app.] and [layer.] are ignored: five rules, none unnamed */
+	/* empty [app.] and [layer.] are ignored: five rules plus the built-in wvkbd one, none unnamed */
 	int n = 0;
 	struct pw_app_rule *rule;
 	wl_list_for_each(rule, &c->app_rules, link) {
 		assert(rule->name && rule->name[0]);
 		n++;
 	}
-	assert(n == 5);
+	assert(n == 6);
 
 	/* panel as app (no rule): returns globals with false */
 	hit = pw_config_hold(c, PW_RULE_APP, "panel", &hp);
@@ -653,7 +657,7 @@ static int test_zerocopy_limits(void)
 	/* [layer.*] has no buffer pool */
 	wl_list_for_each(r, &c->app_rules, link)
 		if (r->kind == PW_RULE_LAYER) {
-			assert(strcmp(r->name, "osk") == 0);
+			assert(strcmp(r->name, "osk") == 0 || strcmp(r->name, "wvkbd") == 0);
 			assert(r->zb_buffers == -1 && r->zb_pool == 0);
 		}
 	assert(pw_config_app(c, "osk") == NULL);
@@ -867,6 +871,112 @@ static int test_layout_config(void)
 	return 0;
 }
 
+/* The binding for the first key with this evdev code, or NULL. */
+static const struct pw_keybinding *find_code(const struct pw_config *c, uint32_t code)
+{
+	const struct pw_keybinding *kb;
+	wl_list_for_each(kb, &c->keybindings, link)
+		if (!kb->key_name && kb->keycode == code)
+			return kb;
+	return NULL;
+}
+
+static int test_osk_config(void)
+{
+	struct pw_config *c = pw_config_default();
+	struct pw_hold_params hp;
+	const struct pw_keybinding *kb;
+
+	/* defaults: no keyboard to supervise, restart on, no hold on its surface */
+	assert(c != NULL);
+	assert(c->osk_cmd == NULL);
+	assert(c->osk_restart == true);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "wvkbd", &hp));
+	assert(hp.action == PW_HOLD_NONE);
+	assert(hp.delay_ms == 300 && hp.hold_ms == 900 && hp.slop_px == 8);
+	/* the rule is for the layer namespace only */
+	assert(!pw_config_hold(c, PW_RULE_APP, "wvkbd", &hp));
+	assert(hp.action == PW_HOLD_RIGHT_CLICK);
+	pw_config_free(c);
+
+	const char *path = write_tmp_ini("picowl-test-osk.ini",
+		"[osk]\n"
+		"cmd = /usr/bin/wvkbd-ipaq --hidden --auto\n"
+		"restart = no\n"
+		"[keybindings]\n"
+		"code:397 = osk toggle\n"
+		"code:398 = osk show\n"
+		"code:399 = osk hide\n"
+		"code:400 = osk\n"
+		"code:401 = osk   hide  \n"
+		"code:402 = osk sideways\n"
+		"code:403 = spawn osk show\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(c->osk_cmd && strcmp(c->osk_cmd, "/usr/bin/wvkbd-ipaq --hidden --auto") == 0);
+	assert(c->osk_restart == false);
+	kb = find_code(c, 397);
+	assert(kb && kb->action == PW_ACTION_OSK && kb->osk_op == PW_OSK_TOGGLE);
+	assert(kb->command == NULL);
+	kb = find_code(c, 398);
+	assert(kb && kb->action == PW_ACTION_OSK && kb->osk_op == PW_OSK_SHOW);
+	kb = find_code(c, 399);
+	assert(kb && kb->action == PW_ACTION_OSK && kb->osk_op == PW_OSK_HIDE);
+	/* no argument means toggle; surrounding blanks are trimmed */
+	kb = find_code(c, 400);
+	assert(kb && kb->action == PW_ACTION_OSK && kb->osk_op == PW_OSK_TOGGLE);
+	kb = find_code(c, 401);
+	assert(kb && kb->action == PW_ACTION_OSK && kb->osk_op == PW_OSK_HIDE);
+	/* an unknown argument drops the binding; spawn keeps its text as is */
+	assert(find_code(c, 402) == NULL);
+	kb = find_code(c, 403);
+	assert(kb && kb->action == PW_ACTION_SPAWN && strcmp(kb->command, "osk show") == 0);
+	pw_config_free(c);
+
+	/* an empty cmd disables; a later one wins; a bad restart keeps the default */
+	path = write_tmp_ini("picowl-test-osk.ini",
+		"[osk]\ncmd = first\ncmd =\nrestart = maybe\n");
+	c = pw_config_load(path);
+	assert(c != NULL && c->osk_cmd == NULL && c->osk_restart == true);
+	pw_config_free(c);
+	path = write_tmp_ini("picowl-test-osk.ini", "[osk]\ncmd = first\ncmd = second\nrestart = yes\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL && strcmp(c->osk_cmd, "second") == 0 && c->osk_restart == true);
+	pw_config_free(c);
+
+	/* a user [layer.wvkbd] merges over the built-in rule, before or after
+	 * [touch], and can bring the hold back */
+	path = write_tmp_ini("picowl-test-osk.ini",
+		"[layer.wvkbd]\nslop_px = 20\n"
+		"[touch]\nhold_ms = 1200\nhold_button = middle\n");
+	c = pw_config_load(path);
+	assert(c != NULL);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "wvkbd", &hp));
+	assert(hp.action == PW_HOLD_NONE && hp.slop_px == 20);
+	assert(hp.hold_ms == 1200 && hp.button == PW_HOLD_BTN_MIDDLE);
+	pw_config_free(c);
+	path = write_tmp_ini("picowl-test-osk.ini",
+		"[layer.wvkbd]\nhold_action = right-click\nhold_ms = 700\n");
+	c = pw_config_load(path);
+	remove(path);
+	assert(c != NULL);
+	assert(pw_config_hold(c, PW_RULE_LAYER, "wvkbd", &hp));
+	assert(hp.action == PW_HOLD_RIGHT_CLICK && hp.hold_ms == 700);
+	/* still one rule for it, not two */
+	int n = 0;
+	struct pw_app_rule *rule;
+	wl_list_for_each(rule, &c->app_rules, link)
+		if (rule->kind == PW_RULE_LAYER && strcmp(rule->name, "wvkbd") == 0)
+			n++;
+	assert(n == 1);
+	pw_config_free(c);
+
+	printf("✓ test_osk_config\n");
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	(void)argc;
@@ -884,6 +994,7 @@ int main(int argc, char *argv[])
 	failed += test_app_rules();
 	failed += test_app_rules_inherit();
 	failed += test_hold_button();
+	failed += test_osk_config();
 	failed += test_validation_ranges();
 	failed += test_rotation_config();
 	failed += test_copytype_config();
