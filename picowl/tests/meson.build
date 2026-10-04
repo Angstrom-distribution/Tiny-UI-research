@@ -240,3 +240,19 @@ test('wvkbd-patches-sync', find_program('sh'),
 test('panel', executable('test-panel', 'test-panel.c',
   link_with: pwpanel_lib,
   include_directories: include_directories('../panel')))
+
+# picowl-panel against headless picowl. pw-fake-ctl is an alsa-lib control
+# plugin that stands in for a sound card (no kernel driver needed), and
+# pw-bare-server a server with a wl_output and nothing else.
+if panel_built
+  # alsa-lib's plugin macros need PIC to build the dynamic form of the symbol.
+  pw_fake_ctl = shared_module('pw-fake-ctl', 'pw-fake-ctl.c',
+    name_prefix: '', c_args: ['-DPIC'], dependencies: panel_alsa)
+  pw_bare_server = executable('pw-bare-server', 'pw-bare-server.c',
+    dependencies: [wayland_server])
+
+  test('panel-e2e', find_program('sh'),
+    args: [files('panel-e2e.sh'), picowl_exe, picowl_panel_exe, pw_test_client,
+           pw_key_client, pw_fake_ctl, pw_bare_server],
+    timeout: 120)
+endif
