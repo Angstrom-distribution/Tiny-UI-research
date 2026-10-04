@@ -108,6 +108,20 @@ kill -TERM "$PID"; wait "$PID"; PID=
 [ "$(cat "$bl/brightness")" = 60 ] || fail "external level lost: $(cat "$bl/brightness"), expected 60"
 echo "power-e2e: external level 60 dimmed to 18 and restored"
 
+# 3c. The same without a dim in between: exiting while ACTIVE must not write
+# the level read at startup over the one the slider set.
+mktree "$DIR/sys-ext2" ac
+bl=$DIR/sys-ext2/class/backlight/test-bl
+rm "$bl/actual_brightness"; ln -s brightness "$bl/actual_brightness"
+PICOWL_SYSFS_ROOT=$DIR/sys-ext2 "$PICOWL" -c "$DIR/picowl.ini" -d 2 >"$DIR/picowl.log" 2>&1 &
+PID=$!
+sleep 0.3
+echo 60 >"$bl/brightness"
+sleep 0.2
+kill -TERM "$PID"; wait "$PID"; PID=
+[ "$(cat "$bl/brightness")" = 60 ] || fail "external level lost at exit without a dim: $(cat "$bl/brightness"), expected 60"
+echo "power-e2e: external level 60 kept at exit without a dim"
+
 # Idle inhibitor cases need the test client.
 if [ -z "$CLIENT" ]; then
 	echo "power-e2e: no test client, inhibitor cases skipped"

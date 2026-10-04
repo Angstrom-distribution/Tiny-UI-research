@@ -364,6 +364,10 @@ void pw_power_finish(struct pw_server *server)
 		wl_event_source_remove(p->uev_src);
 	pw_ps_uevent_close(&p->uev);
 	if (p->bl) {
+		/* A slider write since the last dim is the user level too; a
+		 * dimmed level is not, so only look while ACTIVE. */
+		if (p->dim.state == PW_DIM_ACTIVE)
+			adopt_external(p);
 		if (!p->bl_disabled)
 			pw_backlight_set(p->bl, pw_backlight_get_user(p->bl));
 		pw_backlight_close(p->bl);
