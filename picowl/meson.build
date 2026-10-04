@@ -53,7 +53,8 @@ wayland_scanner = find_program(
 wl_proto_dir = wayland_protos.get_variable(pkgconfig: 'pkgdatadir')
 
 # Server protocol headers required by the wlroots 0.19 public headers we use
-# (xdg-shell, layer-shell, output-power-management, content-type, cursor-shape, tablet). The other interfaces
+# (xdg-shell, layer-shell, output-power-management, content-type, cursor-shape, tablet,
+# text-input, input-method). The other interfaces
 # (virtual-keyboard, foreign-toplevel, idle-notify, presentation-time,
 # viewporter, single-pixel-buffer, xdg-activation, xdg-decoration) are
 # implemented entirely inside libwlroots and need no headers here.
@@ -65,6 +66,10 @@ protocol_xmls = {
   'tablet-v2': wl_proto_dir / 'unstable' / 'tablet' / 'tablet-unstable-v2.xml',
   'cursor-shape-v1': wl_proto_dir / 'staging' / 'cursor-shape' / 'cursor-shape-v1.xml',
   'content-type-v1': wl_proto_dir / 'staging' / 'content-type' / 'content-type-v1.xml',
+  'text-input-unstable-v3': wl_proto_dir / 'unstable' / 'text-input' / 'text-input-unstable-v3.xml',
+  # Not in wayland-protocols (only input-method-unstable-v1 is); wlroots ships
+  # v2 in its own protocol/ directory, so picowl carries a copy of that file.
+  'input-method-unstable-v2': files('protocols/input-method-unstable-v2.xml'),
 }
 # wlr-screencopy-unstable-v1 is not listed: wlr_screencopy_v1.h includes no
 # generated header and libwlroots provides the interface.
@@ -94,6 +99,7 @@ sources = files(
   'src/view.c',
   'src/layer.c',
   'src/input.c',
+  'src/imrelay.c',
   'src/tablet.c',
   'src/idle.c',
   'src/touchhold.c',

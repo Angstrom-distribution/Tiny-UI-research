@@ -421,6 +421,22 @@ void pw_layer_arrange(struct pw_output *output);
 bool pw_layer_has_exclusive_focus(struct pw_server *server);
 
 /*
+ * imrelay.c
+ */
+
+/* Create the text-input-v3 and input-method-v2 globals next to
+ * zwp_virtual_keyboard_manager_v1, which stays as it is (GTK+2 applications
+ * and on-screen keyboard function keys still need it). Failure is logged and
+ * leaves the protocols unsupported. Called by pw_input_init() once the seat
+ * exists. */
+void pw_im_init(struct pw_server *server);
+
+/* Remove every listener on the managers and on their objects: wlroots asserts
+ * that none is left when it destroys them. Safe without a prior pw_im_init().
+ * Called by pw_input_finish(). */
+void pw_im_finish(struct pw_server *server);
+
+/*
  * input.c
  */
 

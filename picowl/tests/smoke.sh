@@ -63,6 +63,10 @@ OUT=$("$CLIENT" --expect-global wp_content_type_manager_v1 2>&1) || fail "conten
 OUT=$("$CLIENT" --expect-global zwp_primary_selection_device_manager_v1 2>&1) || fail "primary selection global missing: $OUT"
 OUT=$("$CLIENT" --expect-global wp_cursor_shape_manager_v1 2>&1) || fail "cursor-shape global missing: $OUT"
 OUT=$("$CLIENT" --expect-global zwp_tablet_manager_v2 2>&1) || fail "tablet global missing: $OUT"
+OUT=$("$CLIENT" --expect-global zwp_text_input_manager_v3 2>&1) || fail "text-input global missing: $OUT"
+OUT=$("$CLIENT" --expect-global zwp_input_method_manager_v2 2>&1) || fail "input-method global missing: $OUT"
+# The older path stays for GTK+2 clients and OSK function keys.
+OUT=$("$CLIENT" --expect-global zwp_virtual_keyboard_manager_v1 2>&1) || fail "virtual-keyboard global missing: $OUT"
 
 # [capture] is off by default: no screencopy global.
 OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"

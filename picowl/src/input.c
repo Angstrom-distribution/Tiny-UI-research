@@ -950,6 +950,7 @@ bool pw_input_init(struct pw_server *server)
 	}
 	wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
 
+	pw_im_init(server);
 	pw_tablet_init(server);
 
 	pw_touchhold_init(&st.th, (enum pw_th_hold_action)server->config->hold_action,
@@ -1008,6 +1009,7 @@ void pw_input_finish(struct pw_server *server)
 		st.keymap = NULL;
 	}
 	pw_tablet_finish(server);
+	pw_im_finish(server);
 	if (!server->cursor)
 		return;
 	wl_list_remove(&st.cursor_motion.link);
