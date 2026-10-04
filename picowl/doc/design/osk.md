@@ -1,6 +1,6 @@
 # On-screen keyboard
 
-**Status:** design only, except Part 3 (section 4), which is implemented in `src/imrelay.c` without the keyboard grab and the popup hold rules.
+**Status:** Part 1 (section 2) exists in the repository as the nine patches (`oe/recipes-graphics/wvkbd/files/`, `subprojects/packagefiles/wvkbd/`, `subprojects/wvkbd.wrap`, `tests/patches-sync.sh`) and the recipe `oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`. It is not built into an image and not run on a board yet, and the recipe has not been parsed with bitbake. Part 3 (section 4) is implemented in `src/imrelay.c` without the keyboard grab and the popup hold rules. What remains is Part 2 (section 3), picowl's supervision, and the hardware checklist (section 6).
 
 The OSK is wvkbd, rebuilt for the iPAQ as a patch series on a pinned upstream commit, packaged in picowl's OE layer (Part 1). picowl starts and supervises it, shows and hides it by signal from a keybinding or the panel, and keeps its own tap-and-hold out of the way (Part 2). An input-method relay that shows the keyboard automatically on text focus is Part 3, implemented apart from the keyboard grab and the popup hold rules.
 

@@ -190,7 +190,7 @@ cmd = picowl-panel
 cmd = wvkbd-mobintl --hidden --non-exclusive
 ```
 
-wvkbd (the on-screen keyboard) is shown and hidden with signals, e.g. a keybinding `code:<key> = spawn pkill -RTMIN wvkbd`. Supervision and an `osk` action are planned in [doc/design/osk.md](doc/design/osk.md).
+wvkbd (the on-screen keyboard) is shown and hidden with signals, e.g. a keybinding `code:<key> = spawn pkill -RTMIN wvkbd`. The iPAQ build of wvkbd is carried as a patch series and an OE recipe (`oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`, not yet built into an image or run on a board). Supervision and an `osk` action are planned in [doc/design/osk.md](doc/design/osk.md).
 
 ### [keybindings] section
 
