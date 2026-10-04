@@ -1,6 +1,6 @@
 [Unit]
 Description=picowl Wayland compositor
-After=systemd-user-sessions.service seatd.service
+After=systemd-user-sessions.service seatd.service picosplash.service
 Wants=seatd.service
 Conflicts=getty@tty1.service
 After=getty@tty1.service
@@ -10,7 +10,11 @@ Type=simple
 # No logind session is assumed, so the runtime directory is made here rather than
 # by PAM. A fixed path keeps the unit working without a user session.
 Environment=XDG_RUNTIME_DIR=/run/picowl
-ExecStartPre=/bin/mkdir -p -m 0700 /run/picowl
+# One command with both steps: pico-init runs only one of several ExecStartPre lines.
+# The boot splash holds DRM master, and wlroots cannot allocate buffers without it.
+# HANDOVER makes it release master while its logo stays up, and it exits by itself once
+# picowl has mode-set. The trailing "true" keeps the unit working where no splash exists.
+ExecStartPre=/bin/sh -c "mkdir -p -m 0700 /run/picowl; /usr/bin/picosplash-write HANDOVER; true"
 ExecStart=/usr/bin/picowl
 Restart=on-failure
 RestartSec=3
@@ -19,4 +23,5 @@ TTYPath=/dev/tty1
 StandardInput=tty
 
 [Install]
-WantedBy=graphical.target
+# multi-user.target as well, because the pico-init images have no graphical.target.
+WantedBy=multi-user.target graphical.target

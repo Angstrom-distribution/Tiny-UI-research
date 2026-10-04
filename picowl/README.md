@@ -46,7 +46,7 @@ export WLR_DRM_DEVICE=/dev/dri/card0
 picowl [-c /etc/picowl.ini] [-d 2]  # -d N sets the log level (0-3)
 ```
 
-`picowl.service` does not use PAM or logind, and it sets `XDG_RUNTIME_DIR=/run/picowl` (created with mode 0700 by an `ExecStartPre=`) because nothing else creates a runtime directory. picowl exits with an error if `XDG_RUNTIME_DIR` is unset. It needs a seatd service started first, and it keeps `TTYPath=/dev/tty1` and `StandardInput=tty` so seatd has a VT; that tty setup has not been tested on a bare VT without logind. Other programs that talk to the compositor must use the same `XDG_RUNTIME_DIR` to find its socket.
+`picowl.service` does not use PAM or logind, and it sets `XDG_RUNTIME_DIR=/run/picowl` (created with mode 0700 by an `ExecStartPre=`) because nothing else creates a runtime directory. picowl exits with an error if `XDG_RUNTIME_DIR` is unset. It needs a seatd service started first, and it keeps `TTYPath=/dev/tty1` and `StandardInput=tty` so seatd has a VT; that tty setup has not been tested on a bare VT without logind. A boot splash that holds DRM master must hand the display over first (wlroots cannot allocate buffers without master): the unit starts after `picosplash.service` and asks it to hand over with `picosplash-write HANDOVER`; where no splash exists that step is skipped. The unit is wanted by `multi-user.target` and `graphical.target`, because the pico-init images have no `graphical.target`. Other programs that talk to the compositor must use the same `XDG_RUNTIME_DIR` to find its socket.
 
 ### Headless testing (no hardware)
 
