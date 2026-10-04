@@ -109,14 +109,6 @@ ls_client_c = custom_target('wlr-layer-shell-client-code',
   input: ls_xml, output: 'wlr-layer-shell-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
-# One process, a few toplevels and a keyboard stand-in: the configure sizes of
-# the tiled layout.
-pw_tile_client = executable('pw-tile-client',
-  'pw-tile-client.c', xdg_client_h, xdg_client_c, ls_client_h, ls_client_c,
-  dependencies: [wayland_client])
-
-# A stand-in for wvkbd that logs the signals it gets, and a client which
-# presses keys through virtual-keyboard so that a keybinding fires headless.
 vk_xml = files('../protocols/virtual-keyboard-unstable-v1.xml')
 vk_client_h = custom_target('virtual-keyboard-client-header',
   input: vk_xml, output: 'virtual-keyboard-unstable-v1-client-protocol.h',
@@ -124,6 +116,16 @@ vk_client_h = custom_target('virtual-keyboard-client-header',
 vk_client_c = custom_target('virtual-keyboard-client-code',
   input: vk_xml, output: 'virtual-keyboard-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
+# One process, a few toplevels and a keyboard stand-in: the configure sizes of
+# the tiled layout.
+pw_tile_client = executable('pw-tile-client',
+  'pw-tile-client.c', xdg_client_h, xdg_client_c, ls_client_h, ls_client_c,
+  vk_client_h, vk_client_c,
+  dependencies: [wayland_client, xkbcommon])
+
+# A stand-in for wvkbd that logs the signals it gets, and a client which
+# presses keys through virtual-keyboard so that a keybinding fires headless.
 pw_osk_fake = executable('pw-osk-fake', 'pw-osk-fake.c')
 pw_key_client = executable('pw-key-client',
   'pw-key-client.c', vk_client_h, vk_client_c,

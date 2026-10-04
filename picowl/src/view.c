@@ -100,6 +100,27 @@ static bool view_hint_changed(struct pw_view *view)
 	return true;
 }
 
+/* The window which takes the keyboard when view maps. With [layout] focus
+ * naming a stack app, the other stack app appearing must not take it from
+ * there: on the demo device the terminal maps first and the player maps
+ * later, and every restart of the player would steal the on-screen
+ * keyboard's keys. Other apps are not covered, they take the focus as ever. */
+static struct pw_view *map_focus_target(struct pw_server *server, struct pw_view *view)
+{
+	struct pw_view *v;
+	const char *name = server->config ? server->config->focus : NULL;
+
+	if (!name || view_stack_index(view) < 0)
+		return view;
+	wl_list_for_each(v, &server->views, link) {
+		const char *id = v->xdg_toplevel->app_id;
+
+		if (v->mapped && id && strcmp(id, name) == 0 && view_stack_index(v) >= 0)
+			return v;
+	}
+	return view;
+}
+
 /* Both stacked apps mapped: fill first and second with them and slots[] with
  * their boxes. Several mapped views with one app_id: the most recently
  * focused (list front) is the one which tiles.
@@ -428,7 +449,7 @@ static void view_map(struct wl_listener *l, void *data)
 		pw_view_arrange_all(view->server);
 	else
 		view_arrange(view);
-	pw_view_focus(view);
+	pw_view_focus(map_focus_target(view->server, view));
 
 	/* The hint is double-buffered state, so it is current once the surface
 	 * maps; later changes are not tracked until something acts on them. */

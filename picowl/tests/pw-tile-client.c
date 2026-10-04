@@ -12,6 +12,11 @@
  *   pw-tile-client nopan       the same with [layout] pan empty: all shrink
  *   pw-tile-client pan-landscape  the keyboard on the 1280x720 output: the side
  *                              by side pair shrinks
+ *   pw-tile-client focus-keep  [layout] focus = tile-a: tile-a maps first, then
+ *                              tile-b (and again after a restart); the
+ *                              wl_keyboard focus stays with tile-a, alt+Tab
+ *                              moves it, a third app takes it
+ *   pw-tile-client focus-default  the same without the key: tile-b takes it
  *   pw-tile-client pixels DIR  portrait pair drawn red (tile-a) and blue
  *                              (tile-b), keyboard green; stops at each step for
  *                              tests/pan-e2e.sh, which takes a screenshot and
@@ -36,12 +41,18 @@
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include <xkbcommon/xkbcommon.h>
 
 static struct wl_display *dpy;
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct zwlr_layer_shell_v1 *layer_shell;
+static struct wl_seat *seat;
+static struct zwp_virtual_keyboard_manager_v1 *vk_mgr;
+static struct wl_keyboard *keyboard;
+static struct wl_surface *kfocus; /* surface which holds the wl_keyboard focus */
 static bool paint_colours; /* pixels mode: solid colours instead of grey */
 
 struct win {
@@ -53,7 +64,10 @@ struct win {
 	bool activated;		/* ... and whether it carried the activated state */
 	int n_configures;
 	bool configured;
+	int n_kenter;		/* wl_keyboard.enter events for this window */
 };
+#define MAX_WINS 8
+static struct win *wins[MAX_WINS]; /* open windows, to name the keyboard focus */
 
 static void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 static void fail(const char *fmt, ...)
@@ -84,6 +98,10 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 		shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
 	else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name))
 		layer_shell = wl_registry_bind(r, name, &zwlr_layer_shell_v1_interface, 1);
+	else if (!strcmp(iface, wl_seat_interface.name))
+		seat = wl_registry_bind(r, name, &wl_seat_interface, 4);
+	else if (!strcmp(iface, zwp_virtual_keyboard_manager_v1_interface.name))
+		vk_mgr = wl_registry_bind(r, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
 	else if (!strcmp(iface, xdg_wm_base_interface.name)) {
 		wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, ver < 2 ? ver : 2);
 		xdg_wm_base_add_listener(wm_base, &wm_listener, NULL);
@@ -185,6 +203,11 @@ static void pump(int ms)
 static void open_win(struct win *w, const char *app_id)
 {
 	memset(w, 0, sizeof(*w));
+	for (int i = 0; i < MAX_WINS; i++)
+		if (!wins[i]) {
+			wins[i] = w;
+			break;
+		}
 	w->name = app_id;
 	w->surface = wl_compositor_create_surface(compositor);
 	w->xs = xdg_wm_base_get_xdg_surface(wm_base, w->surface);
@@ -198,6 +221,11 @@ static void open_win(struct win *w, const char *app_id)
 
 static void close_win(struct win *w)
 {
+	for (int i = 0; i < MAX_WINS; i++)
+		if (wins[i] == w)
+			wins[i] = NULL;
+	if (kfocus == w->surface)
+		kfocus = NULL;
 	xdg_toplevel_destroy(w->tl);
 	xdg_surface_destroy(w->xs);
 	wl_surface_destroy(w->surface);
@@ -355,6 +383,159 @@ static void expect_active(const char *step, struct win *w, bool active)
 {
 	if (w->activated != active)
 		fail("%s: %s activated=%d, expected %d", step, w->name, w->activated, active);
+}
+
+/* ---- the keyboard focus ----------------------------------------------- */
+
+static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t f, int32_t fd, uint32_t sz)
+{
+	(void)d; (void)k; (void)f; (void)sz;
+	close(fd);
+}
+static void kb_enter(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s,
+	struct wl_array *keys)
+{
+	(void)d; (void)k; (void)serial; (void)keys;
+	kfocus = s;
+	for (int i = 0; i < MAX_WINS; i++)
+		if (wins[i] && wins[i]->surface == s)
+			wins[i]->n_kenter++;
+}
+static void kb_leave(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s)
+{
+	(void)d; (void)k; (void)serial;
+	if (kfocus == s)
+		kfocus = NULL;
+}
+static void kb_key(void *d, struct wl_keyboard *k, uint32_t a, uint32_t b, uint32_t c, uint32_t e)
+{
+	(void)d; (void)k; (void)a; (void)b; (void)c; (void)e;
+}
+static void kb_mods(void *d, struct wl_keyboard *k, uint32_t a, uint32_t b, uint32_t c,
+	uint32_t e, uint32_t f)
+{
+	(void)d; (void)k; (void)a; (void)b; (void)c; (void)e; (void)f;
+}
+static void kb_repeat(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay)
+{
+	(void)d; (void)k; (void)rate; (void)delay;
+}
+static const struct wl_keyboard_listener kb_listener = { kb_keymap, kb_enter, kb_leave,
+	kb_key, kb_mods, kb_repeat };
+
+static void seat_caps(void *d, struct wl_seat *st, uint32_t caps)
+{
+	(void)d;
+	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !keyboard) {
+		keyboard = wl_seat_get_keyboard(st);
+		wl_keyboard_add_listener(keyboard, &kb_listener, NULL);
+	}
+}
+static void seat_name(void *d, struct wl_seat *st, const char *n)
+{
+	(void)d; (void)st; (void)n;
+}
+static const struct wl_seat_listener seat_listener = { seat_caps, seat_name };
+
+static struct zwp_virtual_keyboard_v1 *vkbd;
+
+/* The headless seat has no keyboard, so without one there is no wl_keyboard
+ * to ask for: a virtual keyboard of this client gives the seat the capability
+ * and sends the alt+Tab. */
+static void keyboard_setup(void)
+{
+	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	struct xkb_keymap *map = ctx ? xkb_keymap_new_from_names(ctx, NULL,
+		XKB_KEYMAP_COMPILE_NO_FLAGS) : NULL;
+	char *str = map ? xkb_keymap_get_as_string(map, XKB_KEYMAP_FORMAT_TEXT_V1) : NULL;
+
+	if (!seat || !vk_mgr || !str)
+		fail("no wl_seat, virtual keyboard manager or keymap");
+	size_t size = strlen(str) + 1;
+	int fd = memfd_create("pw-tile-keymap", 0);
+	if (fd < 0 || ftruncate(fd, size) < 0)
+		fail("memfd");
+	void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (p == MAP_FAILED)
+		fail("mmap");
+	memcpy(p, str, size);
+	munmap(p, size);
+	wl_seat_add_listener(seat, &seat_listener, NULL);
+	vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vk_mgr, seat);
+	zwp_virtual_keyboard_v1_keymap(vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, size);
+	wl_display_roundtrip(dpy);
+	wl_display_roundtrip(dpy);
+	if (!keyboard)
+		fail("the seat never offered a keyboard");
+}
+
+static void vk_key(uint32_t code, uint32_t state)
+{
+	zwp_virtual_keyboard_v1_key(vkbd, now_ms(), code, state);
+	wl_display_roundtrip(dpy);
+}
+
+static void alt_tab(void)
+{
+	/* a virtual keyboard's modifier state is what the client sets (Mod1 is
+	 * alt in the default keymap), key events do not change it */
+	zwp_virtual_keyboard_v1_modifiers(vkbd, 8, 0, 0, 0);
+	vk_key(15, WL_KEYBOARD_KEY_STATE_PRESSED);
+	vk_key(15, WL_KEYBOARD_KEY_STATE_RELEASED);
+	zwp_virtual_keyboard_v1_modifiers(vkbd, 0, 0, 0, 0);
+	wl_display_roundtrip(dpy);
+}
+
+/* w (NULL: nobody) holds the keyboard focus, and the activated state agrees. */
+static void expect_kfocus(const char *step, struct win *w)
+{
+	settle(300);
+	if ((w ? w->surface : NULL) != kfocus)
+		fail("%s: the keyboard focus is not on %s", step, w ? w->name : "nobody");
+	for (int i = 0; i < MAX_WINS; i++)
+		if (wins[i] && wins[i]->activated != (wins[i] == w))
+			fail("%s: %s activated=%d", step, wins[i]->name, wins[i]->activated);
+	printf("pw-tile-client: %s: keyboard focus on %s\n", step, w ? w->name : "nobody");
+	fflush(stdout);
+}
+
+/* keep: [layout] focus = tile-a, so tile-b (the second app) never takes the
+ * keyboard when it maps; without the key it does, as every window does. */
+static void focus(bool keep)
+{
+	struct win a, b, o;
+
+	keyboard_setup();
+	open_win(&a, "tile-a");
+	expect_kfocus("a alone", &a);
+	open_win(&b, "tile-b");
+	expect_size("pair", &a, 720, 640);
+	expect_kfocus("b mapped", keep ? &a : &b);
+	if (keep && b.n_kenter != 0)
+		fail("b mapped: tile-b got the keyboard for a moment");
+
+	/* the partner restarts, as the player does */
+	close_win(&b);
+	expect_kfocus("b closed", &a);
+	open_win(&b, "tile-b");
+	expect_kfocus("b restarted", keep ? &a : &b);
+	if (keep && b.n_kenter != 0)
+		fail("b restarted: tile-b got the keyboard for a moment");
+
+	/* alt+Tab still moves it between the pair, both ways */
+	alt_tab();
+	expect_kfocus("alt+Tab", keep ? &b : &a);
+	alt_tab();
+	expect_kfocus("alt+Tab back", keep ? &a : &b);
+
+	/* a window outside the stack takes it as ever */
+	open_win(&o, "other");
+	expect_kfocus("other mapped", &o);
+
+	close_win(&o);
+	close_win(&b);
+	close_win(&a);
+	wl_display_roundtrip(dpy);
 }
 
 static void landscape(void)
@@ -572,14 +753,15 @@ static void pixels(const char *dir)
 int main(int argc, char **argv)
 {
 	static const char *const modes[] = { "landscape", "portrait", "pan", "pan-zone",
-		"nopan", "pan-landscape", "pixels", "pixels-zone" };
+		"nopan", "pan-landscape", "pixels", "pixels-zone", "focus-keep",
+		"focus-default" };
 	bool known = false;
 
 	for (unsigned i = 0; argc >= 2 && i < sizeof(modes) / sizeof(modes[0]); i++)
 		known |= !strcmp(argv[1], modes[i]);
 	if (!known || argc != (!strncmp(argv[1], "pixels", 6) ? 3 : 2)) {
 		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|pan-zone|"
-			"nopan|pan-landscape|pixels DIR|pixels-zone DIR\n");
+			"nopan|pan-landscape|focus-keep|focus-default|pixels DIR|pixels-zone DIR\n");
 		return 2;
 	}
 	alarm(30);
@@ -599,6 +781,8 @@ int main(int argc, char **argv)
 		portrait();
 	else if (!strcmp(argv[1], "pan") || !strcmp(argv[1], "pan-zone"))
 		pan();
+	else if (!strcmp(argv[1], "focus-keep") || !strcmp(argv[1], "focus-default"))
+		focus(!strcmp(argv[1], "focus-keep"));
 	else if (!strcmp(argv[1], "nopan"))
 		nopan();
 	else if (!strcmp(argv[1], "pan-landscape"))

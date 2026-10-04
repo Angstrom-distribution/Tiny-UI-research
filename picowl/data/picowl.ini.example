@@ -199,6 +199,13 @@ code:155 = rotate
 # 25 percent. alt+Tab moves the keyboard between the two while one has it.
 # stack = mediaplayer, havoc
 #
+# focus: one of the two stack apps keeps the keyboard when the other one maps,
+# so a player which starts or restarts later does not take the keys of the
+# on-screen keyboard from the terminal. Touching a window and alt+Tab still
+# move it. A name outside the stack is logged and ignored. Default: the newly
+# mapped window takes the keyboard.
+# focus = havoc
+#
 # While both are mapped and split top and bottom (portrait), a keyboard in one
 # of these layer-shell namespaces (anchored to the bottom, not to the top, with
 # or without an exclusive zone; the shipped wvkbd-ipaq has none) does not shrink

@@ -5,6 +5,8 @@
 # bottom anchored layer surface, without and with an exclusive zone) which pans
 # the pair instead of resizing it, or, with [layout] pan empty or with the pair
 # side by side, shrinks it (a keyboard with a zone) or leaves it (one without).
+# [layout] focus keeps the wl_keyboard focus on one app of the pair while the
+# other maps; the client holds a virtual keyboard to get a wl_keyboard at all.
 # usage: tile-e2e.sh PICOWL PW_TILE_CLIENT
 PICOWL=$1
 CLIENT=$2
@@ -90,6 +92,19 @@ cat >"$DIR/pan-landscape.ini" <<EOF
 stack = tile-a, tile-b
 EOF
 run pan-landscape "$DIR/pan-landscape.ini"
+
+# the keyboard stays with the named app when the other maps or restarts, and
+# goes to the newest window as before without the key
+cat >"$DIR/focus.ini" <<EOF
+[output]
+* = 90
+
+[layout]
+stack = tile-a, tile-b
+focus = tile-a
+EOF
+run focus-keep "$DIR/focus.ini"
+run focus-default "$DIR/pan.ini"
 
 rm -rf "$DIR"
 echo "tile-e2e: ok"
