@@ -3,6 +3,7 @@ test_config_exe = executable(
   'test-config.c',
   '../src/config.c',
   '../src/rotate.c',
+  '../src/subpixel.c',
   '../src/copytype.c',
   protocol_headers,
   dependencies: [wlroots, wayland_server, xkbcommon, libdrm,
@@ -238,6 +239,11 @@ test('wvkbd-patches-sync', find_program('sh'),
   args: [files('patches-sync.sh'),
          meson.project_source_root() / 'oe/recipes-graphics/wvkbd/files',
          meson.project_source_root() / 'subprojects/packagefiles/wvkbd'])
+
+# The stripe order of a panel as a client sees it, from the layout and the
+# transform.
+test('subpixel', executable('test-subpixel', 'test-subpixel.c', '../src/subpixel.c',
+  include_directories: include_directories('../src')))
 
 # picowl-panel without wayland: value mapping, text, layout, touch, font,
 # drawing and sysfs access.

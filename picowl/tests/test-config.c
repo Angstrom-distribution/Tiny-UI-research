@@ -14,6 +14,7 @@ static int test_default_config(void)
 	struct pw_config *c = pw_config_default();
 	assert(c != NULL);
 	assert(c->render_format == DRM_FORMAT_RGB565);
+	assert(c->subpixel == -1); /* not set: the connector's own value stays */
 	assert(c->idle_timeout_ms == 60000);
 	assert(c->background[0] == 0.1f);
 	assert(c->background[1] == 0.1f);
@@ -83,7 +84,8 @@ static int test_load_config(void)
 	wl_list_for_each(t, &c->transforms, link) {
 		transform_count++;
 	}
-	assert(transform_count >= 2); /* DSI-1 and * */
+	assert(transform_count == 2); /* DSI-1 and *: "subpixel" is not an output */
+	assert(c->subpixel == 5); /* vertical_bgr */
 
 	/* Check autostart commands were parsed */
 	assert(!wl_list_empty(&c->autostart));

@@ -12,6 +12,14 @@ format = RGB565
 # "*" matches any output without its own entry.
 # DSI-1 = 90
 # * = normal
+# Subpixel layout of the panel (wl_output.subpixel), in its native orientation:
+# unknown (default: the backend's value), none, horizontal_rgb, horizontal_bgr,
+# vertical_rgb, vertical_bgr. Clients such as picowl-panel use it to draw
+# subpixel text; rotation is taken care of (see README, [output] section).
+# Per board, as told by the owner and not checked against datasheets:
+#   iPAQs (h2200 and the other portrait panels)  horizontal_rgb
+#   h3900 (a landscape panel in hardware)        vertical_rgb
+# subpixel = horizontal_rgb
 
 [idle]
 # Legacy: milliseconds of inactivity before the screen is blanked; 0 disables.

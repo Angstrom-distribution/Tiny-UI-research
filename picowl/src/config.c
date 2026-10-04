@@ -10,6 +10,7 @@
 #include <wayland-util.h>
 #include <drm_fourcc.h>
 #include "picowl.h"
+#include "subpixel.h"
 
 
 /* --- Helpers ----------------------------------------------------------- */
@@ -431,6 +432,7 @@ struct pw_config *pw_config_default(void)
 	if (!c)
 		return NULL;
 	c->render_format = DRM_FORMAT_RGB565;
+	c->subpixel = -1;
 	wl_list_init(&c->transforms);
 	wl_list_init(&c->autostart);
 	wl_list_init(&c->keybindings);
@@ -607,6 +609,13 @@ struct pw_config *pw_config_load(const char *path)
 				if (fmt)
 					c->render_format = fmt;
 			}
+		} else if (strcmp(section, "output") == 0 && strcmp(key, "subpixel") == 0) {
+			/* Not an output name: no connector is called that. */
+			int sp;
+			if (pw_subpixel_parse(val, &sp))
+				c->subpixel = sp;
+			else
+				pw_log(WLR_ERROR, "Unknown subpixel layout: %s", val);
 		} else if (strcmp(section, "output") == 0) {
 			/* output name = transform */
 			struct pw_output_transform *t = calloc(1, sizeof(*t));

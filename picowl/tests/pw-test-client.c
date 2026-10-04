@@ -11,6 +11,8 @@
  *   --video FPS           after the first frame, redraw the window (a stripe
  *                         moves over the colour) and commit it FPS times a
  *                         second for the --linger time, as a video player does
+ *   --probe-output        print wl_output.geometry subpixel and transform
+ *                         ("output subpixel=NAME transform=N") and exit
  *   --expect-keymap       bind wl_seat, require the keyboard capability, create
  *                         a wl_keyboard and fail unless it gets an xkb_v1
  *                         keymap with a size above 0 */
@@ -63,6 +65,27 @@ static const char *expect[MAX_EXPECT]; /* --expect-global NAME */
 static bool expect_seen[MAX_EXPECT];
 static int n_expect;
 static struct wl_seat *seat;
+static int out_subpixel = -1, out_transform = -1;
+static bool out_bound;
+
+static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw,
+	int32_t ph, int32_t subpixel, const char *make, const char *model, int32_t transform)
+{
+	(void)d; (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)make; (void)model;
+	out_subpixel = subpixel;
+	out_transform = transform;
+}
+static void out_mode(void *d, struct wl_output *o, uint32_t f, int32_t w, int32_t h, int32_t r)
+{
+	(void)d; (void)o; (void)f; (void)w; (void)h; (void)r;
+}
+static void out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
+static void out_scale(void *d, struct wl_output *o, int32_t f) { (void)d; (void)o; (void)f; }
+static void out_name(void *d, struct wl_output *o, const char *n) { (void)d; (void)o; (void)n; }
+static void out_desc(void *d, struct wl_output *o, const char *n) { (void)d; (void)o; (void)n; }
+static const struct wl_output_listener out_listener = {
+	out_geometry, out_mode, out_done, out_scale, out_name, out_desc,
+};
 static uint32_t seat_caps;
 static bool kb_keymap_seen;
 static uint32_t kb_keymap_format, kb_keymap_size;
@@ -164,6 +187,11 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	if (!strcmp(iface, wl_seat_interface.name)) {
 		seat = wl_registry_bind(r, name, &wl_seat_interface, 1);
 		wl_seat_add_listener(seat, &seat_listener, NULL);
+	} else if (!strcmp(iface, wl_output_interface.name) && !out_bound) {
+		struct wl_output *o = wl_registry_bind(r, name, &wl_output_interface,
+			ver < 4 ? ver : 4);
+		wl_output_add_listener(o, &out_listener, NULL);
+		out_bound = true;
 	} else if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
@@ -526,7 +554,7 @@ int main(int argc, char **argv)
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
 	int zc_count = 0;
 	bool probe = false, readback = false;
-	bool want_inhibit = false, want_keymap = false;
+	bool want_inhibit = false, want_keymap = false, probe_output = false;
 	int linger = 0;
 	const char *app_id = "picowl-test-client";
 	for (int i = 1; i < argc; i++) {
@@ -543,6 +571,8 @@ int main(int argc, char **argv)
 			readback = true;
 		else if (!strcmp(argv[i], "--app-id") && i + 1 < argc)
 			app_id = argv[++i];
+		else if (!strcmp(argv[i], "--probe-output"))
+			probe_output = true;
 		else if (!strcmp(argv[i], "--inhibit"))
 			want_inhibit = true;
 		else if (!strcmp(argv[i], "--expect-keymap"))
@@ -571,6 +601,18 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (probe_output) {
+		static const char *const sp[] = { "unknown", "none", "horizontal_rgb",
+			"horizontal_bgr", "vertical_rgb", "vertical_bgr" };
+		if (out_subpixel < 0 || out_subpixel > 5) {
+			fprintf(stderr, "picowl-test-client: no wl_output geometry\n");
+			return 1;
+		}
+		printf("picowl-test-client: output subpixel=%s transform=%d\n", sp[out_subpixel],
+			out_transform);
+		fflush(stdout);
+		return 0;
+	}
 	if (want_keymap)
 		return run_expect_keymap(dpy);
 	if (n_expect) {

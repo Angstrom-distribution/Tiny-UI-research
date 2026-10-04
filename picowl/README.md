@@ -90,6 +90,8 @@ DSI-1 = 90
 * = normal
 ```
 
+`subpixel = unknown|none|horizontal_rgb|horizontal_bgr|vertical_rgb|vertical_bgr` (in the same section; no output is called "subpixel") sets the subpixel layout that `wl_output.geometry` advertises, so that a client can draw text for the panel's colour stripes (picowl-panel does, see Panel). It is the layout of the panel itself, in its native orientation, as the protocol defines it: clients combine it with the `transform` of the same event. `horizontal_rgb` is red at the left of the panel as it is built (the iPAQ h2200: its 240x320 panel is portrait). With software rotation the transform is the configured rotation and the layout stays the native one, so the same event tells a client both. With hardware rotation picowl sends the transform `normal` (the display turns the picture, the client sees an already rotated output), so the layout is advertised as the client sees it: `horizontal_rgb` on a panel rotated by 90 is sent as `vertical_rgb`, and a client that reads layout and transform together reaches the same stripe order either way. Not set: the value the backend reports stays (the DRM connector's, which is `unknown` for most handheld panels, and the headless output's). The key applies to every output. A wrong name is logged and ignored. The layout of each board is a property of its panel and not detected; the iPAQ values are the owner's, not taken from a datasheet: `data/picowl.ini.example` lists them.
+
 ### [rotation] section
 
 Per-output rotation mode: `<output-name> = <mode>` (`*` matches any output).

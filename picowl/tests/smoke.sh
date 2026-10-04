@@ -71,6 +71,10 @@ OUT=$("$CLIENT" --expect-global zwp_input_method_manager_v2 2>&1) || fail "input
 # The older path stays for GTK+2 clients and OSK function keys.
 OUT=$("$CLIENT" --expect-global zwp_virtual_keyboard_manager_v1 2>&1) || fail "virtual-keyboard global missing: $OUT"
 
+# Nothing configured: the headless output has no known subpixel layout.
+OUT=$("$CLIENT" --probe-output 2>&1) || fail "probe-output failed: $OUT"
+case "$OUT" in *"output subpixel=unknown transform=0"*) ;; *) fail "default subpixel is not unknown: $OUT" ;; esac
+
 # Without any input device (WLR_LIBINPUT_NO_DEVICES) a client which binds
 # wl_keyboard on the capability, as the media player does at startup, still
 # gets a keymap; with none it ignores every key.
@@ -163,6 +167,39 @@ case "$OUT" in *"mapped 240x320 "*) ;; *) fail "output is not 240x320: $OUT" ;; 
 kill -TERM "$PID"
 wait "$PID" || fail "sized picowl exit status $?"
 PID=
+
+# [output] subpixel reaches wl_output.geometry, next to the transform. The
+# layout is the panel's own, whatever the rotation: clients combine the two.
+# subpix_case NAME INI WANT: picowl with that config, the client's report.
+subpix_case() {
+	printf '%s\n' "$2" >"$DIR/subpix.ini"
+	rm -f "$DIR"/wayland-*
+	PICOWL_HEADLESS_SIZE=240x320 "$PICOWL" -d 2 -c "$DIR/subpix.ini" >"$DIR/picowl.log" 2>&1 &
+	PID=$!
+	i=0
+	while ! ls "$DIR"/wayland-* >/dev/null 2>&1; do
+		kill -0 "$PID" 2>/dev/null || fail "$1: picowl exited early"
+		i=$((i + 1)); [ $i -gt 100 ] && fail "$1: socket never appeared"
+		sleep 0.05
+	done
+	SOCK=$(ls "$DIR"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1)
+	export WAYLAND_DISPLAY=$(basename "$SOCK")
+	OUT=$("$CLIENT" --probe-output 2>&1) || fail "$1: probe-output failed: $OUT"
+	case "$OUT" in *"output $3"*) ;; *) fail "$1: wanted '$3', got: $OUT" ;; esac
+	kill -TERM "$PID"
+	wait "$PID" || fail "$1: picowl exit status $?"
+	PID=
+}
+subpix_case h2200 '[output]
+subpixel = horizontal_rgb' 'subpixel=horizontal_rgb transform=0'
+subpix_case h2200-rotated '[output]
+subpixel = horizontal_rgb
+* = 90' 'subpixel=horizontal_rgb transform=1'
+subpix_case h3900 '[output]
+subpixel = vertical_rgb
+* = 270' 'subpixel=vertical_rgb transform=3'
+subpix_case bad-name '[output]
+subpixel = diagonal' 'subpixel=unknown transform=0'
 
 rm -rf "$DIR"
 echo "smoke: ok"

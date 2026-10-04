@@ -148,6 +148,7 @@ struct pw_config {
 	char *render_format_pref;  /* e.g. "RGB565", "XRGB8888"; NULL = RGB565 */
 	uint32_t render_format;    /* DRM fourcc resolved from the string */
 	struct wl_list transforms;  /* struct pw_output_transform */
+	int subpixel;              /* [output] subpixel: wl_output.subpixel of the panel, -1 = not set */
 	int idle_timeout_ms;       /* 0 = never blank */
 	struct wl_list autostart;   /* struct pw_autostart */
 	struct wl_list keybindings; /* struct pw_keybinding */
@@ -272,6 +273,7 @@ struct pw_output {
 	enum pw_rot_mode rot_mode;  /* resolved rotation mode (config) */
 	enum wl_output_transform rotation; /* current logical rotation */
 	bool hw_rotation;           /* rotation is done by the display hardware */
+	int native_subpixel;        /* wl_output.subpixel of the panel itself, whatever its rotation */
 	bool copy_type;             /* output copies damage to device memory */
 	char drm_driver[32];        /* DRM driver name, "" if not DRM */
 	struct wlr_swapchain *copy_swapchain; /* persistent buffer for copy-type outputs */

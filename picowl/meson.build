@@ -112,6 +112,7 @@ sources = files(
   'src/cursor.c',
   'src/cursorshape.c',
   'src/rotate.c',
+  'src/subpixel.c',
   'src/copytype.c',
   'src/copyrel.c',
   'src/zerocopy.c',

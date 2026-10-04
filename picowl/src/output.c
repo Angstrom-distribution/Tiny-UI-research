@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include "picowl.h"
 #include "power.h"
+#include "subpixel.h"
 
 #ifndef DRM_IOCTL_MODE_CLOSEFB
 struct drm_mode_closefb { uint32_t fb_id; uint32_t pad; };
@@ -67,6 +68,15 @@ static bool headless_size(int *w, int *h)
 	return true;
 }
 
+/* The subpixel layout goes out with every commit that sets a transform, so the
+ * two stay a pair: clients combine them (wl_output.geometry). */
+static void output_set_subpixel(struct pw_output *o, struct wlr_output_state *state,
+	enum wl_output_transform sent)
+{
+	wlr_output_state_set_subpixel(state,
+		pw_subpixel_advertise(o->native_subpixel, o->rotation, sent));
+}
+
 /* Fill state with "enabled + mode + transform + render format", testing the
  * configured render format and falling back to XRGB8888 if rejected. */
 static void output_build_enable(struct pw_output *o, struct wlr_output_state *state,
@@ -81,6 +91,7 @@ static void output_build_enable(struct pw_output *o, struct wlr_output_state *st
 	else if (wlr_output_is_headless(wo) && headless_size(&hw, &hh))
 		wlr_output_state_set_custom_mode(state, hw, hh, 0);
 	wlr_output_state_set_transform(state, transform);
+	output_set_subpixel(o, state, transform);
 
 	uint32_t fmt = o->server->config->render_format
 		? o->server->config->render_format : DRM_FORMAT_RGB565;
@@ -390,6 +401,9 @@ static void output_adopt(struct pw_server *server, struct wlr_output *wlr_output
 
 	output->rot_mode = pw_config_rot_mode(server->config, wlr_output->name);
 	output->rotation = output_config_transform(server->config, wlr_output->name);
+	/* Without a config key the connector's own value is the panel's. */
+	output->native_subpixel = server->config->subpixel >= 0 ?
+		server->config->subpixel : (int)wlr_output->subpixel;
 
 	output->copy_type = false;
 	output->drm_driver[0] = '\0';
@@ -582,6 +596,7 @@ void pw_output_rotate(struct pw_output *o, enum wl_output_transform t)
 		wlr_output_state_init(&state);
 		wlr_output_state_set_enabled(&state, true);
 		wlr_output_state_set_transform(&state, t);
+		output_set_subpixel(o, &state, t);
 		if (!wlr_output_commit_state(wo, &state))
 			pw_log(WLR_ERROR, "output %s: transform %d commit failed",
 				wo->name, (int)t);
@@ -620,6 +635,7 @@ static void output_set_power(struct pw_output *o, bool on)
 			wlr_output_state_init(&state);
 			wlr_output_state_set_enabled(&state, true);
 			wlr_output_state_set_transform(&state, o->rotation);
+			output_set_subpixel(o, &state, o->rotation);
 			ok = wlr_output_commit_state(wo, &state);
 			wlr_output_state_finish(&state);
 		}
