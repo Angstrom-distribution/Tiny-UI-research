@@ -172,6 +172,8 @@ if get_option('tools')
   subdir('tools')
 endif
 
+subdir('panel')
+
 if get_option('tests')
   subdir('tests')
 endif

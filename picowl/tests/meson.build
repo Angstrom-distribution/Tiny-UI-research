@@ -234,3 +234,9 @@ test('wvkbd-patches-sync', find_program('sh'),
   args: [files('patches-sync.sh'),
          meson.project_source_root() / 'oe/recipes-graphics/wvkbd/files',
          meson.project_source_root() / 'subprojects/packagefiles/wvkbd'])
+
+# picowl-panel without wayland: value mapping, text, layout, touch, font,
+# drawing and sysfs access.
+test('panel', executable('test-panel', 'test-panel.c',
+  link_with: pwpanel_lib,
+  include_directories: include_directories('../panel')))
