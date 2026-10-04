@@ -6,7 +6,10 @@
  *                         (default and maximum 2; 1 behaves as a v1 client)
  *   --expect-global NAME  fail unless the registry advertises NAME (repeatable)
  *   --probe               print what the picowl-buffer global announced and exit
- *   --readback            with --zerocopy: time 32-bit reads of buffer 0 */
+ *   --readback            with --zerocopy: time 32-bit reads of buffer 0
+ *   --expect-keymap       bind wl_seat, require the keyboard capability, create
+ *                         a wl_keyboard and fail unless it gets an xkb_v1
+ *                         keymap with a size above 0 */
 #define _GNU_SOURCE
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,6 +53,10 @@ static bool saw_no_global;         /* ... and the registry advertised it */
 static const char *expect[MAX_EXPECT]; /* --expect-global NAME */
 static bool expect_seen[MAX_EXPECT];
 static int n_expect;
+static struct wl_seat *seat;
+static uint32_t seat_caps;
+static bool kb_keymap_seen;
+static uint32_t kb_keymap_format, kb_keymap_size;
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -88,6 +95,54 @@ static const struct picowl_buffer_manager_v1_listener pbm_listener = {
 	pbm_format, pbm_copy_type, pbm_caching
 };
 
+static void seat_caps_cb(void *d, struct wl_seat *s, uint32_t caps)
+{
+	(void)d; (void)s;
+	seat_caps = caps;
+}
+static const struct wl_seat_listener seat_listener = { seat_caps_cb, NULL };
+
+static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t format, int32_t fd,
+	uint32_t size)
+{
+	(void)d; (void)k;
+	close(fd);
+	kb_keymap_seen = true;
+	kb_keymap_format = format;
+	kb_keymap_size = size;
+}
+static void kb_enter(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *sf,
+	struct wl_array *keys) { (void)d; (void)k; (void)s; (void)sf; (void)keys; }
+static void kb_leave(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *sf)
+	{ (void)d; (void)k; (void)s; (void)sf; }
+static void kb_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key,
+	uint32_t st) { (void)d; (void)k; (void)s; (void)t; (void)key; (void)st; }
+static void kb_mods(void *d, struct wl_keyboard *k, uint32_t s, uint32_t a, uint32_t b,
+	uint32_t c, uint32_t g) { (void)d; (void)k; (void)s; (void)a; (void)b; (void)c; (void)g; }
+static const struct wl_keyboard_listener kb_listener = {
+	kb_keymap, kb_enter, kb_leave, kb_key, kb_mods, NULL,
+};
+
+/* What a client that binds wl_keyboard on the capability does at startup. */
+static int run_expect_keymap(struct wl_display *dpy)
+{
+	if (!seat || !(seat_caps & WL_SEAT_CAPABILITY_KEYBOARD)) {
+		fprintf(stderr, "picowl-test-client: seat has no keyboard capability\n");
+		return 1;
+	}
+	struct wl_keyboard *kb = wl_seat_get_keyboard(seat);
+	wl_keyboard_add_listener(kb, &kb_listener, NULL);
+	wl_display_roundtrip(dpy);
+	if (!kb_keymap_seen || kb_keymap_format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 ||
+	    kb_keymap_size == 0) {
+		fprintf(stderr, "picowl-test-client: keymap seen=%d format=%u size=%u\n",
+			kb_keymap_seen, kb_keymap_format, kb_keymap_size);
+		return 1;
+	}
+	printf("picowl-test-client: keymap xkb_v1 size=%u\n", kb_keymap_size);
+	return 0;
+}
+
 static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	const char *iface, uint32_t ver)
 {
@@ -97,7 +152,10 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	for (int i = 0; i < n_expect; i++)
 		if (!strcmp(iface, expect[i]))
 			expect_seen[i] = true;
-	if (!strcmp(iface, wl_compositor_interface.name))
+	if (!strcmp(iface, wl_seat_interface.name)) {
+		seat = wl_registry_bind(r, name, &wl_seat_interface, 1);
+		wl_seat_add_listener(seat, &seat_listener, NULL);
+	} else if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
 		dmabuf = wl_registry_bind(r, name, &zwp_linux_dmabuf_v1_interface, 3);
@@ -435,7 +493,7 @@ int main(int argc, char **argv)
 	bool want_zc = getenv("PW_TEST_ZEROCOPY") && !strcmp(getenv("PW_TEST_ZEROCOPY"), "1");
 	int zc_count = 0;
 	bool probe = false, readback = false;
-	bool want_inhibit = false;
+	bool want_inhibit = false, want_keymap = false;
 	int linger = 0;
 	const char *app_id = "picowl-test-client";
 	for (int i = 1; i < argc; i++) {
@@ -454,6 +512,8 @@ int main(int argc, char **argv)
 			app_id = argv[++i];
 		else if (!strcmp(argv[i], "--inhibit"))
 			want_inhibit = true;
+		else if (!strcmp(argv[i], "--expect-keymap"))
+			want_keymap = true;
 		else if (!strcmp(argv[i], "--linger") && i + 1 < argc)
 			linger = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
@@ -472,6 +532,8 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (want_keymap)
+		return run_expect_keymap(dpy);
 	if (n_expect) {
 		for (int i = 0; i < n_expect; i++) {
 			if (!expect_seen[i]) {

@@ -1,10 +1,11 @@
 #!/bin/sh
 # Headless smoke test: picowl + wl_shm xdg-shell client.
-# usage: smoke.sh PICOWL PW_TEST_CLIENT PW_CAPTURE_CLIENT PW_IM_CLIENT
+# usage: smoke.sh PICOWL PW_TEST_CLIENT PW_CAPTURE_CLIENT PW_IM_CLIENT PW_KEY_CLIENT
 PICOWL=$1
 CLIENT=$2
 CAPTURE=$3
 IMCLIENT=$4
+KEYCLIENT=$5
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
@@ -69,6 +70,17 @@ OUT=$("$CLIENT" --expect-global zxdg_output_manager_v1 2>&1) || fail "xdg-output
 OUT=$("$CLIENT" --expect-global zwp_input_method_manager_v2 2>&1) || fail "input-method global missing: $OUT"
 # The older path stays for GTK+2 clients and OSK function keys.
 OUT=$("$CLIENT" --expect-global zwp_virtual_keyboard_manager_v1 2>&1) || fail "virtual-keyboard global missing: $OUT"
+
+# Without any input device (WLR_LIBINPUT_NO_DEVICES) a client which binds
+# wl_keyboard on the capability, as the media player does at startup, still
+# gets a keymap; with none it ignores every key.
+OUT=$("$CLIENT" --expect-keymap 2>&1) || fail "no keymap without a keyboard device: $OUT"
+echo "$OUT"
+# The seat's active keyboard goes away with the on-screen keyboard's virtual
+# keyboard: a client created afterwards must still get a keymap.
+OUT=$("$KEYCLIENT" 2>&1) || fail "virtual keyboard client failed: $OUT"
+OUT=$("$CLIENT" --expect-keymap 2>&1) || fail "no keymap after the virtual keyboard was destroyed: $OUT"
+echo "$OUT"
 
 # text-input to input-method relay: activate, commit_string and deactivate.
 OUT=$("$IMCLIENT" 2>&1) || fail "input method client failed: $OUT"

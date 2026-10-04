@@ -146,7 +146,7 @@ foreach mode : ['pixels', 'pixels-zone']
 endforeach
 
 test('smoke', find_program('sh'),
-  args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client],
+  args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client, pw_key_client],
   timeout: 30)
 
 test_touchhold_exe = executable('test-touchhold',
