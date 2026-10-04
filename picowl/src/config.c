@@ -841,6 +841,14 @@ struct pw_config *pw_config_load(const char *path)
 				parse_layout_stack(c, val);
 			} else if (strcmp(key, "pan") == 0) {
 				parse_layout_pan(c, val);
+			} else if (strcmp(key, "focus") == 0) {
+				/* checked against stack once the whole file is read, so
+				 * the order of the two keys does not matter */
+				char *focus = val[0] ? strdup(val) : NULL;
+				if (focus || !val[0]) {
+					free(c->focus);
+					c->focus = focus;
+				}
 			} else {
 				pw_log(WLR_ERROR, "Unknown key in [layout]: %s", key);
 			}
@@ -1030,6 +1038,14 @@ struct pw_config *pw_config_load(const char *path)
 	fclose(f);
 	free((void*)section);
 
+	if (c->focus && (c->n_stack != 2 || (strcmp(c->focus, c->stack[0]) != 0 &&
+			strcmp(c->focus, c->stack[1]) != 0))) {
+		pw_log(WLR_ERROR, "[layout] focus '%s' is not one of the two stack apps, ignoring it",
+			c->focus);
+		free(c->focus);
+		c->focus = NULL;
+	}
+
 	/* Log which config file was loaded */
 	if (loaded_path)
 		pw_log(WLR_INFO, "Loaded config from %s", loaded_path);
@@ -1163,6 +1179,7 @@ void pw_config_free(struct pw_config *config)
 	free(config->lease_allow);
 	free(config->stack[0]);
 	free(config->stack[1]);
+	free(config->focus);
 	for (int i = 0; i < config->n_pan; i++)
 		free(config->pan[i]);
 	free(config->pointercal);

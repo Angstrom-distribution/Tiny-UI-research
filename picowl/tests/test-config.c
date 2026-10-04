@@ -926,6 +926,36 @@ static int test_layout_config(void)
 	assert(c->n_pan == 2 && pw_config_pan_match(c, "b") && !pw_config_pan_match(c, "wvkbd"));
 	pw_config_free(c);
 
+	/* [layout] focus: off by default, one of the two stack names otherwise */
+	c = pw_config_default();
+	assert(c->focus == NULL);
+	pw_config_free(c);
+	struct { const char *text; const char *want; } focus_cases[] = {
+		{ "[layout]\nstack = a, b\nfocus = b\n", "b" },
+		{ "[layout]\nstack = a, b\nfocus =  a \n", "a" },
+		{ "[layout]\nfocus = a\nstack = a, b\n", "a" },	/* order of the keys */
+		{ "[layout]\nstack = a, b\nfocus = a\nfocus = b\n", "b" },
+		{ "[layout]\nstack = a, b\nfocus = a\nfocus =\n", NULL },
+		{ "[layout]\nstack = a, b\nfocus = c\n", NULL },
+		{ "[layout]\nstack = a, b\nfocus = A\n", NULL },
+		{ "[layout]\nstack = a, b\nfocus = a, b\n", NULL },
+		{ "[layout]\nfocus = a\n", NULL },	/* no stack, no tiling */
+		{ "[layout]\nstack = a\nfocus = a\n", NULL },
+		{ "[layout]\nstack = a, b\nfocus = a\nstack = c, d\n", NULL },
+	};
+	for (unsigned i = 0; i < sizeof(focus_cases) / sizeof(focus_cases[0]); i++) {
+		path = write_tmp_ini("picowl-test-layout.ini", focus_cases[i].text);
+		c = pw_config_load(path);
+		remove(path);
+		if (!c || (focus_cases[i].want ? !c->focus || strcmp(c->focus, focus_cases[i].want)
+				: c->focus != NULL))
+			fprintf(stderr, "focus case %u failed\n", i);
+		assert(c != NULL);
+		assert(focus_cases[i].want ? c->focus && strcmp(c->focus, focus_cases[i].want) == 0
+			: c->focus == NULL);
+		pw_config_free(c);
+	}
+
 	printf("✓ test_layout_config\n");
 	return 0;
 }

@@ -218,6 +218,10 @@ struct pw_config {
 	char *stack[2];
 	int n_stack;
 
+	/* [layout] focus: the stack app which keeps the keyboard when the other
+	 * one maps. NULL (default) or one of the two stack names. */
+	char *focus;
+
 	/* [layout] pan: namespaces of the bottom-anchored layer surfaces (the
 	 * on-screen keyboard) which move a tiled stack up instead of shrinking
 	 * it. Default "wvkbd"; n_pan is 0 when panning is off. */
