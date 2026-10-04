@@ -107,28 +107,38 @@ static bool output_hw_possible(struct pw_output *o, enum wl_output_transform t)
 		wlr_drm_connector_supports_hw_rotation(o->wlr_output, t);
 }
 
-/* Return to software rotation: the output must be disabled. Resets the
+/* Return to software rotation: disables the output if needed, resets the
  * plane rotation and enables with the transform. */
 static bool output_enable_software(struct pw_output *o)
 {
-	if (wlr_output_is_drm(o->wlr_output))
+	if (wlr_output_is_drm(o->wlr_output)) {
+		/* Resetting the plane rotation is refused while enabled. */
+		if (!output_commit_disable(o))
+			pw_log(WLR_ERROR, "output %s: disable before resetting "
+				"rotation failed", o->wlr_output->name);
 		wlr_drm_connector_set_hw_rotation(o->wlr_output,
 			WL_OUTPUT_TRANSFORM_NORMAL);
+	}
 	o->hw_rotation = false;
 	return output_commit_enable(o, wlr_output_preferred_mode(o->wlr_output),
 		o->rotation);
 }
 
-/* Apply o->rotation to an output that is currently disabled (initial
- * setup, unblank, or runtime rotation after a disabling commit), using
- * hardware rotation when possible. Leaves the output enabled. */
+/* Apply o->rotation, using hardware rotation when possible. Leaves the
+ * output enabled; it is disabled first if it is not already. */
 static bool output_enable_rotated(struct pw_output *o)
 {
 	struct wlr_output *wo = o->wlr_output;
 	enum wl_output_transform t = o->rotation;
 
-	if (output_hw_possible(o, t) &&
-			wlr_drm_connector_set_hw_rotation(wo, t)) {
+	/* The backend hands over an output that is already enabled, and the
+	 * plane rotation can only change while it is disabled. */
+	bool hw = output_hw_possible(o, t);
+	if (hw && !output_commit_disable(o))
+		pw_log(WLR_ERROR, "output %s: disable before hardware rotation "
+			"failed", wo->name);
+
+	if (hw && wlr_drm_connector_set_hw_rotation(wo, t)) {
 		/* The patch nulled current_mode: MODE is not stripped. */
 		struct wlr_output_mode *mode = wlr_output_preferred_mode(wo);
 		o->hw_rotation = true;
@@ -401,7 +411,7 @@ static void output_adopt(struct pw_server *server, struct wlr_output *wlr_output
 		wlr_output->name, output->drm_driver,
 		output->copy_type ? "yes" : "no", pw_rot_mode_name(output->rot_mode));
 
-	/* The output is still disabled here, as hardware rotation requires. */
+	/* output_enable_rotated turns the output off first if needed. */
 	bool ok = output_enable_rotated(output);
 	if (!ok) {
 		pw_log(WLR_ERROR, "output %s: commit failed", wlr_output->name);
