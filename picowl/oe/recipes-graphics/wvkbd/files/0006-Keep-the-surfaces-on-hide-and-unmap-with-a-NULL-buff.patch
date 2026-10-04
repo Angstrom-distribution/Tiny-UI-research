@@ -1,0 +1,2045 @@
+From 0a8e1b68a810c4726c5aced589fc2469145fe90c Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 14:09:04 +0200
+Subject: [PATCH 6/9] Keep the surfaces on hide and unmap with a NULL buffer
+
+hide() destroyed the layer surface, the popup, both wl_surfaces and their
+viewports, and show() made them again, which costs a configure round trip
+and four new shm buffers on every toggle of a 64 MiB handheld. The surfaces
+are now created on the first show and live on. hide() attaches a NULL buffer
+to the keyboard and the popup and commits; show() attaches the buffers
+again. The protocol buffers, viewports and fractional-scale object are
+untouched by a toggle.
+
+Layer-shell and xdg-shell return an unmapped surface to the unconfigured
+state: it is configured again only by a configure that answers a commit
+without a buffer made after the unmap, and a buffer attached before that
+is a protocol error. A configure that was already in flight when hide() ran
+answers nothing, so it must not count. The decision when to map is a small
+state (visible, configured, mapped, awaiting) in visibility.c without any
+Wayland calls. A surface looks at a configure only while it is mapped or
+after it asked for one; a leftover that arrives while hidden is neither
+acked nor recorded. show() therefore commits without a buffer and waits for
+the configure, except after a hide() that came before the first configure,
+when nothing was unmapped and the pending answer is still the right one.
+Its probe of the output size, which round-trips to the compositor, also
+drains every leftover before the commit. A show() after a rotation, a size
+or a scale change finds the stored geometry stale and renegotiates the same
+way, and a configure with a new size resizes the buffers and drops the
+popup role, which fixes its size when it is created. The probe goes
+through a temporary layer surface, because the persistent surface cannot
+learn about a rotation that happened while it was unmapped.
+
+The key popup follows the same rules in the same state machine. While
+show_popup is false the popup is never created: no wl_surface, viewport,
+positioner or xdg_popup, and no buffers (kbd_popup_buffers allocates the
+two ARGB buffers, twice the keyboard height, only when the popup is on and
+frees them when it is turned off), so the 384 kB it costs at 240x100 are
+really saved. When it is on, the role object is made once the keyboard is
+mapped, a hide leaves it unconfigured and the next show commits it again
+and waits, and xdg_popup.popup_done, sent when the compositor dismisses it,
+destroys the role object so that the next show makes a new one. Touches no
+longer wait for the popup to be configured, so a dismissed popup cannot
+leave a keyboard that shows but ignores input.
+
+--hidden, SIGUSR1, SIGUSR2 and SIGRTMIN, and the --auto activate and
+deactivate callbacks go through the same show() and hide(). Toggling now
+follows what the user asked for rather than the last configure, so a toggle
+between show() and its configure hides again. Key release on hide and the
+reset to the first layer on show are kept.
+
+setup_buffer returned early with ds->width and height already updated, and
+when mmap failed it left pool_data as MAP_FAILED after the old mapping had
+been unmapped. Buffers are now built into temporaries and only then replace
+the old ones, and drwsurf_resize builds both before replacing either, so a
+failure leaves the old size, scale, mappings and cairo surfaces exactly as
+they were. kbd_resize reports it and main restores the keyboard size. The
+first resize has no old buffers: the surface then stays unusable, drawing
+and attaching are skipped and the surface is not mapped until a later
+configure succeeds. When only the popup fails it is dropped and skipped.
+
+drwsurf_free releases the damage regions along with the buffers, which
+drwsurf_drop_buffers keeps for a later resize, and main calls it on exit, so
+that a leak checker has nothing of ours to report.
+
+Tests: test-visibility covers the state machine (a configure in flight at
+hide, show after hide asking for a configure, stale geometry, toggle
+bursts, duplicate signals, auto activate and deactivate, the popup left
+unconfigured by a hide, popup_done while hidden and while shown, a popup
+that is off). test-popup replaces allocate_shm_file with a counter and
+checks that a keyboard without popup allocates two buffers and none for the
+popup, that turning it on makes them on demand and turning it off frees
+them. test-buffer replaces allocate_shm_file to force an allocation
+failure, an mmap failure and a failure of the second buffer, and checks
+that size, scale, mappings and drawing are unchanged, that a retry works,
+and that a surface without buffers skips every draw call. The tests free
+what they allocate, so they are clean under the address and leak
+sanitizers. Whether a compositor sends the configure a remap waits for,
+accepts the NULL attach and the popup role rebuild, and keeps the exclusive
+zone across a toggle needs a real compositor and is not covered.
+Upstream-Status: Pending
+---
+ drw.c                   | 198 ++++++++++++++++------
+ drw.h                   |  16 +-
+ keyboard.c              |  35 +++-
+ keyboard.h              |   8 +-
+ main.c                  | 364 +++++++++++++++++++++++++++-------------
+ meson.build             |   1 +
+ tests/meson.build       |  20 +++
+ tests/test-buffer.c     | 207 +++++++++++++++++++++++
+ tests/test-draw.c       |  20 +++
+ tests/test-popup.c      | 146 ++++++++++++++++
+ tests/test-visibility.c | 318 +++++++++++++++++++++++++++++++++++
+ visibility.c            | 125 ++++++++++++++
+ visibility.h            |  72 ++++++++
+ wvkbd.1.scd             |   2 +-
+ 14 files changed, 1357 insertions(+), 175 deletions(-)
+ create mode 100644 tests/test-buffer.c
+ create mode 100644 tests/test-popup.c
+ create mode 100644 tests/test-visibility.c
+ create mode 100644 visibility.c
+ create mode 100644 visibility.h
+
+diff --git a/drw.c b/drw.c
+index bbc5c95..8cc1686 100644
+--- a/drw.c
++++ b/drw.c
+@@ -157,12 +157,40 @@ void drwsurf_damage(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t w, uint
+     drwsurf_register_frame_cb(ds);
+ }
+ 
+-void
++bool
++drwsurf_usable(const struct drwsurf *ds)
++{
++    return ds->back_buffer && ds->display_buffer &&
++           ds->back_buffer->cairo_surf && ds->display_buffer->cairo_surf;
++}
++
++static void drwbuf_free(struct drwbuf *db);
++static bool drwbuf_build(struct drwsurf *ds, struct drwbuf *out, uint32_t w,
++                         uint32_t h, double scale);
++
++bool
+ drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s)
+ {
++    uint32_t pw = ceil(w * s), ph = ceil(h * s);
++    struct drwbuf back = {0}, display = {0};
++
++    /* Replacing one buffer and failing on the other would leave the two at
++     * different sizes, and the old one would no longer match ds. */
++    if (!drwbuf_build(ds, &back, pw, ph, s) ||
++        !drwbuf_build(ds, &display, pw, ph, s)) {
++        drwbuf_free(&back);
++        drwbuf_free(&display);
++        return false;
++    }
++
++    drwbuf_free(ds->back_buffer);
++    drwbuf_free(ds->display_buffer);
++    *ds->back_buffer = back;
++    *ds->display_buffer = display;
++
+     ds->scale = s;
+-    ds->width = ceil(w * s);
+-    ds->height = ceil(h * s);
++    ds->width = pw;
++    ds->height = ph;
+ 
+     if (ds->damage)
+         cairo_region_destroy(ds->damage);
+@@ -172,9 +200,32 @@ drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s)
+     ds->backport_damage = cairo_region_create();
+ 
+     ds->released = true;
++    return true;
++}
++
++void
++drwsurf_drop_buffers(struct drwsurf *ds)
++{
++    drwbuf_free(ds->back_buffer);
++    drwbuf_free(ds->display_buffer);
++}
+ 
+-    setup_buffer(ds, ds->back_buffer);
+-    setup_buffer(ds, ds->display_buffer);
++void
++drwsurf_free(struct drwsurf *ds)
++{
++    if (ds->frame_cb) {
++        wl_callback_destroy(ds->frame_cb);
++        ds->frame_cb = NULL;
++    }
++    drwsurf_drop_buffers(ds);
++    /* drwsurf_resize makes the regions and only a later resize replaces
++     * them, so without this they outlive the surface. */
++    if (ds->damage)
++        cairo_region_destroy(ds->damage);
++    if (ds->backport_damage)
++        cairo_region_destroy(ds->backport_damage);
++    ds->damage = ds->backport_damage = NULL;
++    ds->attached = false;
+ }
+ 
+ void
+@@ -207,12 +258,42 @@ drwsurf_backport(struct drwsurf *ds)
+ void
+ drwsurf_attach(struct drwsurf *ds)
+ {
++    if (!drwsurf_usable(ds))
++        return;
+     wl_surface_attach(ds->surf, ds->back_buffer->buf, 0, 0);
+     wl_surface_commit(ds->surf);
+     ds->released = false;
+     ds->attached = true;
+ }
+ 
++void
++drwsurf_map(struct drwsurf *ds)
++{
++    if (!drwsurf_usable(ds))
++        return;
++    /* Damage recorded while unmapped was never sent and is moot: the
++     * compositor has no content for this surface at all. */
++    cairo_region_subtract(ds->damage, ds->damage);
++    wl_surface_damage(ds->surf, 0, 0, INT32_MAX, INT32_MAX);
++    drwsurf_attach(ds);
++}
++
++void
++drwsurf_unmap(struct drwsurf *ds)
++{
++    if (!ds->surf)
++        return;
++    /* A frame callback for a surface without a buffer may never fire, and
++     * drwsurf_register_frame_cb would then refuse to ask again. */
++    if (ds->frame_cb) {
++        wl_callback_destroy(ds->frame_cb);
++        ds->frame_cb = NULL;
++    }
++    wl_surface_attach(ds->surf, NULL, 0, 0);
++    wl_surface_commit(ds->surf);
++    ds->attached = false;
++}
++
+ void
+ drwsurf_flip(struct drwsurf *ds)
+ {
+@@ -322,6 +403,8 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+               uint32_t w, uint32_t h, uint32_t b, const char *label,
+               struct text_font *font)
+ {
++    if (!drwsurf_usable(ds))
++        return;
+     drwsurf_flip(ds);
+     struct drwbuf *d = ds->back_buffer;
+     drwsurf_damage(ds, x, y, w, h);
+@@ -332,9 +415,8 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+         return;
+     }
+ 
+-    /* ds->width and ds->height already describe a new size when setup_buffer
+-     * failed part way, while the surface is still the old one. The blitter
+-     * must only trust the memory that cairo actually draws into. */
++    /* The blitter must only trust the memory that cairo actually draws into,
++     * not the size recorded in ds. */
+     if (!d->cairo_surf)
+         return;
+     cairo_surface_flush(d->cairo_surf);
+@@ -363,6 +445,8 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+ void
+ drw_do_clear(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+ {
++    if (!drwsurf_usable(ds))
++        return;
+     drwsurf_flip(ds);
+     struct drwbuf *d = ds->back_buffer;
+     drwsurf_damage(ds, x, y, w, h);
+@@ -380,6 +464,8 @@ void
+ drw_do_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                  uint32_t w, uint32_t h, bool over, int rounding)
+ {
++    if (!drwsurf_usable(ds))
++        return;
+     drwsurf_flip(ds);
+     struct drwbuf *d = ds->back_buffer;
+     drwsurf_damage(ds, x, y, w, h);
+@@ -434,62 +520,76 @@ drw_over_rectangle(struct drwsurf *d, Color color, uint32_t x, uint32_t y,
+     drw_do_rectangle(d, color, x, y, w, h, true, rounding);
+ }
+ 
+-uint32_t
+-setup_buffer(struct drwsurf *drwsurf, struct drwbuf *drwbuf)
++static void
++drwbuf_free(struct drwbuf *db)
++{
++    if (db->cairo)
++        cairo_destroy(db->cairo);
++    if (db->cairo_surf)
++        cairo_surface_destroy(db->cairo_surf);
++    if (db->buf)
++        wl_buffer_destroy(db->buf);
++    if (db->pool_data)
++        munmap(db->pool_data, db->size);
++    memset(db, 0, sizeof(*db));
++}
++
++/* Builds a buffer without touching any existing one. */
++static bool
++drwbuf_build(struct drwsurf *ds, struct drwbuf *out, uint32_t w, uint32_t h,
++             double scale)
+ {
+     uint32_t stride, size;
+-    if (!drw_buffer_geometry(drwsurf->format, drwsurf->width, drwsurf->height,
+-                             &stride, &size)) {
+-        fprintf(stderr, "buffer geometry %ux%u is invalid\n", drwsurf->width,
+-                drwsurf->height);
+-        return 1;
++    if (!drw_buffer_geometry(ds->format, w, h, &stride, &size)) {
++        fprintf(stderr, "buffer geometry %ux%u is invalid\n", w, h);
++        return false;
+     }
+-    uint32_t prev_size = drwbuf->size;
+-    drwbuf->size = size;
+ 
+-    int fd = allocate_shm_file(drwbuf->size);
++    int fd = allocate_shm_file(size);
+     if (fd == -1) {
+-        return 1;
++        fprintf(stderr, "cannot allocate %u bytes of shared memory\n", size);
++        return false;
+     }
+ 
+-    if (drwbuf->pool_data)
+-        munmap(drwbuf->pool_data, prev_size);
+-    drwbuf->pool_data =
+-        mmap(NULL, drwbuf->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+-    if (drwbuf->pool_data == MAP_FAILED) {
++    void *mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (mem == MAP_FAILED) {
++        fprintf(stderr, "cannot map %u bytes of shared memory\n", size);
+         close(fd);
+-        return 1;
++        return false;
+     }
+ 
+-    if (drwbuf->buf)
+-        wl_buffer_destroy(drwbuf->buf);
++    memset(out, 0, sizeof(*out));
++    out->size = size;
++    out->pool_data = mem;
+     /* no shm global means a plain memory target (unit tests) */
+-    if (drwsurf->ctx->shm) {
+-        struct wl_shm_pool *pool =
+-            wl_shm_create_pool(drwsurf->ctx->shm, fd, drwbuf->size);
+-        drwbuf->buf = wl_shm_pool_create_buffer(
+-            pool, 0, drwsurf->width, drwsurf->height, stride,
+-            drw_wl_format(drwsurf->format));
++    if (ds->ctx->shm) {
++        struct wl_shm_pool *pool = wl_shm_create_pool(ds->ctx->shm, fd, size);
++        out->buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride,
++                                             drw_wl_format(ds->format));
+         wl_shm_pool_destroy(pool);
+-        wl_buffer_add_listener(drwbuf->buf, &buffer_listener, drwsurf);
+-    } else {
+-        drwbuf->buf = NULL;
++        wl_buffer_add_listener(out->buf, &buffer_listener, ds);
+     }
+     close(fd);
+ 
++    out->cairo_surf = cairo_image_surface_create_for_data(
++        out->pool_data, drw_cairo_format(ds->format), w, h, stride);
++    out->cairo = cairo_create(out->cairo_surf);
++    cairo_scale(out->cairo, scale, scale);
++    cairo_set_antialias(out->cairo, CAIRO_ANTIALIAS_NONE);
++    cairo_save(out->cairo);
++    return true;
++}
+ 
+-    if (drwbuf->cairo_surf)
+-        cairo_surface_destroy(drwbuf->cairo_surf);
+-    drwbuf->cairo_surf = cairo_image_surface_create_for_data(
+-        drwbuf->pool_data, drw_cairo_format(drwsurf->format), drwsurf->width,
+-        drwsurf->height, stride);
+-
+-    if (drwbuf->cairo)
+-        cairo_destroy(drwbuf->cairo);
+-    drwbuf->cairo = cairo_create(drwbuf->cairo_surf);
+-    cairo_scale(drwbuf->cairo, drwsurf->scale, drwsurf->scale);
+-    cairo_set_antialias(drwbuf->cairo, CAIRO_ANTIALIAS_NONE);
+-    cairo_save(drwbuf->cairo);
+-
++/* Kept for callers that rebuild one buffer at the surface's current size.
++ * On failure the buffer is left as it was. */
++uint32_t
++setup_buffer(struct drwsurf *drwsurf, struct drwbuf *drwbuf)
++{
++    struct drwbuf fresh;
++    if (!drwbuf_build(drwsurf, &fresh, drwsurf->width, drwsurf->height,
++                      drwsurf->scale))
++        return 1;
++    drwbuf_free(drwbuf);
++    *drwbuf = fresh;
+     return 0;
+ }
+diff --git a/drw.h b/drw.h
+index 54efa04..69be558 100644
+--- a/drw.h
++++ b/drw.h
+@@ -57,8 +57,22 @@ bool drw_format_has_alpha(enum drw_format format);
+ bool drw_buffer_geometry(enum drw_format format, uint32_t width,
+                          uint32_t height, uint32_t *stride, uint32_t *size);
+ 
+-void drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s);
++/* Both buffers are built before either is replaced. Returns false and leaves
++ * the surface exactly as it was when the memory cannot be had. */
++bool drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s);
++/* False until a resize has succeeded; drawing is skipped meanwhile. */
++bool drwsurf_usable(const struct drwsurf *ds);
++/* Frees the buffers, so the surface is unusable until the next resize. */
++void drwsurf_drop_buffers(struct drwsurf *ds);
++/* Releases everything drwsurf_resize made, the damage regions as well, which
++ * drwsurf_drop_buffers keeps because a later resize reuses them. The wl_surface
++ * is not owned by the drwsurf. */
++void drwsurf_free(struct drwsurf *ds);
+ void drwsurf_attach(struct drwsurf *ds);
++/* Attach for the first time after an unmap: the whole buffer is new. */
++void drwsurf_map(struct drwsurf *ds);
++/* Attach no buffer, which unmaps the surface but keeps it and its buffers. */
++void drwsurf_unmap(struct drwsurf *ds);
+ 
+ typedef union {
+ 	uint8_t bgra[4];
+diff --git a/keyboard.c b/keyboard.c
+index 5a2aa01..d800339 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -735,14 +735,42 @@ kbd_draw_layout(struct kbd *kb)
+     }
+ }
+ 
+-void
++bool
++kbd_popup_buffers(struct kbd *kb, bool force)
++{
++    if (!kb->show_popup) {
++        /* Two ARGB buffers of twice the keyboard's size are what the popup
++         * costs, so an off popup holds none. */
++        if (drwsurf_usable(kb->popup_surf)) {
++            drwsurf_unmap(kb->popup_surf);
++            drwsurf_free(kb->popup_surf);
++        }
++        return false;
++    }
++    if (!force && drwsurf_usable(kb->popup_surf))
++        return true;
++    /* Without its buffers the popup is only skipped, since a stale one at the
++     * old size would draw at the wrong place. */
++    if (!drwsurf_resize(kb->popup_surf, kb->w, kb->h * 2, kb->scale)) {
++        fprintf(stderr, "no memory for the popup, it is disabled\n");
++        drwsurf_unmap(kb->popup_surf);
++        drwsurf_drop_buffers(kb->popup_surf);
++        return false;
++    }
++    return true;
++}
++
++bool
+ kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount)
+ {
+     fprintf(stderr, "Resize %dx%d %f, %d layouts\n", kb->w, kb->h, kb->scale,
+             layoutcount);
+ 
+-    drwsurf_resize(kb->surf, kb->w, kb->h, kb->scale);
+-    drwsurf_resize(kb->popup_surf, kb->w, kb->h * 2, kb->scale);
++    /* Nothing has changed when this fails, so the old layout still matches
++     * the old buffers. */
++    if (!drwsurf_resize(kb->surf, kb->w, kb->h, kb->scale))
++        return false;
++    kbd_popup_buffers(kb, true);
+     for (int i = 0; i < layoutcount; i++) {
+         if (kb->debug) {
+             if (layouts[i].name)
+@@ -755,6 +783,7 @@ kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount)
+         kbd_init_layout(&layouts[i], kb->w, kb->h);
+     }
+     kbd_draw_layout(kb);
++    return true;
+ }
+ 
+ void
+diff --git a/keyboard.h b/keyboard.h
+index d47561b..9708d4b 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -151,7 +151,13 @@ void kbd_print_first_utf8_char_stdout(const char *str);
+ void kbd_clear_last_popup(struct kbd *kb);
+ void kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type);
+ void kbd_draw_layout(struct kbd *kb);
+-void kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
++/* False when the buffers could not be allocated; the keyboard is then as it
++ * was before the call. */
++bool kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
++/* Makes the popup's buffers at the keyboard's size when the popup is on, and
++ * frees them when it is off; with force false, keeps usable ones. True when
++ * the popup can be drawn on. Failing only disables the popup. */
++bool kbd_popup_buffers(struct kbd *kb, bool force);
+ uint8_t kbd_get_rows(struct layout *l);
+ double kbd_get_row_length(struct key *k);
+ void kbd_next_layer(struct kbd *kb, struct key *k, bool invert);
+diff --git a/main.c b/main.c
+index 84e21a9..5f71e7e 100644
+--- a/main.c
++++ b/main.c
+@@ -20,6 +20,7 @@
+ 
+ #include "keyboard.h"
+ #include "text.h"
++#include "visibility.h"
+ #include "config.h"
+ 
+ /* Configs written before the macro existed keep upstream's behaviour. */
+@@ -55,8 +56,12 @@ static struct wp_fractional_scale_manager_v1 *wfs_mgr;
+ static struct wp_viewport *draw_surf_viewport, *popup_draw_surf_viewport;
+ static struct wp_viewporter *viewporter;
+ static struct zwp_input_method_manager_v2 *im_mgr;
+-static bool popup_xdg_surface_configured;
+-static bool layer_surface_configured;
++/* The surfaces outlive hide(); see visibility.h. */
++static struct vis vis;
++/* The size and scale the current buffers were made for, zero before the
++ * first successful resize. */
++static uint32_t applied_w, applied_h;
++static double applied_scale;
+ 
+ static uint32_t available_width, available_height = 0;
+ static void refresh_available_dimension();
+@@ -150,6 +155,7 @@ static void im_unavailable(void *data, struct zwp_input_method_v2 *zwp_input_met
+ static void redimension_keyboard();
+ static void show();
+ static void hide();
++static bool input_ready();
+ 
+ /* event handlers */
+ static const struct zwp_input_method_v2_listener input_method_listener = {
+@@ -263,7 +269,7 @@ wl_touch_down(void *data, struct wl_touch *wl_touch, uint32_t serial,
+               uint32_t time, struct wl_surface *surface, int32_t id,
+               wl_fixed_t x, wl_fixed_t y)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -289,7 +295,7 @@ void
+ wl_touch_up(void *data, struct wl_touch *wl_touch, uint32_t serial,
+             uint32_t time, int32_t id)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -300,7 +306,7 @@ void
+ wl_touch_motion(void *data, struct wl_touch *wl_touch, uint32_t time,
+                 int32_t id, wl_fixed_t x, wl_fixed_t y)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -352,7 +358,7 @@ void
+ wl_pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time,
+                   wl_fixed_t surface_x, wl_fixed_t surface_y)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -368,7 +374,7 @@ void
+ wl_pointer_button(void *data, struct wl_pointer *wl_pointer, uint32_t serial,
+                   uint32_t time, uint32_t button, uint32_t state)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -397,7 +403,7 @@ void
+ wl_pointer_axis(void *data, struct wl_pointer *wl_pointer, uint32_t time,
+                 uint32_t axis, wl_fixed_t value)
+ {
+-    if(!layer_surface_configured || !popup_xdg_surface_configured) {
++    if (!input_ready()) {
+         return;
+     }
+ 
+@@ -501,9 +507,14 @@ static void
+ xdg_popup_surface_configure(void *data, struct xdg_surface *xdg_surface,
+                             uint32_t serial)
+ {
++    /* One that was sent before the popup was unmapped answers nothing the
++     * compositor still remembers, and acking it would be an invalid_serial
++     * error. */
++    if (!vis_popup_accepts_configure(&vis))
++        return;
+     xdg_surface_ack_configure(xdg_surface, serial);
+-    popup_xdg_surface_configured = true;
+-    drwsurf_attach(&popup_draw_surf);
++    if (vis_popup_configure(&vis) & VIS_POPUP_MAP)
++        drwsurf_map(&popup_draw_surf);
+ }
+ 
+ static const struct xdg_surface_listener xdg_popup_surface_listener = {
+@@ -516,9 +527,14 @@ xdg_popup_configure(void *data, struct xdg_popup *xdg_popup, int32_t x,
+ {
+ }
+ 
++static void popup_teardown(void);
++
+ static void
+ xdg_popup_done(void *data, struct xdg_popup *xdg_popup)
+ {
++    /* The compositor dismissed it and unmapped its surface. The role object
++     * is useless from here, and the next show() makes a new one. */
++    popup_teardown();
+ }
+ 
+ static const struct xdg_popup_listener xdg_popup_listener = {
+@@ -606,71 +622,202 @@ redimension_keyboard()
+     keyboard.last_abc_index = 0;
+ }
+ 
+-void
+-layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
+-                        uint32_t serial, uint32_t w, uint32_t h)
++static double
++current_scale()
+ {
+-    // Swallow events for old/destroyed surface
+-    if (surface != layer_surface) {
+-        zwlr_layer_surface_v1_ack_configure(surface, serial);
+-        return;
+-    };
+-
+-    // Not what we expected, or redimension, refresh and restart
+-    if (keyboard.w != w || keyboard.h != h) {
+-        zwlr_layer_surface_v1_ack_configure(surface, serial);
+-        hide();
+-        show();
+-        return;
+-    };
+-
+-    // Swallow useless events
+-    if (layer_surface_configured) {
+-        return;
+-    };
+-    layer_surface_configured = true;
+-
+-    double scale = keyboard.preferred_scale;
+-    if (keyboard.preferred_fractional_scale) {
+-        scale = keyboard.preferred_fractional_scale;
+-    }
++    if (keyboard.preferred_fractional_scale)
++        return keyboard.preferred_fractional_scale;
++    return keyboard.preferred_scale;
++}
+ 
+-    keyboard.scale = scale;
+-    hidden = false;
++bool
++input_ready()
++{
++    /* The popup is only decoration: a keyboard whose popup was dismissed or
++     * never configured still has to take touches. */
++    return vis.mapped;
++}
+ 
+-    if (wfs_mgr && viewporter) {
+-        wp_viewport_set_destination(draw_surf_viewport, keyboard.w,
+-                                    keyboard.h);
++static void
++layer_set_geometry()
++{
++    anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
++    uint32_t req_w = 0;
++    if (dock_mode == DOCK_LEFT) {
++        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
++        req_w = keyboard.w;
++    } else if (dock_mode == DOCK_RIGHT) {
++        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
++        req_w = keyboard.w;
+     } else {
+-        wl_surface_set_buffer_scale(draw_surf.surf, keyboard.scale);
++        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
++        req_w = 0;
+     }
++    zwlr_layer_surface_v1_set_size(layer_surface, req_w, height);
++    zwlr_layer_surface_v1_set_anchor(layer_surface, anchor);
++    if (keyboard.exclusive) {
++        zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, height);
++    }
++}
+ 
+-    popup_draw_surf.surf = wl_compositor_create_surface(compositor);
++static void
++popup_teardown(void)
++{
++    /* xdg_wm_base.get_xdg_surface is an error on a surface with a buffer */
++    drwsurf_unmap(&popup_draw_surf);
++    if (popup_xdg_popup) {
++        xdg_popup_destroy(popup_xdg_popup);
++        popup_xdg_popup = NULL;
++    }
++    if (popup_xdg_surface) {
++        xdg_surface_destroy(popup_xdg_surface);
++        popup_xdg_surface = NULL;
++    }
++    vis_popup_gone(&vis);
++}
+ 
++/* Nothing of the popup exists until it is first wanted: with it off, the
++ * surface, the positioner and the buffers are never made. */
++static void
++popup_build(void)
++{
++    uint32_t w = keyboard.w, h = keyboard.h;
++    if (!popup_draw_surf.surf) {
++        popup_draw_surf.surf = wl_compositor_create_surface(compositor);
++        wl_surface_set_input_region(popup_draw_surf.surf, empty_region);
++        if (wfs_mgr && viewporter)
++            popup_draw_surf_viewport =
++                wp_viewporter_get_viewport(viewporter, popup_draw_surf.surf);
++    }
++    if (!popup_xdg_positioner)
++        popup_xdg_positioner = xdg_wm_base_create_positioner(wm_base);
++    /* The popup's size is fixed when it is created, so only a change of the
++     * keyboard's size makes a new one. */
+     xdg_positioner_set_size(popup_xdg_positioner, w, h * 2);
+     xdg_positioner_set_anchor_rect(popup_xdg_positioner, 0, -h, w, h * 2);
+ 
+-    wl_surface_set_input_region(popup_draw_surf.surf, empty_region);
+     popup_xdg_surface = xdg_wm_base_get_xdg_surface(wm_base, popup_draw_surf.surf);
+-    popup_xdg_surface_configured = false;
+     xdg_surface_add_listener(popup_xdg_surface, &xdg_popup_surface_listener, NULL);
+     popup_xdg_popup = xdg_surface_get_popup(popup_xdg_surface, NULL, popup_xdg_positioner);
+     xdg_popup_add_listener(popup_xdg_popup, &xdg_popup_listener, NULL);
+     zwlr_layer_surface_v1_get_popup(layer_surface, popup_xdg_popup);
+ 
+-    if (wfs_mgr && viewporter) {
+-        popup_draw_surf_viewport = wp_viewporter_get_viewport(viewporter, popup_draw_surf.surf);
++    if (popup_draw_surf_viewport) {
+         wp_viewport_set_destination(popup_draw_surf_viewport, keyboard.w, keyboard.h * 2);
+     } else {
+         wl_surface_set_buffer_scale(popup_draw_surf.surf, keyboard.scale);
+     }
+ 
+     wl_surface_commit(popup_draw_surf.surf);
++}
++
++/* Brings the popup in line with the mapped keyboard: makes it, asks again
++ * after an unmap, or attaches its buffer. */
++static void
++popup_sync(void)
++{
++    bool wanted = keyboard.show_popup && wm_base && kbd_popup_buffers(&keyboard, false);
++    unsigned act = vis_popup_sync(&vis, wanted);
++    if (act & VIS_POPUP_BUILD)
++        popup_build();
++    else if (act & VIS_POPUP_COMMIT)
++        wl_surface_commit(popup_draw_surf.surf);
++    else if (act & VIS_POPUP_MAP)
++        drwsurf_map(&popup_draw_surf);
++}
++
++/* Makes the buffers for the configured size. When that fails the keyboard
++ * keeps describing what the old buffers hold. */
++static bool
++apply_size(uint32_t w, uint32_t h, double scale)
++{
++    double old_scale = keyboard.scale;
++    keyboard.scale = scale;
++    if (!kbd_resize(&keyboard, layouts, NumLayouts)) {
++        fprintf(stderr, "cannot make the keyboard buffers, keeping the old ones\n");
++        keyboard.scale = old_scale;
++        if (applied_w) {
++            keyboard.w = applied_w;
++            keyboard.h = applied_h;
++        }
++        return false;
++    }
++    applied_w = w;
++    applied_h = h;
++    applied_scale = scale;
++
++    if (draw_surf_viewport) {
++        wp_viewport_set_destination(draw_surf_viewport, keyboard.w,
++                                    keyboard.h);
++    } else {
++        wl_surface_set_buffer_scale(draw_surf.surf, keyboard.scale);
++    }
++    /* its size is fixed at creation; popup_sync makes it again once the
++     * keyboard is mapped */
++    if (vis.popup_exists)
++        popup_teardown();
++    return true;
++}
+ 
++static void
++map_surfaces()
++{
++    drwsurf_map(&draw_surf);
++    popup_sync();
++}
++
++void
++layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
++                        uint32_t serial, uint32_t w, uint32_t h)
++{
++    /* A configure that was sent before the surface was unmapped answers
++     * nothing the compositor still remembers: acking it is not allowed to
++     * make the surface count as configured, and attaching a buffer on the
++     * strength of it would be an error. Only one that follows a commit
++     * without a buffer is looked at. */
++    if (surface == layer_surface && !vis_accepts_configure(&vis))
++        return;
+     zwlr_layer_surface_v1_ack_configure(surface, serial);
+ 
+-    kbd_resize(&keyboard, layouts, NumLayouts);
+-    drwsurf_attach(&draw_surf);
++    // Swallow events for old/destroyed surface
++    if (surface != layer_surface) {
++        return;
++    };
++
++    // Not what we expected, or redimension, refresh and restart
++    if (keyboard.w != w || keyboard.h != h) {
++        uint32_t asked_w = keyboard.w, asked_h = keyboard.h;
++        refresh_available_dimension();
++        redimension_keyboard();
++        if (keyboard.w != w || keyboard.h != h) {
++            if (keyboard.w != asked_w || keyboard.h != asked_h) {
++                // the output changed: ask for the new size and wait for it
++                layer_set_geometry();
++                wl_surface_commit(draw_surf.surf);
++                vis_configure(&vis, false);
++                return;
++            }
++            // the compositor insists on its own size, so use that
++            keyboard.w = w;
++            keyboard.h = h;
++        }
++    };
++
++    double scale = current_scale();
++    bool resized = applied_w != w || applied_h != h || applied_scale != scale ||
++                   !drwsurf_usable(&draw_surf);
++    bool ready = true;
++    if (resized)
++        ready = apply_size(w, h, scale);
++    ready = ready && drwsurf_usable(&draw_surf);
++
++    unsigned act = vis_configure(&vis, ready);
++    if (act & VIS_MAP)
++        map_surfaces();
++    else if (resized && ready && vis.mapped) {
++        drwsurf_attach(&draw_surf);
++        popup_sync();
++    }
+ }
+ 
+ void
+@@ -768,65 +915,28 @@ list_layers()
+ void
+ hide()
+ {
+-    if (!layer_surface) {
++    if (!vis.created) {
+         return;
+     }
+ 
+     // Ensure active keys are released, so they're not repeated infinitely.
+-    uint32_t time = (uint32_t) (monotime() + keyboard.last_press_offset);
+-    kbd_unpress_key(&keyboard, time);
+-
+-    if (wfs_draw_surf) {
+-        wp_fractional_scale_v1_destroy(wfs_draw_surf);
+-        wfs_draw_surf = NULL;
+-    }
+-    if (draw_surf_viewport) {
+-        wp_viewport_destroy(draw_surf_viewport);
+-        draw_surf_viewport = NULL;
+-    }
+-    if (popup_draw_surf_viewport) {
+-        wp_viewport_destroy(popup_draw_surf_viewport);
+-        popup_draw_surf_viewport = NULL;
+-    }
+-    if (popup_xdg_popup) {
+-        xdg_popup_destroy(popup_xdg_popup);
+-        popup_xdg_popup = NULL;
+-    }
+-    if (popup_xdg_surface) {
+-        xdg_surface_destroy(popup_xdg_surface);
+-        popup_xdg_surface = NULL;
+-    }
+-    if (popup_draw_surf.surf) {
+-        wl_surface_destroy(popup_draw_surf.surf);
+-        popup_draw_surf.surf = NULL;
++    if (vis.mapped) {
++        uint32_t time = (uint32_t) (monotime() + keyboard.last_press_offset);
++        kbd_unpress_key(&keyboard, time);
+     }
+ 
+-    zwlr_layer_surface_v1_destroy(layer_surface);
+-    layer_surface = NULL;
+-    layer_surface_configured = false;
+-
+-    // Cancel pending frame callback before destroying surface
+-    if (draw_surf.frame_cb) {
+-        wl_callback_destroy(draw_surf.frame_cb);
+-        draw_surf.frame_cb = NULL;
++    unsigned act = vis_hide(&vis);
++    if (act & VIS_UNMAP) {
++        /* the child first */
++        if (act & VIS_POPUP_UNMAP)
++            drwsurf_unmap(&popup_draw_surf);
++        drwsurf_unmap(&draw_surf);
+     }
+-
+-    wl_surface_destroy(draw_surf.surf);
+-    draw_surf.attached = false;
+-
+-    hidden = true;
+ }
+ 
+-void
+-show()
++static void
++create_surfaces()
+ {
+-    if (layer_surface) {
+-        return;
+-    }
+-
+-    refresh_available_dimension();
+-    redimension_keyboard();
+-
+     draw_surf.surf = wl_compositor_create_surface(compositor);
+     wl_surface_add_listener(
+         draw_surf.surf, &surface_listener, NULL);
+@@ -844,33 +954,44 @@ show()
+     layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+         layer_shell, draw_surf.surf, current_output_data, layer, namespace);
+ 
+-    anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+-    uint32_t req_w = 0;
+-    if (dock_mode == DOCK_LEFT) {
+-        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
+-        req_w = keyboard.w;
+-    } else if (dock_mode == DOCK_RIGHT) {
+-        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+-        req_w = keyboard.w;
+-    } else {
+-        anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+-        req_w = 0;
+-    }
+-    zwlr_layer_surface_v1_set_size(layer_surface, req_w, height);
+-    zwlr_layer_surface_v1_set_anchor(layer_surface, anchor);
+-    if (keyboard.exclusive) {
+-        zwlr_layer_surface_v1_set_exclusive_zone(layer_surface, height);
+-    }
++    layer_set_geometry();
+     zwlr_layer_surface_v1_set_keyboard_interactivity(layer_surface, false);
+     zwlr_layer_surface_v1_add_listener(layer_surface, &layer_surface_listener,
+                                        NULL);
+     wl_surface_commit(draw_surf.surf);
+ }
+ 
++void
++show()
++{
++    if (vis.visible) {
++        return;
++    }
++
++    // The output may have been rotated or resized while the keyboard was away
++    refresh_available_dimension();
++    redimension_keyboard();
++
++    bool geometry_ok = applied_w == keyboard.w && applied_h == keyboard.h &&
++                       applied_scale == current_scale();
++    unsigned act = vis_show(&vis, geometry_ok);
++
++    if (act & VIS_CREATE) {
++        create_surfaces();
++    } else if (act & VIS_REQUEST_CONFIGURE) {
++        layer_set_geometry();
++        wl_surface_commit(draw_surf.surf);
++    } else if (act & VIS_MAP) {
++        // redimension_keyboard went back to the first layer
++        kbd_draw_layout(&keyboard);
++        map_surfaces();
++    }
++}
++
+ void
+ toggle_visibility()
+ {
+-    if (hidden)
++    if (!vis.visible)
+         show();
+     else
+         hide();
+@@ -1279,7 +1400,8 @@ main(int argc, char **argv)
+     if (layer_shell == NULL) {
+         die("layer_shell not available\n");
+     }
+-    if (wm_base == NULL) {
++    /* only the key popup is an xdg surface */
++    if (wm_base == NULL && keyboard.show_popup) {
+         die("wm_base not available\n");
+     }
+     if (vkbd_mgr == NULL) {
+@@ -1309,7 +1431,6 @@ main(int argc, char **argv)
+     }
+ 
+     empty_region = wl_compositor_create_region(compositor);
+-    popup_xdg_positioner = xdg_wm_base_create_positioner(wm_base);
+ 
+     keyboard.vkbd =
+         zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, seat);
+@@ -1366,7 +1487,8 @@ main(int argc, char **argv)
+             die("Wayland socket has been disconnected.\n");
+         }
+ 
+-        if (fds[SIGNAL_FD].revents & POLLIN) {
++        /* the closed event destroyed the surfaces that hide() and show() use */
++        if (run_display && (fds[SIGNAL_FD].revents & POLLIN)) {
+             struct signalfd_siginfo si;
+ 
+             if (read(fds[SIGNAL_FD].fd, &si, sizeof(si)) != sizeof(si))
+@@ -1382,6 +1504,8 @@ main(int argc, char **argv)
+         }
+     }
+ 
++    drwsurf_free(&popup_draw_surf);
++    drwsurf_free(&draw_surf);
+     for (i = 0; i < countof(schemes); i++) {
+         text_font_free(schemes[i].text_font);
+         schemes[i].text_font = NULL;
+diff --git a/meson.build b/meson.build
+index df88f40..cdf0667 100644
+--- a/meson.build
++++ b/meson.build
+@@ -53,6 +53,7 @@ sources = files(
+   'mask.c',
+   'os-compatibility.c',
+   'shm_open.c',
++  'visibility.c',
+ ) + text_sources
+ 
+ exe = executable('wvkbd-' + kbd_layout,
+diff --git a/tests/meson.build b/tests/meson.build
+index 19cd912..f43ace5 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -49,3 +49,23 @@ test_draw = executable('test-draw',
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep])
+ test('draw-formats', test_draw)
++
++# The show/hide state machine is pure, so it needs no libraries at all.
++test('visibility', executable('test-visibility',
++  'test-visibility.c', '../visibility.c',
++  include_directories: test_inc))
++
++# Replaces allocate_shm_file to force the failures of a resize, so it links
++# drw.c without shm_open.c.
++test('buffer-failure', executable('test-buffer',
++  'test-buffer.c', '../drw.c', '../mask.c', text_sources,
++  include_directories: test_inc,
++  dependencies: [wayland_client, cairo, text_deps, m_dep]))
++
++# Counts the buffers the drawing layer asks for, so it replaces
++# allocate_shm_file and links without shm_open.c.
++test('popup-memory', executable('test-popup',
++  'test-popup.c', '../drw.c', '../keyboard.c', '../mask.c',
++  '../os-compatibility.c', text_sources, proto_sources,
++  include_directories: test_inc,
++  dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+diff --git a/tests/test-buffer.c b/tests/test-buffer.c
+new file mode 100644
+index 0000000..ded6324
+--- /dev/null
++++ b/tests/test-buffer.c
+@@ -0,0 +1,207 @@
++/* What drwsurf_resize leaves behind when memory runs out, with allocate_shm_file
++ * replaced so each failure can be forced. */
++#include <cairo.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "check.h"
++#include "drw.h"
++
++enum { OK, FAIL_ALLOC, FAIL_MMAP };
++static int mode = OK;
++static int calls_until_failure = -1; /* -1: use mode for every call */
++
++/* The tests only need plain memory, so a temporary file stands in for the
++ * shm object. An O_RDONLY descriptor makes the writable mapping fail. */
++int
++allocate_shm_file(size_t size)
++{
++    int m = mode;
++    if (calls_until_failure == 0)
++        m = FAIL_ALLOC;
++    else if (calls_until_failure > 0)
++        calls_until_failure--;
++    if (m == FAIL_ALLOC)
++        return -1;
++
++    char path[] = "/tmp/wvkbd-test-XXXXXX";
++    int fd = mkstemp(path);
++    if (fd < 0)
++        return -1;
++    unlink(path);
++    if (ftruncate(fd, size) < 0) {
++        close(fd);
++        return -1;
++    }
++    if (m == FAIL_MMAP) {
++        char proc[64];
++        snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
++        int ro = open(proc, O_RDONLY);
++        close(fd);
++        return ro;
++    }
++    return fd;
++}
++
++struct fixture {
++    struct drw ctx;
++    struct drwbuf back, display;
++    struct drwsurf ds;
++};
++
++static void
++init(struct fixture *f)
++{
++    memset(f, 0, sizeof(*f));
++    f->ds = (struct drwsurf){.ctx = &f->ctx, .format = DRW_FORMAT_ARGB8888,
++                             .back_buffer = &f->back,
++                             .display_buffer = &f->display};
++}
++
++/* what a resize must not change when it fails */
++struct snap {
++    uint32_t width, height;
++    double scale;
++    unsigned char *back_mem, *display_mem;
++    cairo_surface_t *back_cairo, *display_cairo;
++    uint32_t back_size;
++};
++
++static struct snap
++take(struct fixture *f)
++{
++    return (struct snap){f->ds.width, f->ds.height, f->ds.scale,
++                         f->back.pool_data, f->display.pool_data,
++                         f->back.cairo_surf, f->display.cairo_surf,
++                         f->back.size};
++}
++
++static void
++same(struct fixture *f, struct snap s, const char *what)
++{
++    CHECK(f->ds.width == s.width && f->ds.height == s.height &&
++              f->ds.scale == s.scale,
++          "%s: size and scale are unchanged", what);
++    CHECK(f->back.pool_data == s.back_mem &&
++              f->display.pool_data == s.display_mem,
++          "%s: both mappings are the old ones", what);
++    CHECK(f->back.cairo_surf == s.back_cairo &&
++              f->display.cairo_surf == s.display_cairo,
++          "%s: both cairo surfaces are the old ones", what);
++    CHECK(f->back.size == s.back_size, "%s: the size of the mapping is kept",
++          what);
++    CHECK(f->back.pool_data != MAP_FAILED, "%s: no MAP_FAILED left behind",
++          what);
++}
++
++static uint32_t
++first_pixel(struct drwbuf *b)
++{
++    uint32_t v;
++    cairo_surface_flush(b->cairo_surf);
++    memcpy(&v, b->pool_data, 4);
++    return v;
++}
++
++static void
++test_failures(void)
++{
++    static const struct { const char *name; int mode; int after; } cases[] = {
++        {"allocation fails", FAIL_ALLOC, -1},
++        {"mmap fails", FAIL_MMAP, -1},
++        {"second buffer fails", OK, 1},
++    };
++    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
++        struct fixture f;
++        init(&f);
++        mode = OK;
++        calls_until_failure = -1;
++        CHECK(drwsurf_resize(&f.ds, 40, 20, 1.0), "%s: first resize",
++              cases[i].name);
++        Color red = {.bgra = {0, 0, 255, 255}};
++        drw_fill_rectangle(&f.ds, red, 0, 0, 40, 20, 0);
++        struct snap before = take(&f);
++        uint32_t pixel = first_pixel(f.ds.back_buffer);
++
++        mode = cases[i].mode;
++        calls_until_failure = cases[i].after;
++        CHECK(!drwsurf_resize(&f.ds, 80, 40, 2.0), "%s: resize reports failure",
++              cases[i].name);
++        same(&f, before, cases[i].name);
++        CHECK(drwsurf_usable(&f.ds), "%s: the old buffers still work",
++              cases[i].name);
++        /* the old mapping must still be mapped: this would crash otherwise */
++        CHECK(first_pixel(f.ds.back_buffer) == pixel,
++              "%s: the old pixels are intact", cases[i].name);
++        Color blue = {.bgra = {255, 0, 0, 255}};
++        drw_fill_rectangle(&f.ds, blue, 0, 0, 40, 20, 0);
++        CHECK(first_pixel(f.ds.back_buffer) != pixel ||
++                  first_pixel(f.ds.display_buffer) != pixel,
++              "%s: drawing still reaches the old buffer", cases[i].name);
++
++        mode = OK;
++        calls_until_failure = -1;
++        CHECK(drwsurf_resize(&f.ds, 80, 40, 2.0), "%s: a retry succeeds",
++              cases[i].name);
++        CHECK(f.ds.width == 160 && f.ds.height == 80,
++              "%s: the retry has the new size", cases[i].name);
++        drwsurf_free(&f.ds);
++    }
++}
++
++static void
++test_first_failure(void)
++{
++    struct fixture f;
++    init(&f);
++    mode = FAIL_MMAP;
++    calls_until_failure = -1;
++    CHECK(!drwsurf_resize(&f.ds, 40, 20, 1.0), "first resize can fail");
++    CHECK(!drwsurf_usable(&f.ds), "the surface is unusable");
++    CHECK(f.ds.width == 0 && f.ds.height == 0, "and has no size");
++    CHECK(f.back.pool_data == NULL && f.display.pool_data == NULL,
++          "nothing is left mapped or MAP_FAILED");
++    /* every drawing call is skipped, none may touch a missing cairo */
++    Color c = {.color = UINT32_MAX};
++    drw_fill_rectangle(&f.ds, c, 0, 0, 10, 10, 0);
++    drw_over_rectangle(&f.ds, c, 0, 0, 10, 10, 3);
++    drw_do_clear(&f.ds, 0, 0, 10, 10);
++    drw_draw_text(&f.ds, c, 0, 0, 10, 10, 1, "a", NULL);
++    drwsurf_attach(&f.ds);
++    mode = OK;
++    CHECK(drwsurf_resize(&f.ds, 40, 20, 1.0) && drwsurf_usable(&f.ds),
++          "a later resize recovers");
++    drwsurf_drop_buffers(&f.ds);
++    CHECK(!drwsurf_usable(&f.ds), "dropping the buffers makes it unusable");
++    drwsurf_free(&f.ds);
++}
++
++static void
++test_setup_buffer(void)
++{
++    struct fixture f;
++    init(&f);
++    mode = OK;
++    calls_until_failure = -1;
++    drwsurf_resize(&f.ds, 40, 20, 1.0);
++    struct snap before = take(&f);
++    mode = FAIL_MMAP;
++    CHECK(setup_buffer(&f.ds, &f.back) == 1, "setup_buffer reports mmap failure");
++    same(&f, before, "setup_buffer");
++    mode = OK;
++    drwsurf_free(&f.ds);
++}
++
++int
++main(void)
++{
++    test_failures();
++    test_first_failure();
++    test_setup_buffer();
++    if (failures)
++        fprintf(stderr, "%d checks failed\n", failures);
++    return failures != 0;
++}
+diff --git a/tests/test-draw.c b/tests/test-draw.c
+index 4ed64c8..51392f1 100644
+--- a/tests/test-draw.c
++++ b/tests/test-draw.c
+@@ -5,6 +5,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/mman.h>
+ 
+ #include "keyboard.h"
+ #include "text.h"
+@@ -253,6 +254,7 @@ test_render(enum drw_format format, int corner_radius)
+ 
+     for (int i = 0; i < 2; i++)
+         text_font_free(schemes[i].text_font);
++    drwsurf_free(&ds);
+ }
+ 
+ /* The arrows are vector shapes, so they must draw even though a bitmap font
+@@ -284,6 +286,7 @@ test_icons(enum drw_format format)
+         /* the shape stays inside the key's border */
+         CHECK(read_pixel(&ds, 0, 0) == expected_pixel(format, bg),
+               "%s: icon %zu touched the border", format_name[format], n);
++        drwsurf_free(&ds);
+     }
+ }
+ 
+@@ -299,6 +302,10 @@ test_stale_geometry(enum drw_format format)
+     struct drwsurf ds = {.ctx = &ctx, .format = format,
+                          .back_buffer = &back, .display_buffer = &display};
+     drwsurf_resize(&ds, SW, SH, 1.0);
++    /* the mappings drwsurf_resize made are replaced below by plain memory, so
++     * they are given back at the end */
++    unsigned char *orig_pool[2] = {back.pool_data, display.pool_data};
++    uint32_t orig_size = back.size;
+ 
+     uint32_t stride, size;
+     drw_buffer_geometry(format, SW, SH, &stride, &size);
+@@ -338,6 +345,19 @@ test_stale_geometry(enum drw_format format)
+     ds.back_buffer->cairo_surf = NULL;
+     drw_draw_text(&ds, white, 0, 0, SW, SH, 1, "Wq", font);
+     text_font_free(font);
++
++    /* what drwsurf_free would unmap is now plain memory, so release by hand */
++    for (int i = 0; i < 2; i++) {
++        struct drwbuf *b = i ? &display : &back;
++        /* the context still holds the surface that wrapped the old mapping */
++        cairo_destroy(b->cairo);
++        b->cairo = NULL;
++        cairo_surface_destroy(b->cairo_surf);
++        b->cairo_surf = NULL;
++        b->pool_data = NULL;
++        munmap(orig_pool[i], orig_size);
++    }
++    drwsurf_free(&ds);
+     free(mem);
+ }
+ 
+diff --git a/tests/test-popup.c b/tests/test-popup.c
+new file mode 100644
+index 0000000..f1aff9e
+--- /dev/null
++++ b/tests/test-popup.c
+@@ -0,0 +1,146 @@
++/* What the key popup costs while it is off: no buffers. allocate_shm_file is
++ * replaced by a counter, so every buffer the drawing layer asks for shows. */
++#include <cairo.h>
++#include <linux/input-event-codes.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "check.h"
++#include "keyboard.h"
++#include "text.h"
++
++enum { W = 240, H = 100 };
++
++static unsigned allocations;
++
++int
++allocate_shm_file(size_t size)
++{
++    allocations++;
++    char path[] = "/tmp/wvkbd-test-XXXXXX";
++    int fd = mkstemp(path);
++    if (fd < 0)
++        return -1;
++    unlink(path);
++    if (ftruncate(fd, size) < 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++struct env {
++    struct drw ctx;
++    struct drwbuf back, display, pback, pdisplay;
++    struct drwsurf ds, popup;
++    struct clr_scheme schemes[2];
++    struct kbd kb;
++};
++
++static void
++env_init(struct env *e, bool show_popup)
++{
++    memset(e, 0, sizeof(*e));
++    for (int i = 0; i < 2; i++) {
++        e->schemes[i].bg = (Color){.bgra = {0x30, 0x20, 0x10, 255}};
++        e->schemes[i].fg = (Color){.bgra = {0x20, 0x90, 0xe0, 255}};
++        e->schemes[i].high = (Color){.bgra = {0xf0, 0x40, 0x60, 255}};
++        e->schemes[i].text = (Color){.color = UINT32_MAX};
++        e->schemes[i].text_press = (Color){.color = UINT32_MAX};
++        e->schemes[i].text_font = text_font_new("Sans 8");
++    }
++    e->ds = (struct drwsurf){.ctx = &e->ctx, .format = DRW_FORMAT_RGB565,
++                             .back_buffer = &e->back,
++                             .display_buffer = &e->display};
++    e->popup = (struct drwsurf){.ctx = &e->ctx, .format = DRW_FORMAT_ARGB8888,
++                                .back_buffer = &e->pback,
++                                .display_buffer = &e->pdisplay};
++    e->kb = (struct kbd){.surf = &e->ds, .popup_surf = &e->popup,
++                         .schemes = e->schemes, .layout = &layouts[0],
++                         .w = W, .h = H, .scale = 1.0,
++                         .show_highlight = true, .show_popup = show_popup};
++}
++
++static void
++env_free(struct env *e)
++{
++    for (int i = 0; i < 2; i++)
++        text_font_free(e->schemes[i].text_font);
++    drwsurf_free(&e->ds);
++    drwsurf_free(&e->popup);
++}
++
++static bool
++popup_has_memory(struct env *e)
++{
++    return e->pback.pool_data || e->pdisplay.pool_data ||
++           e->pback.cairo_surf || e->pdisplay.cairo_surf ||
++           drwsurf_usable(&e->popup);
++}
++
++static void
++test_off(void)
++{
++    struct env e;
++    env_init(&e, false);
++    allocations = 0;
++    CHECK(kbd_resize(&e.kb, layouts, NumLayouts), "resize");
++    CHECK(allocations == 2, "a keyboard without popup makes 2 buffers, made %u",
++          allocations);
++    CHECK(drwsurf_usable(&e.ds), "the keyboard itself is drawable");
++    CHECK(!popup_has_memory(&e), "the popup holds no memory");
++
++    /* later resizes, the sync a map does, and a key press ask for nothing */
++    e.kb.w = 200;
++    CHECK(kbd_resize(&e.kb, layouts, NumLayouts), "second resize");
++    CHECK(!kbd_popup_buffers(&e.kb, false), "the sync reports no popup");
++    CHECK(!kbd_popup_buffers(&e.kb, true), "even when forced");
++    struct key *k = &e.kb.layout->keys[0];
++    kbd_draw_key(&e.kb, k, Press);
++    kbd_draw_key(&e.kb, k, Unpress);
++    CHECK(allocations == 4, "two resizes made 4 buffers in all, made %u",
++          allocations);
++    CHECK(!popup_has_memory(&e) && !e.popup.damage,
++          "a key press does not touch the popup");
++    env_free(&e);
++}
++
++static void
++test_on_and_lazy(void)
++{
++    struct env e;
++    env_init(&e, true);
++    allocations = 0;
++    CHECK(kbd_resize(&e.kb, layouts, NumLayouts), "resize");
++    CHECK(allocations == 4, "a keyboard with popup makes 4 buffers, made %u",
++          allocations);
++    CHECK(drwsurf_usable(&e.popup), "the popup is drawable");
++    CHECK(e.popup.height == H * 2, "at twice the keyboard height");
++    CHECK(kbd_popup_buffers(&e.kb, false) && allocations == 4,
++          "the sync keeps usable buffers");
++
++    /* turned off at run time: the memory goes back */
++    e.kb.show_popup = false;
++    CHECK(!kbd_popup_buffers(&e.kb, false), "off again");
++    CHECK(!popup_has_memory(&e), "and the popup's buffers are freed");
++
++    /* turned on later: made when first wanted, not before */
++    allocations = 0;
++    e.kb.show_popup = true;
++    CHECK(kbd_popup_buffers(&e.kb, false) && allocations == 2,
++          "made on demand, %u allocations", allocations);
++    CHECK(kbd_popup_buffers(&e.kb, false) && allocations == 2,
++          "and once only");
++    env_free(&e);
++}
++
++int
++main(void)
++{
++    test_off();
++    test_on_and_lazy();
++    if (failures)
++        fprintf(stderr, "%d checks failed\n", failures);
++    return failures != 0;
++}
+diff --git a/tests/test-visibility.c b/tests/test-visibility.c
+new file mode 100644
+index 0000000..ecd79e7
+--- /dev/null
++++ b/tests/test-visibility.c
+@@ -0,0 +1,318 @@
++/* The show/hide state machine without a compositor: which protocol actions
++ * each event asks for. What it cannot show is that a compositor accepts those
++ * actions, in particular that it sends the configure a remap waits for. */
++#include "check.h"
++#include "visibility.h"
++
++/* what main.c does with a layer configure: look at it only if it is accepted */
++static unsigned
++configure(struct vis *v, bool ready)
++{
++    return vis_accepts_configure(v) ? vis_configure(v, ready) : 0;
++}
++
++/* a keyboard that has been created, configured and mapped, as after start-up */
++static struct vis
++shown(void)
++{
++    struct vis v = {0};
++    CHECK(vis_show(&v, false) == VIS_CREATE, "first show creates");
++    CHECK(configure(&v, true) == VIS_MAP, "first configure maps");
++    return v;
++}
++
++/* the same with the popup made and configured */
++static struct vis
++shown_with_popup(void)
++{
++    struct vis v = shown();
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_BUILD, "the popup is made");
++    CHECK(vis_popup_configure(&v) == VIS_POPUP_MAP, "its configure maps it");
++    return v;
++}
++
++static void
++test_start(void)
++{
++    struct vis v = {0};
++    /* --hidden: nothing is created until the first show */
++    CHECK(vis_hide(&v) == 0, "hide before anything exists does nothing");
++    CHECK(!v.created && !v.visible, "and creates nothing");
++
++    CHECK(vis_show(&v, true) == VIS_CREATE, "show creates the surfaces");
++    CHECK(v.visible && !v.mapped, "visible but not mapped before a configure");
++    CHECK(vis_show(&v, true) == 0, "a second show while waiting does nothing");
++    CHECK(configure(&v, true) == VIS_MAP, "the configure maps it");
++    CHECK(v.mapped && v.configured, "mapped and configured");
++    CHECK(configure(&v, true) == 0, "a repeated configure maps nothing new");
++}
++
++static void
++test_hide_then_configure(void)
++{
++    struct vis v = shown();
++    CHECK(vis_hide(&v) == VIS_UNMAP, "hide unmaps");
++    CHECK(!v.mapped && !v.configured && !v.awaiting,
++          "unmapped, back to unconfigured and asking for nothing");
++    CHECK(vis_hide(&v) == 0, "hiding twice unmaps once");
++
++    /* A configure that was in flight when hide() ran, or that the compositor
++     * sends for an output change, answers no commit of ours. */
++    CHECK(!vis_accepts_configure(&v), "a configure while hidden is refused");
++    CHECK(configure(&v, true) == 0, "it does not map");
++    CHECK(!v.mapped && !v.configured,
++          "and does not make the surface count as configured");
++    CHECK(configure(&v, false) == 0 && !v.awaiting,
++          "a not-ready one changes nothing either");
++}
++
++/* The in-flight configure must not let a later show() attach a buffer to a
++ * surface the compositor sees as unconfigured. */
++static void
++test_configure_in_flight_at_hide(void)
++{
++    struct vis v = shown();
++    vis_hide(&v);
++    CHECK(configure(&v, true) == 0, "the stale configure is dropped");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE,
++          "show cannot map from it, it asks for a configure");
++    CHECK(!v.mapped, "nothing is attached yet");
++    CHECK(vis_accepts_configure(&v), "the answer is accepted");
++    CHECK(configure(&v, true) == VIS_MAP, "and maps");
++
++    /* the same when the stale one is delivered after show() asked */
++    vis_hide(&v);
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "asks again");
++    CHECK(configure(&v, true) == VIS_MAP, "the answer maps");
++    CHECK(configure(&v, true) == 0 && v.mapped,
++          "a second one while mapped keeps it mapped");
++}
++
++static void
++test_show_after_hide(void)
++{
++    struct vis v = shown();
++    vis_hide(&v);
++
++    /* no configure has arrived since the unmap: ask for one, do not map */
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE,
++          "show without a configure asks for one");
++    CHECK(!v.mapped, "and does not map");
++    CHECK(configure(&v, true) == VIS_MAP, "the configure then maps");
++
++    vis_hide(&v);
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE,
++          "every show after an unmap asks, none maps on a leftover");
++    CHECK(configure(&v, true) == VIS_MAP, "the answer maps");
++    CHECK(v.mapped && v.visible, "mapped and visible");
++    CHECK(configure(&v, true) == 0, "a late duplicate configure is quiet");
++}
++
++static void
++test_geometry_change(void)
++{
++    struct vis v = shown();
++    vis_hide(&v);
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks");
++    CHECK(configure(&v, true) == VIS_MAP, "and maps");
++    vis_hide(&v);
++    /* rotated while hidden: the geometry no longer fits */
++    CHECK(vis_show(&v, false) == VIS_REQUEST_CONFIGURE,
++          "show with stale geometry renegotiates");
++    CHECK(!v.mapped && !v.configured, "nothing mapped yet");
++    CHECK(configure(&v, false) == 0 && v.awaiting,
++          "an intermediate size does not map and keeps waiting");
++    CHECK(configure(&v, true) == VIS_MAP, "the matching size maps");
++
++    /* resized while mapped keeps the old buffer until the new size is ready */
++    CHECK(configure(&v, false) == 0 && v.mapped,
++          "a not-ready configure leaves a mapped surface mapped");
++    CHECK(configure(&v, true) == 0 && v.mapped, "and a ready one keeps it");
++}
++
++static void
++test_hide_while_waiting(void)
++{
++    struct vis v = {0};
++    vis_show(&v, true);
++    /* hidden before the first configure arrived */
++    CHECK(vis_hide(&v) == 0, "nothing is mapped, so nothing to unmap");
++    CHECK(!v.visible, "no longer wanted");
++    /* nothing was ever unmapped, so the commit that asked is still pending */
++    CHECK(configure(&v, true) == 0 && !v.mapped,
++          "the configure that was in flight does not map");
++    CHECK(vis_show(&v, true) == VIS_MAP, "show maps from the stored configure");
++}
++
++static void
++test_toggles(void)
++{
++    struct vis v = shown();
++    for (int i = 0; i < 5; i++) {
++        CHECK(vis_hide(&v) == VIS_UNMAP, "toggle %d: hide unmaps", i);
++        CHECK(configure(&v, true) == 0, "toggle %d: a leftover stays quiet", i);
++        CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE,
++              "toggle %d: show asks", i);
++        CHECK(configure(&v, true) == VIS_MAP, "toggle %d: the answer maps", i);
++        CHECK(v.visible && v.mapped, "toggle %d: state", i);
++    }
++    /* signals can repeat: SIGUSR2 twice, SIGUSR1 twice */
++    CHECK(vis_show(&v, true) == 0, "show while shown does nothing");
++    vis_hide(&v);
++    CHECK(vis_hide(&v) == 0, "hide while hidden does nothing");
++    /* a toggle burst before the compositor answers */
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks");
++    CHECK(vis_hide(&v) == 0, "hide before the answer has nothing to unmap");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks again");
++    CHECK(configure(&v, true) == VIS_MAP, "the one configure maps");
++}
++
++static void
++test_auto(void)
++{
++    /* --auto: activate calls show(), deactivate calls hide(), repeatedly and
++     * with duplicates, which the input method protocol allows */
++    struct vis v = {0};
++    CHECK(vis_show(&v, true) == VIS_CREATE, "activate creates");
++    CHECK(configure(&v, true) == VIS_MAP, "and maps");
++    CHECK(vis_hide(&v) == VIS_UNMAP, "deactivate unmaps");
++    CHECK(vis_hide(&v) == 0, "a second deactivate is ignored");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "activate asks again");
++    CHECK(vis_show(&v, true) == 0, "a second activate is ignored");
++    CHECK(configure(&v, true) == VIS_MAP, "the configure maps");
++    CHECK(vis_hide(&v) == VIS_UNMAP, "deactivate unmaps again");
++    CHECK(configure(&v, true) == 0, "the leftover is dropped");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "activate asks");
++    /* an unusable buffer never maps */
++    struct vis w = {0};
++    vis_show(&w, true);
++    CHECK(configure(&w, false) == 0 && !w.mapped,
++          "a configure without usable buffers does not map");
++}
++
++static void
++test_popup_off(void)
++{
++    struct vis v = shown();
++    CHECK(vis_popup_sync(&v, false) == 0 && !v.popup_exists,
++          "a popup that is off is never made");
++    vis_hide(&v);
++    CHECK(vis_hide(&v) == 0, "hide");
++    vis_show(&v, true);
++    configure(&v, true);
++    CHECK(vis_popup_sync(&v, false) == 0 && !v.popup_exists,
++          "nor after a hide and a show");
++    struct vis w = {0};
++    vis_show(&w, true);
++    CHECK(vis_popup_sync(&w, true) == 0, "an unmapped keyboard has no popup");
++}
++
++static void
++test_popup_hide_show(void)
++{
++    struct vis v = shown_with_popup();
++    CHECK(v.popup_mapped, "the popup is mapped");
++    CHECK(vis_hide(&v) == (VIS_UNMAP | VIS_POPUP_UNMAP), "hide unmaps both");
++    CHECK(!v.popup_mapped && !v.popup_configured, "the popup is unconfigured");
++
++    /* its configure was in flight at hide */
++    CHECK(!vis_popup_accepts_configure(&v), "a popup configure while hidden is refused");
++    CHECK(vis_popup_configure(&v) == 0 && !v.popup_configured,
++          "it does not count as configured");
++
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks");
++    CHECK(configure(&v, true) == VIS_MAP, "the layer maps");
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_COMMIT,
++          "the popup asks again instead of attaching to an unconfigured surface");
++    CHECK(!v.popup_mapped, "nothing attached to the popup");
++    CHECK(vis_popup_sync(&v, true) == 0, "a second sync waits");
++    CHECK(vis_popup_configure(&v) == VIS_POPUP_MAP, "the answer maps it");
++    CHECK(vis_popup_configure(&v) == 0, "a repeat is quiet");
++}
++
++static void
++test_popup_waiting_at_hide(void)
++{
++    struct vis v = shown();
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_BUILD, "made");
++    /* hidden before its first configure */
++    CHECK(vis_hide(&v) == (VIS_UNMAP | VIS_POPUP_UNMAP), "hide");
++    CHECK(v.popup_awaiting, "its first configure is still expected");
++    /* it arrives while show() waits in refresh_available_dimension() */
++    CHECK(vis_popup_accepts_configure(&v), "and is accepted");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks");
++    CHECK(vis_popup_configure(&v) == 0 && v.popup_configured && !v.popup_mapped,
++          "recorded, but nothing is attached under an unmapped layer");
++    CHECK(configure(&v, true) == VIS_MAP, "the layer maps");
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_MAP,
++          "the popup maps without a second buffer-less commit");
++}
++
++/* A second buffer-less commit gets no second configure, so after a hide that
++ * came before the first one the popup must only wait. */
++static void
++test_popup_waiting_across_show(void)
++{
++    struct vis v = shown();
++    vis_popup_sync(&v, true);
++    vis_hide(&v);
++    vis_show(&v, true);
++    configure(&v, true);
++    CHECK(vis_popup_sync(&v, true) == 0, "no commit while the configure is due");
++    CHECK(vis_popup_configure(&v) == VIS_POPUP_MAP, "it arrives and maps");
++}
++
++static void
++test_popup_done_while_hidden(void)
++{
++    struct vis v = shown_with_popup();
++    vis_hide(&v);
++    /* the compositor dismisses it while the keyboard is hidden */
++    vis_popup_gone(&v);
++    CHECK(!v.popup_exists, "the role object is gone");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show asks");
++    CHECK(configure(&v, true) == VIS_MAP, "the layer maps");
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_BUILD,
++          "show makes the popup again");
++    CHECK(vis_popup_configure(&v) == VIS_POPUP_MAP, "and it maps");
++    CHECK(v.mapped && v.popup_mapped, "the keyboard shows with its popup");
++}
++
++static void
++test_popup_done_while_shown(void)
++{
++    struct vis v = shown_with_popup();
++    vis_popup_gone(&v);
++    CHECK(v.mapped, "the keyboard stays mapped");
++    CHECK(!vis_popup_accepts_configure(&v), "a late popup configure is refused");
++    /* a resize of the mapped keyboard makes it again */
++    CHECK(vis_popup_sync(&v, true) == VIS_POPUP_BUILD, "made again");
++    CHECK(vis_hide(&v) == (VIS_UNMAP | VIS_POPUP_UNMAP), "hide");
++    CHECK(vis_show(&v, true) == VIS_REQUEST_CONFIGURE, "show");
++    CHECK(configure(&v, true) == VIS_MAP, "maps");
++    CHECK(vis_popup_sync(&v, true) == 0,
++          "the remade popup is still owed its first configure");
++    CHECK(vis_popup_configure(&v) == VIS_POPUP_MAP, "which maps it");
++}
++
++int
++main(void)
++{
++    test_start();
++    test_hide_then_configure();
++    test_configure_in_flight_at_hide();
++    test_show_after_hide();
++    test_geometry_change();
++    test_hide_while_waiting();
++    test_toggles();
++    test_auto();
++    test_popup_off();
++    test_popup_hide_show();
++    test_popup_waiting_at_hide();
++    test_popup_waiting_across_show();
++    test_popup_done_while_hidden();
++    test_popup_done_while_shown();
++    if (failures)
++        fprintf(stderr, "%d checks failed\n", failures);
++    return failures != 0;
++}
+diff --git a/visibility.c b/visibility.c
+new file mode 100644
+index 0000000..e11f733
+--- /dev/null
++++ b/visibility.c
+@@ -0,0 +1,125 @@
++#include "visibility.h"
++
++unsigned
++vis_show(struct vis *v, bool geometry_ok)
++{
++    if (!v->created) {
++        v->created = true;
++        v->visible = true;
++        v->awaiting = true;
++        return VIS_CREATE;
++    }
++    if (v->visible)
++        return 0;
++    v->visible = true;
++    if (!geometry_ok)
++        v->configured = false;
++    if (v->configured) {
++        v->mapped = true;
++        return VIS_MAP;
++    }
++    v->awaiting = true;
++    return VIS_REQUEST_CONFIGURE;
++}
++
++unsigned
++vis_hide(struct vis *v)
++{
++    if (!v->visible)
++        return 0;
++    v->visible = false;
++    if (!v->mapped)
++        return 0;
++    v->mapped = false;
++    v->configured = false;
++    v->awaiting = false;
++    unsigned act = VIS_UNMAP;
++    if (v->popup_exists) {
++        act |= VIS_POPUP_UNMAP;
++        /* A popup that was never configured still has its first configure
++         * coming, and a compositor sends that only once: dropping it would
++         * leave a later commit waiting for an answer that never comes. */
++        if (v->popup_mapped || v->popup_configured)
++            v->popup_awaiting = false;
++        v->popup_mapped = v->popup_configured = false;
++    }
++    return act;
++}
++
++bool
++vis_accepts_configure(const struct vis *v)
++{
++    return v->mapped || v->awaiting;
++}
++
++unsigned
++vis_configure(struct vis *v, bool ready)
++{
++    if (!vis_accepts_configure(v))
++        return 0;
++    if (!ready) {
++        /* A mapped surface keeps its old buffer until a ready configure; one
++         * that is not mapped has asked for the size it wants and waits for
++         * the answer. */
++        if (!v->mapped) {
++            v->configured = false;
++            v->awaiting = true;
++        }
++        return 0;
++    }
++    v->configured = true;
++    v->awaiting = false;
++    if (v->visible && !v->mapped) {
++        v->mapped = true;
++        return VIS_MAP;
++    }
++    return 0;
++}
++
++unsigned
++vis_popup_sync(struct vis *v, bool wanted)
++{
++    if (!wanted || !v->mapped)
++        return 0;
++    if (!v->popup_exists) {
++        v->popup_exists = true;
++        v->popup_awaiting = true;
++        v->popup_configured = v->popup_mapped = false;
++        return VIS_POPUP_BUILD;
++    }
++    if (v->popup_configured) {
++        v->popup_mapped = true;
++        return VIS_POPUP_MAP;
++    }
++    if (v->popup_awaiting)
++        return 0;
++    v->popup_awaiting = true;
++    return VIS_POPUP_COMMIT;
++}
++
++bool
++vis_popup_accepts_configure(const struct vis *v)
++{
++    return v->popup_exists && (v->popup_awaiting || v->popup_mapped);
++}
++
++unsigned
++vis_popup_configure(struct vis *v)
++{
++    if (!vis_popup_accepts_configure(v))
++        return 0;
++    v->popup_configured = true;
++    v->popup_awaiting = false;
++    if (v->mapped && !v->popup_mapped) {
++        v->popup_mapped = true;
++        return VIS_POPUP_MAP;
++    }
++    return 0;
++}
++
++void
++vis_popup_gone(struct vis *v)
++{
++    v->popup_exists = v->popup_awaiting = v->popup_configured =
++        v->popup_mapped = false;
++}
+diff --git a/visibility.h b/visibility.h
+new file mode 100644
+index 0000000..f12c297
+--- /dev/null
++++ b/visibility.h
+@@ -0,0 +1,72 @@
++#ifndef VISIBILITY_H
++#define VISIBILITY_H
++
++#include <stdbool.h>
++
++/* The keyboard's surfaces are created once and stay alive while it is hidden.
++ * This is the state that decides when they are mapped, kept free of Wayland
++ * calls so the sequences can be tested without a compositor: main.c turns the
++ * returned actions into protocol requests.
++ *
++ * The layer-shell and xdg-shell specs return an unmapped surface to its
++ * unconfigured state: a surface is only configured again by a configure that
++ * the compositor sends in answer to a commit without a buffer made after the
++ * unmap, and attaching a buffer before that configure is acked is a protocol
++ * error. A configure that was already in flight when the surface was unmapped
++ * answers nothing, so it is not allowed to count. That is why "configured" is
++ * cleared by an unmap, why only a surface that has asked for a configure
++ * ("awaiting") accepts one, and why show() may have to ask for one. */
++struct vis {
++    bool created;    /* surfaces exist */
++    bool visible;    /* the user wants the keyboard shown */
++    bool configured; /* configure acked at the current size, buffers usable */
++    bool mapped;     /* a buffer is attached to the layer surface */
++    bool awaiting;   /* a commit without a buffer was made, no configure yet */
++
++    /* The key popup is an xdg_popup of the layer surface. It has the same
++     * rules, and the compositor may also dismiss it (popup_done), after which
++     * the role object is gone and must be made again. */
++    bool popup_exists;     /* the xdg_popup role object exists */
++    bool popup_awaiting;   /* its initial commit was made, no configure yet */
++    bool popup_configured; /* a configure arrived after that commit */
++    bool popup_mapped;     /* a buffer is attached to the popup surface */
++};
++
++enum vis_action {
++    VIS_CREATE = 1,            /* make the surfaces and send the first commit */
++    VIS_MAP = 2,               /* attach the buffers */
++    VIS_UNMAP = 4,             /* attach no buffer and commit */
++    VIS_REQUEST_CONFIGURE = 8, /* commit without a buffer and wait */
++
++    /* what the popup needs after the layer surface is mapped */
++    VIS_POPUP_BUILD = 16,      /* make the xdg_popup and commit without a buffer */
++    VIS_POPUP_COMMIT = 32,     /* commit the existing popup without a buffer */
++    VIS_POPUP_MAP = 64,        /* attach the popup's buffer */
++    VIS_POPUP_UNMAP = 128,     /* with VIS_UNMAP: the popup was mapped or waiting */
++};
++
++/* geometry_ok: the size and scale that a show() would now use still equal
++ * the ones the configured buffers were made for. */
++unsigned vis_show(struct vis *v, bool geometry_ok);
++unsigned vis_hide(struct vis *v);
++/* Whether a layer configure may be looked at: the surface is mapped, or it
++ * asked for one. Anything else is a leftover of before an unmap, which must
++ * neither be acked nor recorded. */
++bool vis_accepts_configure(const struct vis *v);
++/* ready: the configured size equals the keyboard's and the buffers for it
++ * exist. A configure that is not ready never maps, and one that
++ * vis_accepts_configure refuses changes nothing. */
++unsigned vis_configure(struct vis *v, bool ready);
++
++/* The popup after the layer surface got its buffer, or after a resize of a
++ * mapped surface. wanted: the popup is on and its buffers exist. */
++unsigned vis_popup_sync(struct vis *v, bool wanted);
++bool vis_popup_accepts_configure(const struct vis *v);
++/* Returns VIS_POPUP_MAP when the popup's buffer can be attached now. A
++ * configure that vis_popup_accepts_configure refuses changes nothing. */
++unsigned vis_popup_configure(struct vis *v);
++/* The compositor dismissed the popup, or the keyboard changed size and the
++ * popup is to be made again: the role object is to be destroyed. */
++void vis_popup_gone(struct vis *v);
++
++#endif
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 7f5685f..865ffa9 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -57,7 +57,7 @@ can be patched to add new features.
+ 	Show the key-press popup (the magnified key shown above a key while it
+ 	is held). Whether this is the default depends on the layout: the popup
+ 	costs a second surface and two more buffers, so a layout for a small
+-	screen may turn it off. Of *--popup* and *--no-popup* the last one on
++	screen may turn it off, and then none of them is made. Of *--popup* and *--no-popup* the last one on
+ 	the command line wins.
+ 
+ *--no-popup*
+-- 
+2.51.0
+

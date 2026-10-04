@@ -1,0 +1,757 @@
+From 7dcaa2112c72ddc30facb34599edb0f56729f1a0 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 14:25:10 +0200
+Subject: [PATCH 7/9] Repaint only the keys that changed on a shift or layer
+ switch
+
+Every shift tap, unlatch after a key and layer switch redrew the whole
+keyboard: a full-surface fill plus every key, and damage for all of it. On
+a 240x320 panel with a CPU blend in the compositor that is the most
+expensive thing a typist triggers, and it repeats for every letter while
+shift is latched.
+
+The keyboard now remembers what the surface shows (layout, modifiers,
+compose state). kbd_redraw_layout compares that with the wanted state key
+by key and repaints only the keys whose label, highlight or colour scheme
+differ, so drwsurf_damage and the back-buffer backport region cover just
+those rectangles. A key still highlighted from a press is repainted too,
+as a full draw would paint it. Toggling a modifier or compose also goes
+through the diff, so every key carrying that modifier changes look, not
+only the one that was touched; a layer with two Ctrl keys used to
+highlight one.
+
+The diff is only trusted when both layers put the same kind of key at the
+same place. Different geometry, nothing drawn yet, or a surface that could
+not be drawn on fall back to the full draw, which is also what resize and
+show after hide still use. map_surfaces now runs the diff first, since
+redimension_keyboard can switch the layer while the surface is unmapped
+without drawing it.
+
+Toggling a modifier off no longer draws the key preview popup for the
+released key, since it goes through the same path shift always did.
+
+Key rows can end one pixel past the surface edge when the width does not
+divide evenly (seen at 200 px); that is existing behaviour and only
+affects damage outside the surface.
+
+test-damage renders a layer without a compositor, changes shift or the
+layer, and checks that the damage and backport regions equal the union of
+the rectangles of the keys that differ (computed from the layout tables,
+not from the code under test), that every pixel outside the damage is
+unchanged, and that the result equals a from-scratch render. It covers all
+layer pairs that share a keymap, a synthetic scheme-only difference,
+pressed keys, Ctrl and compose, and the full-redraw cases (first draw,
+resize, undrawn surface).
+Upstream-Status: Pending
+---
+ keyboard.c          |  98 +++++++--
+ keyboard.h          |  12 ++
+ main.c              |   4 +
+ tests/meson.build   |   7 +
+ tests/test-damage.c | 487 ++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 590 insertions(+), 18 deletions(-)
+ create mode 100644 tests/test-damage.c
+
+diff --git a/keyboard.c b/keyboard.c
+index d800339..f097718 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -46,7 +46,7 @@ kbd_switch_layout(struct kbd *kb, struct layout *l, size_t layer_index)
+         fprintf(stderr, "Switching to keymap %s\n", kb->layout->keymap_name);
+         create_and_upload_keymap(kb, kb->layout->keymap_name, 0);
+     }
+-    kbd_draw_layout(kb);
++    kbd_redraw_layout(kb);
+ }
+ 
+ void
+@@ -360,7 +360,7 @@ kbd_unpress_key(struct kbd *kb, uint32_t time)
+             kb->compose = 0;
+             kbd_switch_layout(kb, kb->last_abc_layout, kb->last_abc_index);
+         } else if (unlatch_shift||unlatch_ctrl||unlatch_alt||unlatch_super||unlatch_altgr||unlatch_tab) {
+-            kbd_draw_layout(kb);
++            kbd_redraw_layout(kb);
+         } else {
+             kbd_draw_key(kb, kb->last_press, Unpress);
+         }
+@@ -487,15 +487,9 @@ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+                 fprintf(stderr, "mod released\n");
+             zwp_virtual_keyboard_v1_key_mods(kb->vkbd, time, k->code, WL_KEYBOARD_KEY_STATE_RELEASED);
+         }
+-        if ((k->code == Shift) || (k->code == CapsLock)) {
+-            kbd_draw_layout(kb);
+-        } else {
+-            if (kb->mods & k->code) {
+-                kbd_draw_key(kb, k, Press);
+-            } else {
+-                kbd_draw_key(kb, k, Unpress);
+-            }
+-        }
++        /* Every key with this modifier changes look, not just the one that
++         * was touched, as a layer with two Ctrl keys shows. */
++        kbd_redraw_layout(kb);
+         zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
+         break;
+     case Layout:
+@@ -517,11 +511,7 @@ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+         } else {
+             kb->compose = 0;
+         }
+-        if ((bool)kb->compose) {
+-            kbd_draw_key(kb, k, Press);
+-        } else {
+-            kbd_draw_key(kb, k, Unpress);
+-        }
++        kbd_redraw_layout(kb);
+         break;
+     case NextLayer: //(also handles previous layer when shift modifier is on, or
+                     //"first layer" with other modifiers)
+@@ -643,11 +633,27 @@ kbd_clear_last_popup(struct kbd *kb)
+     }
+ }
+ 
++/* The one rule for which label a key shows, so that drawing a key and
++ * deciding whether it changed cannot disagree. */
++static const char *
++key_label(uint8_t mods, const struct key *k)
++{
++    const char *label = ((mods & Shift) || ((mods & CapsLock) &&
++        strlen(k->label) == 1 && isalpha(k->label[0]))) ? k->shift_label : k->label;
++    return label ? label : "";
++}
++
++static bool
++key_is_active(uint8_t mods, bool compose, const struct key *k)
++{
++    return (k->type == Mod && (mods & k->code)) ||
++           (k->type == Compose && compose);
++}
++
+ void
+ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
+ {
+-    const char *label = ((kb->mods & Shift)||((kb->mods & CapsLock) && 
+-        strlen(k->label) == 1 && isalpha(k->label[0]))) ? k->shift_label : k->label;
++    const char *label = key_label(kb->mods, k);
+     if (kb->debug)
+         fprintf(stderr, "Draw key +%d+%d %dx%d -> %s\n", k->x, k->y, k->w, k->h,
+                 label);
+@@ -733,6 +739,62 @@ kbd_draw_layout(struct kbd *kb)
+         }
+         next_key++;
+     }
++    /* A surface that could not be drawn on shows nothing, so it must not be
++     * trusted as a base for a partial redraw. */
++    kb->drawn_layout = drwsurf_usable(d) ? kb->layout : NULL;
++    kb->drawn_mods = kb->mods;
++    kb->drawn_compose = (bool)kb->compose;
++}
++
++/* Keys may only be compared one to one when both layers put the same kind of
++ * key at the same place; otherwise a changed key could leave parts of its
++ * neighbours' old pixels behind. */
++static bool
++same_geometry(const struct layout *a, const struct layout *b)
++{
++    const struct key *ka = a->keys, *kb = b->keys;
++    for (; ka->type != Last && kb->type != Last; ka++, kb++) {
++        if (ka->type != kb->type)
++            return false;
++        if (ka->type == EndRow)
++            continue;
++        if (ka->x != kb->x || ka->y != kb->y || ka->w != kb->w ||
++            ka->h != kb->h)
++            return false;
++    }
++    return ka->type == Last && kb->type == Last;
++}
++
++void
++kbd_redraw_layout(struct kbd *kb)
++{
++    struct layout *old = kb->drawn_layout;
++
++    if (!old || !drwsurf_usable(kb->surf) || !same_geometry(old, kb->layout)) {
++        kbd_draw_layout(kb);
++        return;
++    }
++    if (kb->debug)
++        fprintf(stderr, "Redraw changed keys\n");
++
++    bool compose = (bool)kb->compose;
++    struct key *ok = old->keys, *nk = kb->layout->keys;
++    for (; ok->type != Last; ok++, nk++) {
++        if (ok->type == Pad || ok->type == EndRow)
++            continue;
++        bool was = key_is_active(kb->drawn_mods, kb->drawn_compose, ok);
++        bool now = key_is_active(kb->mods, compose, nk);
++        /* A key still highlighted from a press is repainted even when its
++         * label stays the same, as a full draw would. */
++        if (was == now && ok->scheme == nk->scheme && ok != kb->last_press &&
++            nk != kb->last_press &&
++            !strcmp(key_label(kb->drawn_mods, ok), key_label(kb->mods, nk)))
++            continue;
++        kbd_draw_key(kb, nk, now ? Press : None);
++    }
++    kb->drawn_layout = kb->layout;
++    kb->drawn_mods = kb->mods;
++    kb->drawn_compose = compose;
+ }
+ 
+ bool
+diff --git a/keyboard.h b/keyboard.h
+index 9708d4b..a2a87ec 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -130,6 +130,14 @@ struct kbd {
+ 	struct zwp_virtual_keyboard_v1 *vkbd;
+ 
+ 	uint32_t last_popup_x, last_popup_y, last_popup_w, last_popup_h;
++
++	/* What the keyboard surface shows right now. A redraw compares the
++	 * wanted state with this and repaints only the keys that differ; NULL
++	 * means nothing trustworthy is on the surface and everything is
++	 * painted. */
++	struct layout *drawn_layout;
++	uint8_t drawn_mods;
++	bool drawn_compose;
+ };
+ 
+ void draw_inset(struct drwsurf *ds, uint32_t x, uint32_t y, uint32_t width,
+@@ -151,6 +159,10 @@ void kbd_print_first_utf8_char_stdout(const char *str);
+ void kbd_clear_last_popup(struct kbd *kb);
+ void kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type);
+ void kbd_draw_layout(struct kbd *kb);
++/* Like kbd_draw_layout, but repaints (and reports damage for) only the keys
++ * whose label or state changed since the last draw. Falls back to a full
++ * draw whenever that cannot be proven safe. */
++void kbd_redraw_layout(struct kbd *kb);
+ /* False when the buffers could not be allocated; the keyboard is then as it
+  * was before the call. */
+ bool kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
+diff --git a/main.c b/main.c
+index 5f71e7e..bbad307 100644
+--- a/main.c
++++ b/main.c
+@@ -762,6 +762,10 @@ apply_size(uint32_t w, uint32_t h, double scale)
+ static void
+ map_surfaces()
+ {
++    /* redimension_keyboard may have changed the layer while the surface was
++     * unmapped without drawing it. Only differing keys are painted, and
++     * mapping sends damage for the whole surface anyway. */
++    kbd_redraw_layout(&keyboard);
+     drwsurf_map(&draw_surf);
+     popup_sync();
+ }
+diff --git a/tests/meson.build b/tests/meson.build
+index f43ace5..60eba34 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -69,3 +69,10 @@ test('popup-memory', executable('test-popup',
+   '../os-compatibility.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
++
++# Same plain-memory setup as test-draw: no compositor, only the drawing code.
++test('label-damage', executable('test-damage',
++  'test-damage.c', '../drw.c', '../keyboard.c', '../mask.c',
++  '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
++  include_directories: test_inc,
++  dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+diff --git a/tests/test-damage.c b/tests/test-damage.c
+new file mode 100644
+index 0000000..635e8a9
+--- /dev/null
++++ b/tests/test-damage.c
+@@ -0,0 +1,487 @@
++/* Checks that a layer, shift or key-state change repaints and reports damage
++ * for exactly the keys that differ, without a compositor. The expected key
++ * set is computed here from the layout tables, never by calling the code
++ * under test, and the pixels are compared with a from-scratch render. */
++#include <cairo.h>
++#include <linux/input-event-codes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "check.h"
++#include "keyboard.h"
++#include "text.h"
++
++enum { W = 240, H = 120 };
++
++struct env {
++    struct drw ctx;
++    struct drwbuf back, display, pback, pdisplay;
++    struct drwsurf ds, popup;
++    struct clr_scheme schemes[2];
++    struct kbd kb;
++};
++
++static void
++env_init(struct env *e, enum drw_format format)
++{
++    memset(e, 0, sizeof(*e));
++    for (int i = 0; i < 2; i++) {
++        e->schemes[i].bg = (Color){.bgra = {0x30, 0x20, 0x10, 255}};
++        /* the schemes differ so a scheme change shows in the pixels */
++        e->schemes[i].fg = i ? (Color){.bgra = {0x60, 0xa0, 0x20, 255}}
++                             : (Color){.bgra = {0x20, 0x90, 0xe0, 255}};
++        e->schemes[i].high = (Color){.bgra = {0xf0, 0x40, 0x60, 255}};
++        e->schemes[i].text = (Color){.color = UINT32_MAX};
++        e->schemes[i].text_press = (Color){.color = UINT32_MAX};
++        e->schemes[i].rounding = 3;
++        e->schemes[i].text_font = text_font_new("Sans 14");
++    }
++    e->ds = (struct drwsurf){.ctx = &e->ctx, .format = format,
++                             .back_buffer = &e->back,
++                             .display_buffer = &e->display};
++    e->popup = (struct drwsurf){.ctx = &e->ctx, .format = DRW_FORMAT_ARGB8888,
++                                .back_buffer = &e->pback,
++                                .display_buffer = &e->pdisplay};
++    drwsurf_resize(&e->ds, W, H, 1.0);
++    drwsurf_resize(&e->popup, W, H * 2, 1.0);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_init_layout(&layouts[i], W, H);
++    e->kb = (struct kbd){.surf = &e->ds, .popup_surf = &e->popup,
++                         .schemes = e->schemes, .layout = &layouts[0],
++                         .w = W, .h = H, .scale = 1.0,
++                         .show_highlight = true};
++}
++
++static void
++env_free(struct env *e)
++{
++    for (int i = 0; i < 2; i++)
++        text_font_free(e->schemes[i].text_font);
++    drwsurf_drop_buffers(&e->ds);
++    drwsurf_drop_buffers(&e->popup);
++    cairo_region_destroy(e->ds.damage);
++    cairo_region_destroy(e->ds.backport_damage);
++    cairo_region_destroy(e->popup.damage);
++    cairo_region_destroy(e->popup.backport_damage);
++}
++
++static void
++clear_damage(struct drwsurf *ds)
++{
++    cairo_region_subtract(ds->damage, ds->damage);
++    cairo_region_subtract(ds->backport_damage, ds->backport_damage);
++}
++
++static uint32_t
++pixel(struct drwsurf *ds, uint32_t x, uint32_t y)
++{
++    uint32_t stride, size;
++    drw_buffer_geometry(ds->format, ds->width, ds->height, &stride, &size);
++    cairo_surface_flush(ds->back_buffer->cairo_surf);
++    const unsigned char *p = ds->back_buffer->pool_data + (size_t)y * stride;
++    if (ds->format == DRW_FORMAT_RGB565) {
++        uint16_t v;
++        memcpy(&v, p + x * 2, 2);
++        return v;
++    }
++    uint32_t v;
++    memcpy(&v, p + x * 4, 4);
++    return v;
++}
++
++static uint32_t *
++snapshot(struct drwsurf *ds)
++{
++    uint32_t *s = malloc(sizeof(uint32_t) * W * H);
++    for (uint32_t y = 0; y < H; y++)
++        for (uint32_t x = 0; x < W; x++)
++            s[y * W + x] = pixel(ds, x, y);
++    return s;
++}
++
++static bool
++drawable(const struct key *k)
++{
++    return k->type != Pad && k->type != EndRow && k->type != Last;
++}
++
++static void
++add_key(cairo_region_t *r, const struct key *k)
++{
++    cairo_rectangle_int_t rect = {k->x, k->y, k->w, k->h};
++    cairo_region_union_rectangle(r, &rect);
++}
++
++static cairo_region_t *
++whole_surface(void)
++{
++    cairo_rectangle_int_t rect = {0, 0, W, H};
++    return cairo_region_create_rectangle(&rect);
++}
++
++/* Some key rows end a pixel past the right edge when the width does not
++ * divide evenly, and damage there is harmless, so only the part on the
++ * surface is compared. */
++static bool
++damage_equal(cairo_region_t *damage, cairo_region_t *want, int w, int h)
++{
++    cairo_rectangle_int_t surf = {0, 0, w, h};
++    cairo_region_t *d = cairo_region_copy(damage), *x = cairo_region_copy(want);
++    cairo_region_intersect_rectangle(d, &surf);
++    cairo_region_intersect_rectangle(x, &surf);
++    bool same = cairo_region_equal(d, x);
++    cairo_region_destroy(d);
++    cairo_region_destroy(x);
++    return same;
++}
++
++/* The two layers put the same kind of key in the same place, key for key. */
++static bool
++same_geometry(const struct layout *a, const struct layout *b)
++{
++    const struct key *x = a->keys, *y = b->keys;
++    for (; x->type != Last && y->type != Last; x++, y++) {
++        if (x->type != y->type)
++            return false;
++        if (drawable(x) && (x->x != y->x || x->y != y->y || x->w != y->w ||
++                            x->h != y->h))
++            return false;
++    }
++    return x->type == Last && y->type == Last;
++}
++
++/* Compares what the surface shows with a from-scratch render of the same
++ * keyboard state, and the pixels outside the damage with an earlier render. */
++static void
++check_pixels(const char *what, struct env *e, const uint32_t *before,
++             struct layout *layout, uint8_t mods, bool all_may_change,
++             cairo_region_t *damage)
++{
++    struct env fresh;
++    env_init(&fresh, e->ds.format);
++    fresh.kb.layout = layout;
++    fresh.kb.mods = mods;
++    fresh.kb.compose = e->kb.compose;
++    kbd_draw_layout(&fresh.kb);
++    uint32_t *want = snapshot(&fresh.ds), *got = snapshot(&e->ds);
++
++    int wrong = 0, moved_outside = 0, moved_inside = 0;
++    for (uint32_t y = 0; y < H; y++)
++        for (uint32_t x = 0; x < W; x++) {
++            uint32_t i = y * W + x;
++            wrong += got[i] != want[i];
++            if (got[i] != before[i]) {
++                if (cairo_region_contains_point(damage, x, y))
++                    moved_inside++;
++                else
++                    moved_outside++;
++            }
++        }
++    CHECK(wrong == 0, "%s: %d pixels differ from a full redraw", what, wrong);
++    CHECK(moved_outside == 0, "%s: %d pixels changed outside the damage",
++          what, moved_outside);
++    if (!all_may_change)
++        CHECK(moved_inside > 0, "%s: nothing changed inside the damage", what);
++    free(want);
++    free(got);
++    env_free(&fresh);
++}
++
++static void
++test_shift(enum drw_format format)
++{
++    struct env e;
++    env_init(&e, format);
++    struct layout *l = &layouts[0];
++    kbd_draw_layout(&e.kb);
++    uint32_t *plain = snapshot(&e.ds);
++
++    /* With shift every key shows its shift label, and the shift key itself
++     * is drawn pressed. */
++    cairo_region_t *want = cairo_region_create();
++    int changed = 0, total = 0;
++    for (const struct key *k = l->keys; k->type != Last; k++) {
++        if (!drawable(k))
++            continue;
++        total++;
++        if (strcmp(k->label, k->shift_label) || (k->type == Mod && k->code == Shift)) {
++            add_key(want, k);
++            changed++;
++        }
++    }
++    CHECK(changed > 0 && changed < total,
++          "layout 0 has %d of %d keys that change with shift", changed, total);
++
++    clear_damage(&e.ds);
++    e.kb.mods = Shift;
++    kbd_redraw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++          "shift: damage is not the %d changed keys", changed);
++    CHECK(damage_equal(e.ds.backport_damage, want, e.ds.width, e.ds.height),
++          "shift: backport region is not the %d changed keys", changed);
++    check_pixels("shift", &e, plain, l, Shift, false, e.ds.damage);
++
++    clear_damage(&e.ds);
++    e.kb.mods = 0;
++    kbd_redraw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++          "unshift: damage is not the %d changed keys", changed);
++    uint32_t *back = snapshot(&e.ds);
++    CHECK(!memcmp(back, plain, sizeof(uint32_t) * W * H),
++          "unshift: pixels differ from the first render");
++    free(back);
++
++    cairo_region_destroy(want);
++    free(plain);
++    env_free(&e);
++}
++
++/* Returns 1 for a pair compared key by key, 0 for one that must repaint
++ * everything. */
++static int
++test_switch(enum drw_format format, struct layout *p, struct layout *q,
++            uint8_t mods)
++{
++    char what[64];
++    snprintf(what, sizeof(what), "%s -> %s mods %d", p->name ? p->name : "?",
++             q->name ? q->name : "?", mods);
++    struct env e;
++    env_init(&e, format);
++    e.kb.layout = p;
++    e.kb.mods = mods;
++    kbd_draw_layout(&e.kb);
++    uint32_t *before = snapshot(&e.ds);
++
++    bool same = same_geometry(p, q);
++    cairo_region_t *want = cairo_region_create();
++    if (same) {
++        const struct key *a = p->keys, *b = q->keys;
++        for (; a->type != Last; a++, b++) {
++            if (!drawable(a))
++                continue;
++            const char *la = mods & Shift ? a->shift_label : a->label;
++            const char *lb = mods & Shift ? b->shift_label : b->label;
++            if (strcmp(la, lb) || a->scheme != b->scheme)
++                add_key(want, b);
++        }
++    } else {
++        cairo_region_destroy(want);
++        want = whole_surface();
++    }
++
++    clear_damage(&e.ds);
++    kbd_switch_layout(&e.kb, q, 0);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height), "%s: wrong damage (%s)", what,
++          same ? "changed keys" : "whole surface");
++    CHECK(damage_equal(e.ds.backport_damage, want, e.ds.width, e.ds.height),
++          "%s: wrong backport region", what);
++    check_pixels(what, &e, before, q, mods, !same || cairo_region_is_empty(want),
++                 e.ds.damage);
++
++    cairo_region_destroy(want);
++    free(before);
++    env_free(&e);
++    return same;
++}
++
++static void
++test_layers(enum drw_format format)
++{
++    int compared = 0, fallback = 0;
++    for (int i = 0; i < NumLayouts; i++)
++        for (int j = i + 1; j < NumLayouts; j++) {
++            struct layout *p = &layouts[i], *q = &layouts[j];
++            if (strcmp(p->keymap_name, q->keymap_name))
++                continue; /* a different keymap would be uploaded */
++            if (test_switch(format, p, q, 0))
++                compared++;
++            else
++                fallback++;
++            if (format == DRW_FORMAT_RGB565 && i < 2)
++                test_switch(format, p, q, Shift);
++        }
++    CHECK(compared > 0, "no pair of layers has the same geometry");
++    CHECK(fallback > 0, "no pair of layers has different geometry");
++    fprintf(stderr, "format %d: %d pairs compared by key, %d full redraws\n",
++            format, compared, fallback);
++}
++
++/* No pair of the shipped layers differs only in a key's colour scheme, so
++ * make one: same keys, one of them in the other scheme. */
++static void
++test_scheme(enum drw_format format)
++{
++    struct layout *p = &layouts[0];
++    size_t n = 0;
++    while (p->keys[n].type != Last)
++        n++;
++    struct key *copy = malloc((n + 1) * sizeof(struct key));
++    memcpy(copy, p->keys, (n + 1) * sizeof(struct key));
++    struct layout q = *p;
++    q.keys = copy;
++    int flipped = 0;
++    for (size_t i = 0; i < n && flipped < 3; i++)
++        if (drawable(&copy[i]) && copy[i].type == Code && i % 4 == 1) {
++            copy[i].scheme ^= 1;
++            flipped++;
++        }
++    CHECK(flipped == 3, "could not change the scheme of three keys");
++    CHECK(test_switch(format, p, &q, 0) == 1, "copy has the same geometry");
++    free(copy);
++}
++
++static void
++test_full_redraws(enum drw_format format)
++{
++    struct env e;
++    env_init(&e, format);
++    cairo_region_t *all = whole_surface();
++
++    /* nothing drawn yet */
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, all, e.ds.width, e.ds.height),
++          "first draw is not a full redraw");
++
++    /* nothing changed: nothing to report */
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    CHECK(cairo_region_is_empty(e.ds.damage),
++          "an unchanged keyboard reported damage");
++
++    /* an explicit full draw, as show() after hide() does */
++    clear_damage(&e.ds);
++    kbd_draw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, all, e.ds.width, e.ds.height), "kbd_draw_layout is partial");
++
++    /* resize */
++    e.kb.w = 200;
++    e.kb.h = 100;
++    clear_damage(&e.ds);
++    CHECK(kbd_resize(&e.kb, layouts, NumLayouts), "resize failed");
++    cairo_rectangle_int_t r = {0, 0, 200, 100};
++    cairo_region_t *small = cairo_region_create_rectangle(&r);
++    CHECK(damage_equal(e.ds.damage, small, e.ds.width, e.ds.height),
++          "resize did not repaint the whole new surface");
++    cairo_region_destroy(small);
++
++    /* a surface that could not be drawn on leaves nothing to build on */
++    struct drwbuf saved = e.back;
++    e.back.cairo_surf = NULL;
++    kbd_draw_layout(&e.kb);
++    CHECK(e.kb.drawn_layout == NULL, "an undrawn surface counts as drawn");
++    e.back = saved;
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    cairo_rectangle_int_t r2 = {0, 0, 200, 100};
++    small = cairo_region_create_rectangle(&r2);
++    CHECK(damage_equal(e.ds.damage, small, e.ds.width, e.ds.height),
++          "no full redraw after an undrawn surface");
++    cairo_region_destroy(small);
++
++    cairo_region_destroy(all);
++    env_free(&e);
++}
++
++static void
++test_pressed(enum drw_format format)
++{
++    struct env e;
++    env_init(&e, format);
++    struct layout *l = &layouts[0];
++    kbd_draw_layout(&e.kb);
++    uint32_t *plain = snapshot(&e.ds);
++
++    struct key *code = NULL, *ctrl = NULL;
++    for (struct key *k = l->keys; k->type != Last; k++) {
++        if (!code && k->type == Code && k->w > 8)
++            code = k;
++        if (!ctrl && k->type == Mod && k->code == Ctrl)
++            ctrl = k;
++    }
++    CHECK(code && ctrl, "layout 0 lacks a code key or a Ctrl key");
++    if (!code || !ctrl)
++        return;
++
++    /* a key still drawn highlighted from a press is repainted by the next
++     * redraw, as a full draw would paint it */
++    kbd_draw_key(&e.kb, code, Press);
++    e.kb.last_press = code;
++    uint32_t *held = snapshot(&e.ds);
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    cairo_region_t *want = cairo_region_create();
++    add_key(want, code);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++          "pressed key: damage is not that key");
++    check_pixels("pressed key", &e, held, l, 0, false, e.ds.damage);
++    free(held);
++    e.kb.last_press = NULL;
++
++    /* toggling a modifier repaints every key that carries it, since a layer
++     * may have two */
++    cairo_region_destroy(want);
++    want = cairo_region_create();
++    for (const struct key *k = l->keys; k->type != Last; k++)
++        if (k->type == Mod && k->code == Ctrl)
++            add_key(want, k);
++    e.kb.mods |= Ctrl;
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++          "ctrl pressed: damage is not the Ctrl keys");
++    check_pixels("ctrl pressed", &e, plain, l, Ctrl, false, e.ds.damage);
++    e.kb.mods = 0;
++    clear_damage(&e.ds);
++    kbd_redraw_layout(&e.kb);
++    CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++          "ctrl released: damage is not the Ctrl keys");
++    uint32_t *after = snapshot(&e.ds);
++    CHECK(!memcmp(after, plain, sizeof(uint32_t) * W * H),
++          "ctrl released: pixels differ from the plain render");
++    free(after);
++
++    /* the compose key is pressed while a compose is pending */
++    struct layout *cl = NULL;
++    for (int i = 0; i < NumLayouts && !cl; i++)
++        for (const struct key *k = layouts[i].keys; k->type != Last; k++)
++            if (k->type == Compose)
++                cl = &layouts[i];
++    CHECK(cl != NULL, "no layout has a compose key");
++    if (cl) {
++        cairo_region_destroy(want);
++        want = cairo_region_create();
++        for (const struct key *k = cl->keys; k->type != Last; k++)
++            if (k->type == Compose)
++                add_key(want, k);
++        e.kb.layout = cl;
++        kbd_draw_layout(&e.kb);
++        uint32_t *idle = snapshot(&e.ds);
++        e.kb.compose = 1;
++        clear_damage(&e.ds);
++        kbd_redraw_layout(&e.kb);
++        CHECK(damage_equal(e.ds.damage, want, e.ds.width, e.ds.height),
++              "compose pending: damage is not the compose keys");
++        check_pixels("compose pending", &e, idle, cl, 0, false, e.ds.damage);
++        free(idle);
++    }
++    cairo_region_destroy(want);
++    free(plain);
++    env_free(&e);
++}
++
++int
++main(void)
++{
++    for (int f = DRW_FORMAT_RGB565; f <= DRW_FORMAT_ARGB8888; f++) {
++        test_shift(f);
++        test_layers(f);
++        test_scheme(f);
++        test_full_redraws(f);
++        test_pressed(f);
++    }
++    if (failures)
++        fprintf(stderr, "%d failure(s)\n", failures);
++    return failures ? 1 : 0;
++}
+-- 
+2.51.0
+

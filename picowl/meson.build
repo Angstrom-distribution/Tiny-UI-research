@@ -166,3 +166,16 @@ endif
 if get_option('tests')
   subdir('tests')
 endif
+
+# wvkbd-ipaq is a separate package, so its own tests only run when asked for.
+# The patched tree is built with the bitmap text backend (what the image
+# uses) and without the man page so that scdoc is not needed. meson runs the
+# registered tests of a subproject together with ours.
+if get_option('osk_tests').enabled()
+  subproject('wvkbd', default_options: [
+    'kbd_layout=ipaq',
+    'text=bitmap',
+    'tests=true',
+    'man=disabled',
+  ])
+endif

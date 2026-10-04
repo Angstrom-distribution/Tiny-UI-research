@@ -4,3 +4,4 @@ option('tools', type: 'boolean', value: true, description: 'Build and install ho
 option('rss_ceiling_kb', type: 'integer', value: 12288, description: 'VmHWM ceiling (kB) enforced by tests/rss.sh')
 option('udev', type: 'feature', value: 'auto', description: 'Install the backlight udev rule (dir from udev.pc udevdir)')
 option('udevrulesdir', type: 'string', value: '', description: 'udev rules install dir (default: <udevdir>/rules.d, else /usr/lib/udev/rules.d)')
+option('osk_tests', type: 'feature', value: 'disabled', description: 'Build wvkbd-ipaq from subprojects/wvkbd.wrap (needs the network or a downloaded subproject, plus wayland-client and cairo) and run its tests with the picowl tests. It is a test fixture: install with meson install --skip-subprojects')

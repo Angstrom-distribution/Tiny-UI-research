@@ -1,0 +1,208 @@
+From 1662c4ff1e07642566a94a8fc6f58d5652607a02 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 14:00:30 +0200
+Subject: [PATCH 5/9] Pick the key preview popup default per layout and add
+ --popup
+
+The popup is a second xdg_popup surface with its own two buffers, which a 64 MiB handheld cannot spare, while a desktop or phone layout wants it. The default therefore comes from DEFAULT_SHOW_POPUP in the layout's config header. Here the setting only decides whether the popup is drawn; the surface and its buffers are still made either way, and not making them while it is off comes with the commit that keeps the surfaces alive, which owns the popup's lifecycle. The upstream layouts keep today's value, true, and the ipaq layout will set it to false. --no-popup stays, --popup is the new inverse so either default can be overridden, and the last of the two on the command line wins. --help marks the layout's default and the man page describes both options.
+
+With -D the binary now reports the resolved popup setting right after option parsing, so the tests can read it without a compositor. tests/check-popup.sh compares it with the macro in the layout's config header, which proves the macro reaches the binary, and checks the option order rules and the --help marker.
+
+hide() created a wp_viewport for the popup surface in show() but never destroyed it, so every hide leaked a protocol object on the server. It is now destroyed together with the popup surface.
+Upstream-Status: Pending
+---
+ config.deskintl.h    |  3 +++
+ config.mobintl.h     |  3 +++
+ main.c               | 25 +++++++++++++++++++++++--
+ tests/check-popup.sh | 40 ++++++++++++++++++++++++++++++++++++++++
+ tests/meson.build    |  4 ++++
+ wvkbd.1.scd          | 11 +++++++++--
+ 6 files changed, 82 insertions(+), 4 deletions(-)
+ create mode 100755 tests/check-popup.sh
+
+diff --git a/config.deskintl.h b/config.deskintl.h
+index 4f59757..cfba684 100644
+--- a/config.deskintl.h
++++ b/config.deskintl.h
+@@ -3,6 +3,9 @@
+ 
+ #define DEFAULT_FONT "Sans 18"
+ #define DEFAULT_ROUNDING 5
++/* Whether a held key is magnified in a popup unless --popup/--no-popup says
++ * otherwise; a layout for a small screen turns it off to save a surface. */
++#define DEFAULT_SHOW_POPUP true
+ static const int transparency = 255;
+ 
+ struct clr_scheme schemes[] = {
+diff --git a/config.mobintl.h b/config.mobintl.h
+index fd6591a..0e64883 100644
+--- a/config.mobintl.h
++++ b/config.mobintl.h
+@@ -3,6 +3,9 @@
+ 
+ #define DEFAULT_FONT "Sans 14"
+ #define DEFAULT_ROUNDING 5
++/* Whether a held key is magnified in a popup unless --popup/--no-popup says
++ * otherwise; a layout for a small screen turns it off to save a surface. */
++#define DEFAULT_SHOW_POPUP true
+ #define SHIFT_SPACE_IS_TAB
+ static const int transparency = 255;
+ 
+diff --git a/main.c b/main.c
+index 6aa432e..84e21a9 100644
+--- a/main.c
++++ b/main.c
+@@ -22,6 +22,11 @@
+ #include "text.h"
+ #include "config.h"
+ 
++/* Configs written before the macro existed keep upstream's behaviour. */
++#ifndef DEFAULT_SHOW_POPUP
++#define DEFAULT_SHOW_POPUP true
++#endif
++
+ /* lazy die macro */
+ #define die(...)                                                               \
+     fprintf(stderr, __VA_ARGS__);                                              \
+@@ -694,7 +699,10 @@ usage(char *argv0)
+     fprintf(stderr, "  --fn [font] - Set font (e.g: DejaVu Sans 20); only with "
+             "the pango text backend\n");
+     fprintf(stderr, "  --hidden    - Start hidden (send SIGUSR2 to show)\n");
+-    fprintf(stderr, "  --no-popup             - Disable the key-press popup\n");
++    fprintf(stderr, "  --popup                - Show the key-press popup%s\n",
++            DEFAULT_SHOW_POPUP ? " (default)" : "");
++    fprintf(stderr, "  --no-popup             - Disable the key-press popup%s\n",
++            DEFAULT_SHOW_POPUP ? "" : " (default)");
+     fprintf(stderr, "  --no-highlight         - Don't highlight a key while pressed\n");
+     fprintf(stderr, "  --no-feedback          - Disable all key-press feedback "
+                     "(--no-popup and --no-highlight)\n");
+@@ -776,6 +784,10 @@ hide()
+         wp_viewport_destroy(draw_surf_viewport);
+         draw_surf_viewport = NULL;
+     }
++    if (popup_draw_surf_viewport) {
++        wp_viewport_destroy(popup_draw_surf_viewport);
++        popup_draw_surf_viewport = NULL;
++    }
+     if (popup_xdg_popup) {
+         xdg_popup_destroy(popup_xdg_popup);
+         popup_xdg_popup = NULL;
+@@ -951,7 +963,7 @@ main(int argc, char **argv)
+     keyboard.preferred_fractional_scale = 0;
+     keyboard.exclusive = true;
+     keyboard.corner_radius = 0;
+-    keyboard.show_popup = true;
++    keyboard.show_popup = DEFAULT_SHOW_POPUP;
+     keyboard.show_highlight = true;
+ 
+     uint8_t alpha = 0;
+@@ -1134,6 +1146,9 @@ main(int argc, char **argv)
+         } else if ((!strcmp(argv[i], "-no-popup")) ||
+                    (!strcmp(argv[i], "--no-popup"))) {
+             keyboard.show_popup = false;
++        } else if ((!strcmp(argv[i], "-popup")) ||
++                   (!strcmp(argv[i], "--popup"))) {
++            keyboard.show_popup = true;
+         } else if ((!strcmp(argv[i], "-no-highlight")) ||
+                    (!strcmp(argv[i], "--no-highlight"))) {
+             keyboard.show_highlight = false;
+@@ -1231,6 +1246,12 @@ main(int argc, char **argv)
+             schemes[i].rounding = rounding;
+     }
+ 
++    /* Lets the tests read the resolved default without a compositor. */
++    if (keyboard.debug) {
++        fprintf(stderr, "wvkbd: key popup %s\n",
++                keyboard.show_popup ? "on" : "off");
++    }
++
+     display = wl_display_connect(NULL);
+     if (display == NULL) {
+         die("Failed to create display\n");
+diff --git a/tests/check-popup.sh b/tests/check-popup.sh
+new file mode 100755
+index 0000000..8f5dc99
+--- /dev/null
++++ b/tests/check-popup.sh
+@@ -0,0 +1,40 @@
++#!/bin/sh
++# usage: check-popup.sh BINARY CONFIG_HEADER
++# -D makes the binary report the resolved popup setting right after option
++# parsing, before it connects to Wayland, so this needs no compositor. The
++# expected default is read from the layout's config header, which is what
++# proves the macro reaches the binary.
++bin=$1
++cfg=$2
++want=$(sed -n 's/^#define DEFAULT_SHOW_POPUP \(true\|false\)$/\1/p' "$cfg")
++case $want in
++true) want=on ;;
++false) want=off ;;
++*) echo "no DEFAULT_SHOW_POPUP in $cfg"; exit 1 ;;
++esac
++
++unset WAYLAND_DISPLAY WAYLAND_SOCKET
++export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}
++
++state() {
++	"$bin" -D "$@" 2>&1 | sed -n 's/^wvkbd: key popup //p'
++}
++expect() {
++	exp=$1; shift
++	got=$(state "$@")
++	[ "$got" = "$exp" ] || { echo "args '$*': got '$got', want '$exp'"; exit 1; }
++}
++
++expect "$want"
++expect on --popup
++expect off --no-popup
++expect off --no-feedback
++expect on --no-popup --popup
++expect off --popup --no-popup
++
++# The help text names the option and marks the layout's default.
++help=$("$bin" --help 2>&1)
++echo "$help" | grep -q -- '--popup ' || { echo "--help lacks --popup"; exit 1; }
++if [ "$want" = on ]; then mark=--popup; else mark=--no-popup; fi
++echo "$help" | grep -- "  $mark " | grep -q '(default)' ||
++	{ echo "--help does not mark $mark as default"; exit 1; }
+diff --git a/tests/meson.build b/tests/meson.build
+index 2d52369..19cd912 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -10,6 +10,10 @@ test('version', test_sh,
+ test('list-layers', test_sh,
+   args: [files('check-cli.sh'), exe, 'list-layers'])
+ 
++test('popup-default', test_sh,
++  args: [files('check-popup.sh'), exe,
++         files('../config.@0@.h'.format(kbd_layout))])
++
+ python = find_program('python3', required: false)
+ if python.found()
+   test('signals-during-startup', python,
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 66c8702..7f5685f 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -53,9 +53,16 @@ can be patched to add new features.
+ *--hidden*
+ 	Start hidden (send SIGUSR2 to show).
+ 
++*--popup*
++	Show the key-press popup (the magnified key shown above a key while it
++	is held). Whether this is the default depends on the layout: the popup
++	costs a second surface and two more buffers, so a layout for a small
++	screen may turn it off. Of *--popup* and *--no-popup* the last one on
++	the command line wins.
++
+ *--no-popup*
+-	Disable the key-press popup (the magnified key shown above a key while
+-	it is held). Useful for privacy, e.g. when typing on a lockscreen.
++	Disable the key-press popup. Useful for privacy, e.g. when typing on a
++	lockscreen.
+ 
+ *--no-highlight*
+ 	Don't highlight a key while it is pressed (draw it the same as an
+-- 
+2.51.0
+

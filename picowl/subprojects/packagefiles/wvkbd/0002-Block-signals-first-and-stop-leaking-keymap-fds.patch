@@ -1,0 +1,169 @@
+From de833f820e37e767d3aa3fbf85f33b482668f3f2 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 13:21:18 +0200
+Subject: [PATCH 2/9] Block signals first and stop leaking keymap fds
+
+A SIGUSR1/SIGUSR2/SIGRTMIN that arrived while main() was still doing its
+Wayland round trips hit the default action and killed the process; on the
+iPAQ the supervisor sends one right after exec. The mask is now built and
+applied at the top of main(); the signalfd and handlers are unchanged.
+
+The keymap string was already freed, but create_and_upload_keymap() left
+the anonymous file descriptor open and the mmap in place on every upload.
+libwayland dups the fd when it marshals the request, so both can be
+released right away. With the compose key that is a leak per key press.
+
+tests/check-signals.py connects the binary to a silent fake socket, sends
+all handled signals and checks the exit is the binary's own error status.
+---
+ keyboard.c             |  6 +++++
+ main.c                 | 23 ++++++++++--------
+ tests/check-signals.py | 55 ++++++++++++++++++++++++++++++++++++++++++
+ tests/meson.build      |  7 ++++++
+ 4 files changed, 81 insertions(+), 10 deletions(-)
+ create mode 100644 tests/check-signals.py
+
+diff --git a/keyboard.c b/keyboard.c
+index ea3be7e..4aa4e16 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -3,6 +3,7 @@
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <sys/mman.h>
++#include <unistd.h>
+ #include <ctype.h>
+ #include <time.h>
+ #include "keyboard.h"
+@@ -801,6 +802,11 @@ create_and_upload_keymap(struct kbd *kb, const char *name, uint32_t comp_unichr)
+     zwp_virtual_keyboard_v1_keymap(kb->vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
+                                    keymap_fd, keymap_size);
+     free((void *)keymap_str);
++    /* libwayland dups the fd when it marshals the request, so our copy and
++     * the mapping would otherwise leak on every keymap switch and every
++     * compose-key press. */
++    munmap(ptr, keymap_size);
++    close(keymap_fd);
+ }
+ 
+ // Get a monotonic millisecond timer.
+diff --git a/main.c b/main.c
+index e680f4c..aad4489 100644
+--- a/main.c
++++ b/main.c
+@@ -893,6 +893,19 @@ refresh_available_dimension()
+ int
+ main(int argc, char **argv)
+ {
++    /* Blocked before any other setup: a signal delivered during the Wayland
++     * round trips would otherwise hit the default action and kill us. It
++     * stays pending until the signalfd below reads it. */
++    sigset_t signal_mask;
++    sigemptyset(&signal_mask);
++    sigaddset(&signal_mask, SIGUSR1);
++    sigaddset(&signal_mask, SIGUSR2);
++    sigaddset(&signal_mask, SIGRTMIN);
++    sigaddset(&signal_mask, SIGPIPE);
++    if (sigprocmask(SIG_BLOCK, &signal_mask, NULL) == -1) {
++        die("Failed to disable handled signals: %d\n", errno);
++    }
++
+     /* parse command line arguments */
+     char *layer_names_list = NULL, *landscape_layer_names_list = NULL;
+     char *fc_font_pattern = NULL;
+@@ -1278,16 +1291,6 @@ main(int argc, char **argv)
+         die("Failed to get wayland_fd: %d\n", errno);
+     }
+ 
+-    sigset_t signal_mask;
+-    sigemptyset(&signal_mask);
+-    sigaddset(&signal_mask, SIGUSR1);
+-    sigaddset(&signal_mask, SIGUSR2);
+-    sigaddset(&signal_mask, SIGRTMIN);
+-    sigaddset(&signal_mask, SIGPIPE);
+-    if (sigprocmask(SIG_BLOCK, &signal_mask, NULL) == -1) {
+-        die("Failed to disable handled signals: %d\n", errno);
+-    }
+-
+     fds[SIGNAL_FD].fd = signalfd(-1, &signal_mask, 0);
+     if (fds[SIGNAL_FD].fd == -1) {
+         die("Failed to get signalfd: %d\n", errno);
+diff --git a/tests/check-signals.py b/tests/check-signals.py
+new file mode 100644
+index 0000000..e6c1d70
+--- /dev/null
++++ b/tests/check-signals.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++# usage: check-signals.py BINARY
++#
++# Start the binary against a fake Wayland socket that accepts the connection
++# and then says nothing, so the process sits in its start-up round trip. Send
++# every handled signal there, then hang up. With the signals blocked at the top
++# of main() they stay pending and the process dies of its own "wl_compositor
++# not available" error (status 1); with the default actions it is killed.
++#
++# This proves the mask is in place before the first Wayland round trip. It
++# does not prove the mask is in place at every earlier instruction of main(),
++# and it does not exercise the signalfd handlers (that needs a compositor).
++import os, signal, socket, subprocess, sys, tempfile
++
++SKIP = 77  # meson's "skipped" status
++if not hasattr(signal, "SIGRTMIN"):
++    sys.exit(SKIP)
++
++binary = sys.argv[1]
++with tempfile.TemporaryDirectory() as rundir:
++    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    srv.bind(os.path.join(rundir, "wl-test"))
++    srv.listen(1)
++    srv.settimeout(10)
++    env = dict(os.environ, XDG_RUNTIME_DIR=rundir, WAYLAND_DISPLAY="wl-test")
++    proc = subprocess.Popen([binary], env=env, stderr=subprocess.PIPE)
++    try:
++        conn, _ = srv.accept()
++    except socket.timeout:
++        proc.kill()
++        print("binary never connected:", proc.communicate()[1].decode())
++        sys.exit(1)
++    for sig in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGRTMIN, signal.SIGPIPE):
++        proc.send_signal(sig)
++    conn.close()
++    try:
++        err = proc.communicate(timeout=10)[1].decode()
++    except subprocess.TimeoutExpired:
++        proc.kill()
++        print("binary did not exit after the hang-up")
++        sys.exit(1)
++
++if proc.returncode < 0:
++    num = -proc.returncode
++    try:
++        name = signal.Signals(num).name
++    except ValueError:
++        name = "signal %d" % num
++    print("killed by %s (%d): a handled signal was not blocked before the "
++          "first Wayland round trip; stderr: %s" % (name, num, err))
++    sys.exit(1)
++if proc.returncode != 1:
++    print("exited with status %d, want 1 (the compositor error); "
++          "stderr: %s" % (proc.returncode, err))
++    sys.exit(1)
+diff --git a/tests/meson.build b/tests/meson.build
+index 3503815..934b334 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -4,3 +4,10 @@ test('version', test_sh,
+   args: [files('check-cli.sh'), exe, 'version', meson.project_version()])
+ test('list-layers', test_sh,
+   args: [files('check-cli.sh'), exe, 'list-layers'])
++
++python = find_program('python3', required: false)
++if python.found()
++  test('signals-during-startup', python,
++    args: [files('check-signals.py'), exe],
++    timeout: 30)
++endif
+-- 
+2.51.0
+

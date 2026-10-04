@@ -1,0 +1,1668 @@
+From e935fff1ce6005a7ec75660a0302c527f94710c8 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 14:39:21 +0200
+Subject: [PATCH 8/9] Add the ipaq layout for 240x320 handhelds
+
+The mobintl keys are sized for a phone and its 250 px height is most of a
+240x320 screen. The ipaq layout has ten 24 px keys per row and five rows (a
+function row with Esc, Tab, Ctl, Alt, arrows and Caps, then three rows of
+letters and a bottom row with the layer keys and Space), 100 px high. The
+layers are letters (Shift gives the capitals), digits and symbols, and the
+Dutch, German and French accents. Rows are relative to the width, so
+--dock, --ratio and --corner-radius work unchanged, and so does --width with
+--dock, since only a docked layer surface is given a width and the
+compositor sizes a full-width one; the man page says so. A layout can now size itself by screen: KBD_DEFAULT_HEIGHT gives
+100 px on QVGA portrait, 80 on QVGA landscape, 160 on VGA portrait and 130
+on VGA landscape, and -H, -L and the environment still win
+(kbd_pick_height). All heights divide by five so no strip stays unused.
+
+The layout has no keymap of its own: keymap.ipaq.h includes the latin keymap
+of mobintl, because the Copy keys, the AltGr levels and the COMP key must
+stay identical to it, and a copy of 1500 lines would drift. A guard in
+keymap.mobintl.h keeps the six other keymaps (about 390 kB of strings) out
+of the ipaq binary.
+
+config.ipaq.h turns the popup off, so its surface and its two buffers
+(384 kB at 240x100) are never made, and adds DEFAULT_EXCLUSIVE, which
+main.c reads like DEFAULT_SHOW_POPUP, so the ipaq keyboard overlaps the
+focused app instead of resizing it on every show. --exclusive is the new
+inverse of --non-exclusive, -D reports the resolved value, and --help and the
+man page mark the default. The font tables are regenerated to include the
+euro sign.
+
+kbd_init_layout rounded the accumulated pixel position of each key, and after
+floating point error the last key of a row could end one pixel past the
+surface (found at --width 200 with this layout). Both key edges are now
+rounded from the exact position, so every row ends at the width.
+
+Tests need no compositor. test-ipaq is built with the ipaq layout and keymap
+whatever the binary is built for, and checks geometry at 240, 320, 480 and
+640 px in both orientations and at docked widths (rows, key sizes, inside
+the surface, no overlaps, full rows, at least 20x18 px keys at 240x320), the
+height rules, that the bitmap fonts have every label and that the label fits
+its key, and that every key gives the keysym of its label through xkbcommon,
+including the Copy keys. check-exclusive.sh checks the default and the
+options. test-damage made its own pair of layers and its own compose key
+when a layout has none.
+---
+ README.md                |   3 +
+ bmfont-data.c            | 274 +++++++++++++------------
+ config.ipaq.h            |  62 ++++++
+ config.mk                |   2 +-
+ drw.c                    |   6 +
+ drw.h                    |   3 +
+ keyboard.c               |  39 ++--
+ keyboard.h               |   6 +
+ keymap.ipaq.h            |   6 +
+ keymap.mobintl.h         |  11 +
+ layout.ipaq.h            | 194 ++++++++++++++++++
+ main.c                   |  35 +++-
+ meson_options.txt        |   2 +-
+ tests/check-exclusive.sh |  38 ++++
+ tests/meson.build        |  19 ++
+ tests/test-damage.c      |  47 +++++
+ tests/test-ipaq.c        | 428 +++++++++++++++++++++++++++++++++++++++
+ tools/regen-fonts.sh     |   1 +
+ wvkbd.1.scd              |  44 +++-
+ 19 files changed, 1065 insertions(+), 155 deletions(-)
+ create mode 100644 config.ipaq.h
+ create mode 100644 keymap.ipaq.h
+ create mode 100644 layout.ipaq.h
+ create mode 100755 tests/check-exclusive.sh
+ create mode 100644 tests/test-ipaq.c
+
+diff --git a/README.md b/README.md
+index 3de351d..7c275b9 100644
+--- a/README.md
++++ b/README.md
+@@ -57,6 +57,9 @@ The other set of layouts is called `deskintl` *(desktop international)*, which g
+ tablet devices with a larger touchscreen. The set is US-International English. Run `make LAYOUT=deskintl`. The resulting binary
+ is called `wvkbd-deskintl`.
+ 
++The `ipaq` set is for 64 MiB handhelds with 240x320 screens: ten 24 px keys per row, five rows, no popup and no exclusive zone by default. With the popup off its surface and buffers are not made, which saves 384 kB at 240x100.
++Run `make LAYOUT=ipaq` or `meson setup build -Dkbd_layout=ipaq`. The resulting binary is called `wvkbd-ipaq`; see its man page.
++
+ You can, however, define your own layouts by copying and modifying `config.mobintl.h`, `layout.mobintl.h` and `keymap.mobintl.h`
+ (replace `mobintl` for something like `yourlayout`), or `config.deskintl.h`, `layout.deskintl.h` and `keymap.deskintl.h`. Then
+ make your layout set using `make LAYOUT=yourlayout`, and the resulting binary will be `wvkbd-yourlayout`.
+diff --git a/bmfont-data.c b/bmfont-data.c
+index 03394bc..0489418 100644
+--- a/bmfont-data.c
++++ b/bmfont-data.c
+@@ -1736,75 +1736,78 @@ static const uint8_t bmfont_10x20_bits[] = {
+ 	0xc6,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xde,0x00,0x00,0x00,
+ 	0xc3,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,
+ 	0xd3,0x00,0x00,0x00,0xce,0x00,0x00,0x00,0xff,0xc0,0x00,0x00,0xdb,0x00,0x00,0x00,
+-	0xdb,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x60,0x00,0x00,0x00,
+-	0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0x60,0x00,0x00,0x00,0x30,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x7e,0x00,0x00,0x00,
+-	0xdb,0x00,0x00,0x00,0x99,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0xdb,0x00,0x00,0x00,0x1e,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x60,0x00,0x00,0x00,
++	0x60,0x00,0x00,0x00,0xfe,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,
++	0x60,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x1e,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0xff,0x80,0x00,0x00,
++	0xff,0x80,0x00,0x00,0x60,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x7e,0x00,0x00,0x00,0xdb,0x00,0x00,0x00,
++	0x99,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+ 	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x06,0x00,0x00,0x00,
+-	0x03,0x00,0x00,0x00,0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0x03,0x00,0x00,0x00,
+-	0x06,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x99,0x00,0x00,0x00,0xdb,0x00,0x00,0x00,
+-	0x7e,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x3c,0x00,0x00,0x00,0x7e,0x00,0x00,0x00,0xdb,0x00,0x00,0x00,0x99,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,
+-	0x03,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x33,0x00,0x00,0x00,
+-	0x63,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0x60,0x00,0x00,0x00,
+-	0x30,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0xff,0x80,0x00,0x00,
+-	0xff,0x80,0x00,0x00,0xd8,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+-	0x19,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,
+-	0x0d,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x22,0x00,0x00,0x00,0x77,0x00,0x00,0x00,
+-	0xaa,0x80,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x0c,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x03,0x00,0x00,0x00,
++	0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0x03,0x00,0x00,0x00,0x06,0x00,0x00,0x00,
++	0x0c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x99,0x00,0x00,0x00,0xdb,0x00,0x00,0x00,0x7e,0x00,0x00,0x00,
++	0x3c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,
++	0x7e,0x00,0x00,0x00,0xdb,0x00,0x00,0x00,0x99,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0x03,0x00,0x00,0x00,
++	0x03,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x63,0x00,0x00,0x00,
++	0xff,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0x30,0x00,0x00,0x00,
++	0xcc,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,
++	0xd8,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x19,0x80,0x00,0x00,
++	0x0d,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,
++	0x19,0x80,0x00,0x00,0x22,0x00,0x00,0x00,0x77,0x00,0x00,0x00,0xaa,0x80,0x00,0x00,
+ 	0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
+ 	0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
+ 	0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
+ 	0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
+-	0x22,0x00,0x00,0x00,0xaa,0x80,0x00,0x00,0x77,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
+-	0x08,0x00,0x00,0x00,0x1c,0x00,0x00,0x00,0x36,0x00,0x00,0x00,0x77,0x00,0x00,0x00,
+-	0xf7,0x80,0x00,0x00,0xb6,0x80,0x00,0x00,0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,
++	0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x22,0x00,0x00,0x00,
++	0xaa,0x80,0x00,0x00,0x77,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x08,0x00,0x00,0x00,
++	0x1c,0x00,0x00,0x00,0x36,0x00,0x00,0x00,0x77,0x00,0x00,0x00,0xf7,0x80,0x00,0x00,
++	0xb6,0x80,0x00,0x00,0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,
+ 	0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,0x36,0x00,0x00,0x00,
+-	0x36,0x00,0x00,0x00,0xc6,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,
+-	0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0xd8,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,
+-	0xc6,0x00,0x00,0x00,0x31,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,
+-	0xff,0x80,0x00,0x00,0xff,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,0x19,0x80,0x00,0x00,
+-	0x31,0x80,0x00,0x00,0x18,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x42,0x00,0x00,0x00,
+-	0x81,0x00,0x00,0x00,0xe7,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
++	0xc6,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0xff,0x80,0x00,0x00,
++	0xff,0x80,0x00,0x00,0xd8,0x00,0x00,0x00,0xcc,0x00,0x00,0x00,0xc6,0x00,0x00,0x00,
++	0x31,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,0xff,0x80,0x00,0x00,
++	0xff,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x42,0x00,0x00,0x00,0x81,0x00,0x00,0x00,
++	0xe7,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
+ 	0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
+-	0x24,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
+-	0x42,0x00,0x00,0x00,0x81,0x00,0x00,0x00,0xe7,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
+-	0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
+-	0xe7,0x00,0x00,0x00,0x81,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,
+-	0xc6,0x00,0x00,0x00,0xa9,0x00,0x00,0x00,0x90,0x80,0x00,0x00,0xa9,0x00,0x00,0x00,
+-	0xc6,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,0xff,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,
+-	0xea,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,0xd5,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,
+-	0xde,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,0xff,0xc0,0x00,0x00,0x1f,0x80,0x00,0x00,
+-	0x31,0x80,0x00,0x00,0x4a,0x80,0x00,0x00,0x84,0x80,0x00,0x00,0x4a,0x80,0x00,0x00,
+-	0x31,0x80,0x00,0x00,0x1f,0x80,0x00,0x00,0xe7,0x00,0x00,0x00,0x66,0x00,0x00,0x00,
+-	0x7e,0x00,0x00,0x00,0x7a,0x00,0x00,0x00,0x51,0x00,0x00,0x00,0x70,0x80,0x00,0x00,
+-	0x50,0x80,0x00,0x00,0x08,0x80,0x00,0x00,0x88,0x80,0x00,0x00,0x84,0x80,0x00,0x00,
+-	0x41,0x00,0x00,0x00,0x22,0x00,0x00,0x00,0x1c,0x00,0x00,0x00,0x14,0x00,0x00,0x00,
++	0x3c,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x42,0x00,0x00,0x00,
++	0x81,0x00,0x00,0x00,0xe7,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,
++	0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0x24,0x00,0x00,0x00,0xe7,0x00,0x00,0x00,
++	0x81,0x00,0x00,0x00,0xff,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,0xc6,0x00,0x00,0x00,
++	0xa9,0x00,0x00,0x00,0x90,0x80,0x00,0x00,0xa9,0x00,0x00,0x00,0xc6,0x00,0x00,0x00,
++	0xfc,0x00,0x00,0x00,0xff,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,0xea,0xc0,0x00,0x00,
++	0x80,0x40,0x00,0x00,0xd5,0xc0,0x00,0x00,0x80,0x40,0x00,0x00,0xde,0xc0,0x00,0x00,
++	0x80,0x40,0x00,0x00,0xff,0xc0,0x00,0x00,0x1f,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
++	0x4a,0x80,0x00,0x00,0x84,0x80,0x00,0x00,0x4a,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
++	0x1f,0x80,0x00,0x00,0xe7,0x00,0x00,0x00,0x66,0x00,0x00,0x00,0x7e,0x00,0x00,0x00,
++	0x7a,0x00,0x00,0x00,0x51,0x00,0x00,0x00,0x70,0x80,0x00,0x00,0x50,0x80,0x00,0x00,
++	0x08,0x80,0x00,0x00,0x88,0x80,0x00,0x00,0x84,0x80,0x00,0x00,0x41,0x00,0x00,0x00,
++	0x22,0x00,0x00,0x00,0x1c,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x14,0x00,0x00,0x00,
+ 	0x14,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x14,0x00,0x00,0x00,
+-	0x14,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x95,0x40,0x00,0x00,0x92,0x40,0x00,0x00,
+-	0x60,0x40,0x00,0x00,0x05,0x40,0x00,0x00,0x00,0x80,0x00,0x00,0x07,0x00,0x00,0x00,
+-	0xa8,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++	0x14,0x00,0x00,0x00,0x95,0x40,0x00,0x00,0x92,0x40,0x00,0x00,0x60,0x40,0x00,0x00,
++	0x05,0x40,0x00,0x00,0x00,0x80,0x00,0x00,0x07,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,
++	0xa8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+ 	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+-	0x00,0x00,0x00,0x00,0xff,0xc0,0x00,0x00,0xff,0xc0,0x00,0x00,0x60,0x00,0x00,0x00,
+-	0x90,0x00,0x00,0x00,0x60,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++	0xff,0xc0,0x00,0x00,0xff,0xc0,0x00,0x00,0x60,0x00,0x00,0x00,0x90,0x00,0x00,0x00,
++	0x60,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+ 	0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+-	0x00,0x00,0x00,0x00,0xff,0xc0,0x00,0x00,0xff,0xc0,0x00,0x00,0x84,0x00,0x00,0x00,
+-	0xf9,0x80,0x00,0x00,0x81,0x80,0x00,0x00,0x21,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
++	0xff,0xc0,0x00,0x00,0xff,0xc0,0x00,0x00,0x84,0x00,0x00,0x00,0xf9,0x80,0x00,0x00,
++	0x81,0x80,0x00,0x00,0x21,0x80,0x00,0x00,0x31,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
++	0x19,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,0x0f,0x80,0x00,0x00,
++	0x07,0x80,0x00,0x00,0x7f,0x00,0x00,0x00,0x7c,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
++	0xc1,0x80,0x00,0x00,0x71,0x80,0x00,0x00,0xc1,0x80,0x00,0x00,0x31,0x80,0x00,0x00,
+ 	0x31,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x0d,0x80,0x00,0x00,
+ 	0x0f,0x80,0x00,0x00,0x07,0x80,0x00,0x00,0x7f,0x00,0x00,0x00,0x7c,0x00,0x00,0x00,
+-	0x70,0x00,0x00,0x00,0xc1,0x80,0x00,0x00,0x71,0x80,0x00,0x00,0xc1,0x80,0x00,0x00,
+-	0x31,0x80,0x00,0x00,0x31,0x80,0x00,0x00,0x19,0x80,0x00,0x00,0x19,0x80,0x00,0x00,
+-	0x0d,0x80,0x00,0x00,0x0f,0x80,0x00,0x00,0x07,0x80,0x00,0x00,0x7f,0x00,0x00,0x00,
+-	0x7c,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,
+-	0x63,0x00,0x00,0x00,0x63,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x33,0x00,0x00,0x00,
+-	0x1b,0x00,0x00,0x00,0x1f,0x00,0x00,0x00,0x0f,0x00,0x00,0x00,0xfe,0x00,0x00,0x00,
+-	0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,
+-	0x70,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,
++	0x03,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,0xc3,0x00,0x00,0x00,0x63,0x00,0x00,0x00,
++	0x63,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x1b,0x00,0x00,0x00,
++	0x1f,0x00,0x00,0x00,0x0f,0x00,0x00,0x00,0xfe,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0x00,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
++	0xc0,0x00,0x00,0x00,
+ };
+ 
+ static const struct bmglyph bmfont_10x20_glyphs[] = {
+@@ -2401,36 +2404,37 @@ static const struct bmglyph bmfont_10x20_glyphs[] = {
+ 	{0x1e9e, 27604, 10, 8, 13, 1, -13},
+ 	{0x2014, 27656, 10, 10, 1, 0, -7},
+ 	{0x2026, 27660, 10, 8, 2, 1, -2},
+-	{0x2190, 27668, 10, 9, 8, 0, -10},
+-	{0x2191, 27700, 10, 8, 13, 1, -13},
+-	{0x2192, 27752, 10, 9, 8, 0, -10},
+-	{0x2193, 27784, 10, 8, 13, 1, -13},
+-	{0x21a5, 27836, 10, 8, 13, 1, -13},
+-	{0x21b5, 27888, 10, 8, 9, 1, -10},
+-	{0x21b9, 27924, 10, 9, 13, 0, -13},
+-	{0x21c8, 27976, 10, 9, 13, 0, -13},
+-	{0x21ca, 28028, 10, 9, 13, 0, -13},
+-	{0x21d1, 28080, 10, 9, 13, 0, -13},
+-	{0x21e4, 28132, 10, 9, 8, 0, -10},
+-	{0x21e5, 28164, 10, 9, 8, 0, -10},
+-	{0x21e7, 28196, 10, 8, 13, 1, -13},
+-	{0x21eb, 28248, 10, 8, 13, 1, -13},
+-	{0x2326, 28300, 10, 9, 7, 1, -8},
+-	{0x2328, 28328, 10, 10, 9, 0, -9},
+-	{0x232b, 28364, 10, 9, 7, 0, -8},
+-	{0x237d, 28392, 10, 8, 3, 1, -6},
+-	{0x238b, 28404, 10, 9, 10, 0, -10},
+-	{0xfdfc, 28444, 10, 10, 13, 0, -12},
+-	{0xfe7d, 28496, 10, 10, 11, 0, -13},
+-	{0xfe7f, 28540, 10, 10, 12, 0, -14},
+-	{0xfef5, 28588, 10, 9, 13, 0, -15},
+-	{0xfef7, 28640, 10, 9, 13, 0, -15},
+-	{0xfef9, 28692, 10, 8, 17, 1, -14},
++	{0x20ac, 27668, 10, 8, 11, 1, -11},
++	{0x2190, 27712, 10, 9, 8, 0, -10},
++	{0x2191, 27744, 10, 8, 13, 1, -13},
++	{0x2192, 27796, 10, 9, 8, 0, -10},
++	{0x2193, 27828, 10, 8, 13, 1, -13},
++	{0x21a5, 27880, 10, 8, 13, 1, -13},
++	{0x21b5, 27932, 10, 8, 9, 1, -10},
++	{0x21b9, 27968, 10, 9, 13, 0, -13},
++	{0x21c8, 28020, 10, 9, 13, 0, -13},
++	{0x21ca, 28072, 10, 9, 13, 0, -13},
++	{0x21d1, 28124, 10, 9, 13, 0, -13},
++	{0x21e4, 28176, 10, 9, 8, 0, -10},
++	{0x21e5, 28208, 10, 9, 8, 0, -10},
++	{0x21e7, 28240, 10, 8, 13, 1, -13},
++	{0x21eb, 28292, 10, 8, 13, 1, -13},
++	{0x2326, 28344, 10, 9, 7, 1, -8},
++	{0x2328, 28372, 10, 10, 9, 0, -9},
++	{0x232b, 28408, 10, 9, 7, 0, -8},
++	{0x237d, 28436, 10, 8, 3, 1, -6},
++	{0x238b, 28448, 10, 9, 10, 0, -10},
++	{0xfdfc, 28488, 10, 10, 13, 0, -12},
++	{0xfe7d, 28540, 10, 10, 11, 0, -13},
++	{0xfe7f, 28584, 10, 10, 12, 0, -14},
++	{0xfef5, 28632, 10, 9, 13, 0, -15},
++	{0xfef7, 28684, 10, 9, 13, 0, -15},
++	{0xfef9, 28736, 10, 8, 17, 1, -14},
+ };
+ 
+ const struct bmfont bmfont_10x20 = {
+ 	.name = "10x20", .cell_w = 10, .cell_h = 20, .ascent = 16,
+-	.glyphs = bmfont_10x20_glyphs, .nglyphs = 618, .bits = bmfont_10x20_bits,
++	.glyphs = bmfont_10x20_glyphs, .nglyphs = 619, .bits = bmfont_10x20_bits,
+ };
+ 
+ /* -Misc-Fixed-Medium-R-SemiCondensed--13-120-75-75-C-60-ISO10646-1
+@@ -3507,42 +3511,45 @@ static const uint8_t bmfont_6x13_bits[] = {
+ 	0x88,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x48,0x00,0x00,0x00,
+ 	0x88,0x00,0x00,0x00,0x90,0x00,0x00,0x00,0xb0,0x00,0x00,0x00,0x88,0x00,0x00,0x00,
+ 	0x88,0x00,0x00,0x00,0x90,0x00,0x00,0x00,0xa0,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,
+-	0xa8,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
+-	0x40,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
+-	0xa8,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+-	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+-	0x10,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0xa8,0x00,0x00,0x00,0x38,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x40,0x00,0x00,0x00,
++	0xf0,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0xf0,0x00,0x00,0x00,0x40,0x00,0x00,0x00,
++	0x40,0x00,0x00,0x00,0x38,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x40,0x00,0x00,0x00,
++	0xf8,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0x70,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+ 	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+-	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
+-	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x10,0x00,0x00,0x00,
+ 	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+-	0x20,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x08,0x00,0x00,0x00,
+-	0x08,0x00,0x00,0x00,0x48,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x40,0x00,0x00,0x00,
+-	0xa0,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,
+-	0xa8,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
+-	0x28,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,
++	0x70,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
++	0xa8,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x08,0x00,0x00,0x00,
++	0x08,0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x48,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0x40,0x00,0x00,0x00,0xa0,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0xc0,0x00,0x00,0x00,0xa8,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0x18,0x00,0x00,0x00,0x28,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
+ 	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+ 	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+ 	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+-	0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+-	0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
++	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+ 	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+-	0xa0,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,
+-	0xa0,0x00,0x00,0x00,0x28,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
+-	0x18,0x00,0x00,0x00,0x28,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+-	0xd8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+-	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0x50,0x00,0x00,0x00,0xa0,0x00,0x00,0x00,0xc0,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0xc0,0x00,0x00,0x00,0xa0,0x00,0x00,0x00,0x28,0x00,0x00,0x00,0x18,0x00,0x00,0x00,
++	0xf8,0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x28,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
+ 	0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
+-	0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x88,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
+-	0xf0,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0xa4,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,
+-	0xf0,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,
+-	0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,
+-	0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,
+-	0x3c,0x00,0x00,0x00,0x6c,0x00,0x00,0x00,0x94,0x00,0x00,0x00,0x6c,0x00,0x00,0x00,
+-	0x3c,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0xe8,0x00,0x00,0x00,
+-	0xc4,0x00,0x00,0x00,0xa4,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x84,0x00,0x00,0x00,
+-	0x78,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
+-	0xf8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x50,0x00,0x00,0x00,
++	0x50,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x88,0x00,0x00,0x00,
++	0xf8,0x00,0x00,0x00,0xf0,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0xa4,0x00,0x00,0x00,
++	0xd8,0x00,0x00,0x00,0xf0,0x00,0x00,0x00,0xfc,0x00,0x00,0x00,0x84,0x00,0x00,0x00,
++	0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,
++	0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,0xac,0x00,0x00,0x00,0x84,0x00,0x00,0x00,
++	0xfc,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0x6c,0x00,0x00,0x00,0x94,0x00,0x00,0x00,
++	0x6c,0x00,0x00,0x00,0x3c,0x00,0x00,0x00,0xd8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,
++	0xe8,0x00,0x00,0x00,0xc4,0x00,0x00,0x00,0xa4,0x00,0x00,0x00,0x14,0x00,0x00,0x00,
++	0x84,0x00,0x00,0x00,0x78,0x00,0x00,0x00,0x50,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,
++	0xf8,0x00,0x00,0x00,0xf8,0x00,0x00,0x00,0x70,0x00,0x00,0x00,0x20,0x00,0x00,0x00,
++	0x20,0x00,0x00,0x00,
+ };
+ 
+ static const struct bmglyph bmfont_6x13_glyphs[] = {
+@@ -4059,31 +4066,32 @@ static const struct bmglyph bmfont_6x13_glyphs[] = {
+ 	{0x1e9e, 17064, 6, 5, 9, 0, -9},
+ 	{0x2014, 17100, 6, 6, 1, 0, -5},
+ 	{0x2026, 17104, 6, 5, 1, 0, -1},
+-	{0x2190, 17108, 6, 5, 5, 0, -6},
+-	{0x2191, 17128, 6, 5, 9, 0, -9},
+-	{0x2192, 17164, 6, 5, 5, 0, -6},
+-	{0x2193, 17184, 6, 5, 9, 0, -9},
+-	{0x21a5, 17220, 6, 5, 9, 0, -9},
+-	{0x21b5, 17256, 6, 5, 6, 0, -7},
+-	{0x21b9, 17280, 6, 5, 9, 0, -9},
+-	{0x21c8, 17316, 6, 5, 9, 0, -9},
+-	{0x21ca, 17352, 6, 5, 9, 0, -9},
+-	{0x21d1, 17388, 6, 5, 9, 0, -9},
+-	{0x21e4, 17424, 6, 5, 5, 0, -6},
+-	{0x21e5, 17444, 6, 5, 5, 0, -6},
+-	{0x21e7, 17464, 6, 5, 9, 0, -9},
+-	{0x21eb, 17500, 6, 5, 9, 0, -9},
+-	{0x2326, 17536, 6, 6, 5, 0, -7},
+-	{0x2328, 17556, 6, 6, 11, 0, -10},
+-	{0x232b, 17600, 6, 6, 5, 0, -7},
+-	{0x237d, 17620, 6, 5, 2, 0, -5},
+-	{0x238b, 17628, 6, 6, 6, 0, -7},
+-	{0x2764, 17652, 6, 5, 7, 0, -7},
++	{0x20ac, 17108, 6, 5, 9, 0, -9},
++	{0x2190, 17144, 6, 5, 5, 0, -6},
++	{0x2191, 17164, 6, 5, 9, 0, -9},
++	{0x2192, 17200, 6, 5, 5, 0, -6},
++	{0x2193, 17220, 6, 5, 9, 0, -9},
++	{0x21a5, 17256, 6, 5, 9, 0, -9},
++	{0x21b5, 17292, 6, 5, 6, 0, -7},
++	{0x21b9, 17316, 6, 5, 9, 0, -9},
++	{0x21c8, 17352, 6, 5, 9, 0, -9},
++	{0x21ca, 17388, 6, 5, 9, 0, -9},
++	{0x21d1, 17424, 6, 5, 9, 0, -9},
++	{0x21e4, 17460, 6, 5, 5, 0, -6},
++	{0x21e5, 17480, 6, 5, 5, 0, -6},
++	{0x21e7, 17500, 6, 5, 9, 0, -9},
++	{0x21eb, 17536, 6, 5, 9, 0, -9},
++	{0x2326, 17572, 6, 6, 5, 0, -7},
++	{0x2328, 17592, 6, 6, 11, 0, -10},
++	{0x232b, 17636, 6, 6, 5, 0, -7},
++	{0x237d, 17656, 6, 5, 2, 0, -5},
++	{0x238b, 17664, 6, 6, 6, 0, -7},
++	{0x2764, 17688, 6, 5, 7, 0, -7},
+ };
+ 
+ const struct bmfont bmfont_6x13 = {
+ 	.name = "6x13", .cell_w = 6, .cell_h = 13, .ascent = 11,
+-	.glyphs = bmfont_6x13_glyphs, .nglyphs = 533, .bits = bmfont_6x13_bits,
++	.glyphs = bmfont_6x13_glyphs, .nglyphs = 534, .bits = bmfont_6x13_bits,
+ };
+ 
+ const struct bmfont *const bmfonts[] = {&bmfont_10x20, &bmfont_6x13};
+diff --git a/config.ipaq.h b/config.ipaq.h
+new file mode 100644
+index 0000000..a0dac40
+--- /dev/null
++++ b/config.ipaq.h
+@@ -0,0 +1,62 @@
++#ifndef config_h_INCLUDED
++#define config_h_INCLUDED
++
++/* Only the pango text backend reads the font. The bitmap backend picks 6x13
++ * or 10x20 from the key height, which is 6x13 on a 240 px wide screen. */
++#define DEFAULT_FONT "Sans 8"
++#define DEFAULT_ROUNDING 2
++/* The popup is a second surface with two more buffers (384 kB at 240x100),
++ * too much for 64 MiB. While it is off none of them is made. */
++#define DEFAULT_SHOW_POPUP false
++/* An exclusive zone resizes the focused app on every show and hide, which is
++ * slow over the MediaQ bus. The keyboard overlaps the app instead. */
++#define DEFAULT_EXCLUSIVE false
++/* SHIFT_SPACE_IS_TAB stays undefined: Shift is sticky and the function row has
++ * a Tab key, so Shift+Space would only turn a capital letter followed by a
++ * space into a Tab. */
++static const int transparency = 255;
++
++struct clr_scheme schemes[] = {
++{
++  /* colors */
++  .bg = {.bgra = {15, 15, 15, transparency}},
++  .fg = {.bgra = {45, 45, 45, transparency}},
++  .high = {.bgra = {100, 100, 100, transparency}},
++  .swipe = {.bgra = {100, 255, 100, 64}},
++  .text = {.color = UINT32_MAX},
++  .text_press = {.color = UINT32_MAX},
++  .text_swipe = {.color = UINT32_MAX},
++  .font = DEFAULT_FONT,
++  .rounding = DEFAULT_ROUNDING,
++},
++{
++  /* function keys, darker so the letters stand out */
++  .bg = {.bgra = {15, 15, 15, transparency}},
++  .fg = {.bgra = {32, 32, 32, transparency}},
++  .high = {.bgra = {100, 100, 100, transparency}},
++  .swipe = {.bgra = {100, 255, 100, 64}},
++  .text_press = {.color = UINT32_MAX},
++  .text_swipe = {.color = UINT32_MAX},
++  .text = {.color = UINT32_MAX},
++  .font = DEFAULT_FONT,
++  .rounding = DEFAULT_ROUNDING,
++}
++};
++
++/* The ordered list of layers that NextLayer cycles through. The layouts are
++ * relative to the width, so portrait and landscape share them. */
++static enum layout_id layers[] = {
++  Full, // First layout is the default layout on startup
++  Symbols,
++  Accent,
++  NumLayouts // signals the last item, may not be omitted
++};
++
++static enum layout_id landscape_layers[] = {
++  Full,
++  Symbols,
++  Accent,
++  NumLayouts
++};
++
++#endif // config_h_INCLUDED
+diff --git a/config.mk b/config.mk
+index 48d7073..78b515e 100644
+--- a/config.mk
++++ b/config.mk
+@@ -2,4 +2,4 @@ VERSION = 0.21
+ CFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=700
+ PREFIX = /usr/local
+ MANPREFIX = ${PREFIX}/share/man
+-LAYOUT = mobintl
++LAYOUT = mobintl # mobintl, deskintl or ipaq
+diff --git a/drw.c b/drw.c
+index 8cc1686..489f212 100644
+--- a/drw.c
++++ b/drw.c
+@@ -322,6 +322,12 @@ drw_icon_for_label(const char *label)
+     return ICON_NONE;
+ }
+ 
++bool
++drw_label_is_icon(const char *label)
++{
++    return drw_icon_for_label(label) != ICON_NONE;
++}
++
+ static void
+ drw_path(cairo_t *cr, double cx, double cy, double u, const double (*pts)[2],
+          int n)
+diff --git a/drw.h b/drw.h
+index 69be558..cf4a8ae 100644
+--- a/drw.h
++++ b/drw.h
+@@ -88,6 +88,9 @@ void drw_fill_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+ void drw_over_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                         uint32_t w, uint32_t h, int rounding);
+ 
++/* Whether drw_draw_text draws the label as a shape instead of through the
++ * text backend, so a font without its glyph is no defect. */
++bool drw_label_is_icon(const char *label);
+ void drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                    uint32_t w, uint32_t h, uint32_t b, const char *label,
+                    struct text_font *font);
+diff --git a/keyboard.c b/keyboard.c
+index f097718..0bdc1f6 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -110,6 +110,20 @@ kbd_next_layer(struct kbd *kb, struct key *k, bool invert)
+     kbd_switch_layout(kb, &kb->layouts[layer], layer_index);
+ }
+ 
++uint32_t
++kbd_pick_height(bool landscape, uint32_t screen_w, uint32_t configured,
++                bool forced)
++{
++#ifdef KBD_DEFAULT_HEIGHT
++    if (!forced)
++        return KBD_DEFAULT_HEIGHT(screen_w, landscape);
++#endif
++    (void)landscape;
++    (void)screen_w;
++    (void)forced;
++    return configured;
++}
++
+ uint8_t
+ kbd_get_rows(struct layout *l)
+ {
+@@ -210,30 +224,31 @@ kbd_init(struct kbd *kb, struct layout *layouts, char *layer_names_list,
+ void
+ kbd_init_layout(struct layout *l, uint32_t width, uint32_t height)
+ {
+-    uint32_t x = 0, y = 0;
++    uint32_t y = 0;
+     uint8_t rows = kbd_get_rows(l);
+ 
+     l->keyheight = height / rows;
+ 
+     struct key *k = l->keys;
+     double rowlength = kbd_get_row_length(k);
+-    double rowwidth = 0.0;
++    double units = 0.0; /* widths of the keys of this row so far */
+     while (k->type != Last) {
+         if (k->type == EndRow) {
+             y += l->keyheight;
+-            x = 0;
+-            rowwidth = 0.0;
++            units = 0.0;
+             rowlength = kbd_get_row_length(k + 1);
+         } else if (k->width > 0) {
+-            k->x = x;
++            /* Both edges are rounded from the exact position, so the keys
++             * of a row always end exactly at the width. Rounding the
++             * accumulated pixel position as an upstream version did could
++             * be one pixel off after floating point error, and the last key
++             * then stuck out of the surface (seen at --width 200). */
++            uint32_t left = (uint32_t)(units * width / rowlength + 0.5);
++            units += k->width;
++            uint32_t right = (uint32_t)(units * width / rowlength + 0.5);
++            k->x = left;
+             k->y = y;
+-            k->w = ((double)width / rowlength) * k->width;
+-            x += k->w;
+-            rowwidth += k->width;
+-            if (x < (rowwidth / rowlength) * (double)width) {
+-                k->w++;
+-                x++;
+-            }
++            k->w = right - left;
+         }
+         k->h = l->keyheight;
+         k++;
+diff --git a/keyboard.h b/keyboard.h
+index a2a87ec..6d4301f 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -171,6 +171,12 @@ bool kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
+  * the popup can be drawn on. Failing only disables the popup. */
+ bool kbd_popup_buffers(struct kbd *kb, bool force);
+ uint8_t kbd_get_rows(struct layout *l);
++/* The keyboard height for a screen width and orientation. A height the user
++ * gave with -H, -L or the environment (forced) always wins; otherwise a layout
++ * that defines KBD_DEFAULT_HEIGHT sizes itself by screen, and any other
++ * layout uses the configured constant. */
++uint32_t kbd_pick_height(bool landscape, uint32_t screen_w,
++                         uint32_t configured, bool forced);
+ double kbd_get_row_length(struct key *k);
+ void kbd_next_layer(struct kbd *kb, struct key *k, bool invert);
+ void kbd_switch_layout(struct kbd *kb, struct layout *l, size_t layer_index);
+diff --git a/keymap.ipaq.h b/keymap.ipaq.h
+new file mode 100644
+index 0000000..9082453
+--- /dev/null
++++ b/keymap.ipaq.h
+@@ -0,0 +1,6 @@
++/* The ipaq layout types latin text only, so it reuses the latin keymap of
++ * mobintl instead of keeping a second copy of 1500 lines that must stay in
++ * step with it (the Copy keys, the AltGr levels and the COMP key all come from
++ * there). The guard keeps the six other keymaps out of the binary. */
++#define KEYMAP_LATIN_ONLY
++#include "keymap.mobintl.h"
+diff --git a/keymap.mobintl.h b/keymap.mobintl.h
+index aae951d..b1d537b 100644
+--- a/keymap.mobintl.h
++++ b/keymap.mobintl.h
+@@ -1,7 +1,16 @@
++/* keymap.ipaq.h defines KEYMAP_LATIN_ONLY to share the latin keymap below
++ * without carrying the six others (about 390 kB of strings) into a binary
++ * for a device with little flash. */
++#ifdef KEYMAP_LATIN_ONLY
++#define NUMKEYMAPS 1
++
++static const char *keymap_names[] = {"latin"};
++#else
+ #define NUMKEYMAPS 7
+ 
+ static const char *keymap_names[] = {"latin",    "cyrillic", "arabic",
+                                      "georgian", "greek",    "persian", "hebrew" };
++#endif
+ 
+ static const char *keymaps[NUMKEYMAPS] = {
+ 
+@@ -1469,6 +1478,7 @@ xkb_symbols \"(unnamed)\" {\
+ \
+ };\
+ ",
++#ifndef KEYMAP_LATIN_ONLY
+   // CYRILLIC
+   "xkb_keymap {\
+ xkb_keycodes \"(unnamed)\" {\
+@@ -10242,4 +10252,5 @@ xkb_symbols \"(unnamed)\" {\
+         modifier_map Mod4 { <LWIN>, <RWIN>, <SUPR>, <HYPR> };\
+         modifier_map Mod5 { <LVL3>, <MDSW> };\
+ };};"
++#endif /* !KEYMAP_LATIN_ONLY */
+ };
+diff --git a/layout.ipaq.h b/layout.ipaq.h
+new file mode 100644
+index 0000000..7703de2
+--- /dev/null
++++ b/layout.ipaq.h
+@@ -0,0 +1,194 @@
++/* constants */
++/* Default heights, used when -H and -L are not given. Five rows (a function
++ * row and four of keys) divide them without a remainder, so no strip is left
++ * unused below the last row: 20, 16, 32 and 26 px keys. The size class comes
++ * from the screen width because a layout cannot know the panel otherwise:
++ * 240 portrait and 320 landscape are QVGA, 480 and 640 are VGA. */
++static inline uint32_t
++ipaq_default_height(uint32_t screen_w, bool landscape)
++{
++	if (screen_w >= 400)
++		return landscape ? 130 : 160;
++	return landscape ? 80 : 100;
++}
++#define KBD_DEFAULT_HEIGHT ipaq_default_height
++
++/* what -H and -L fall back to where KBD_DEFAULT_HEIGHT is not consulted */
++#define KBD_PIXEL_HEIGHT 100
++#define KBD_PIXEL_LANDSCAPE_HEIGHT 80
++
++/* spacing around each key; 2 px would leave a 16 px tall face on a 20 px key */
++#define KBD_KEY_BORDER 1
++
++/* layout declarations */
++/* kbd_init_layers() and kbd_get_layer_index() only look at the first
++ * NumLayouts - 1 entries, so the last layout must be one nobody needs to name.
++ * Index is that: keyboard.c jumps to it after a Compose key and Space, and this
++ * layout has no Compose key, so it exists to give the name a meaning. */
++enum layout_id {
++	Full = 0,
++	Symbols,
++	Accent,
++	Index,
++	NumLayouts,
++};
++
++static struct key keys_full[], keys_symbols[], keys_accent[], keys_index[];
++
++static struct layout layouts[NumLayouts] = {
++  [Full] = {keys_full, "latin", "full", true},
++  [Symbols] = {keys_symbols, "latin", "symbols", false},
++  [Accent] = {keys_accent, "latin", "accent", false},
++  [Index] = {keys_index, "latin", "index", false},
++};
++
++/* Every row adds up to 10 widths, so a key is 24 px on a 240 px screen. */
++#define KEY(l, s, c) {l, s, 1.0, Code, c}
++#define FN(l, c) {l, l, 1.0, Code, c, .scheme = 1}
++#define COPY(l, s, cp, scp) {l, s, 1.0, Copy, cp, 0, scp}
++#define ENDROW {"", "", 0.0, EndRow}
++
++/* The same on every layer, so the arrows and modifiers do not move. Caps is
++ * wider because it is the one a thumb has to find without looking. */
++#define FUNCTION_ROW \
++  FN("Esc", KEY_ESC), \
++  FN("Tab", KEY_TAB), \
++  {"Ctl", "Ctl", 1.0, Mod, Ctrl, .scheme = 1}, \
++  {"Alt", "Alt", 1.0, Mod, Alt, .scheme = 1}, \
++  FN("←", KEY_LEFT), \
++  FN("↓", KEY_DOWN), \
++  FN("↑", KEY_UP), \
++  FN("→", KEY_RIGHT), \
++  {"Cap", "Cap", 2.0, Mod, CapsLock, .scheme = 1}, \
++  ENDROW
++
++#define BACKSPACE {"⌫", "⌫", 1.0, Code, KEY_BACKSPACE, .scheme = 1}
++#define SHIFT {"⇧", "⇫", 1.5, Mod, Shift, .scheme = 1}
++#define ENTER {"↵", "↵", 1.5, Code, KEY_ENTER, .scheme = 1}
++
++/* The comma sends the key of ! when shifted (the latin keymap has the
++ * apostrophe there), and the full stop gives ? by itself, so the letter layer
++ * reaches the punctuation that sentences need. */
++#define BOTTOM_ROW(first, last) \
++  first, \
++  {",", "!", 1.0, Code, KEY_COMMA, .shift_code = KEY_1}, \
++  KEY("'", "\"", KEY_APOSTROPHE), \
++  {"", "", 4.0, Code, KEY_SPACE}, \
++  KEY(".", "?", KEY_DOT), \
++  last, \
++  {"", "", 0.0, Last}
++
++#define TO_SYMBOLS {"123", "123", 1.5, Layout, 0, &layouts[Symbols], .scheme = 1}
++#define TO_ACCENT {"äé", "äé", 1.5, Layout, 0, &layouts[Accent], .scheme = 1}
++#define TO_LETTERS {"Abc", "Abc", 1.5, BackLayer, .scheme = 1}
++
++static struct key keys_full[] = {
++  FUNCTION_ROW,
++
++  KEY("q", "Q", KEY_Q), KEY("w", "W", KEY_W), KEY("e", "E", KEY_E),
++  KEY("r", "R", KEY_R), KEY("t", "T", KEY_T), KEY("y", "Y", KEY_Y),
++  KEY("u", "U", KEY_U), KEY("i", "I", KEY_I), KEY("o", "O", KEY_O),
++  KEY("p", "P", KEY_P),
++  ENDROW,
++
++  KEY("a", "A", KEY_A), KEY("s", "S", KEY_S), KEY("d", "D", KEY_D),
++  KEY("f", "F", KEY_F), KEY("g", "G", KEY_G), KEY("h", "H", KEY_H),
++  KEY("j", "J", KEY_J), KEY("k", "K", KEY_K), KEY("l", "L", KEY_L),
++  BACKSPACE,
++  ENDROW,
++
++  SHIFT,
++  KEY("z", "Z", KEY_Z), KEY("x", "X", KEY_X), KEY("c", "C", KEY_C),
++  KEY("v", "V", KEY_V), KEY("b", "B", KEY_B), KEY("n", "N", KEY_N),
++  KEY("m", "M", KEY_M),
++  ENTER,
++  ENDROW,
++
++  BOTTOM_ROW(TO_SYMBOLS, TO_ACCENT),
++};
++
++/* Digits and, shifted, the symbols above them on a US keyboard. */
++static struct key keys_symbols[] = {
++  FUNCTION_ROW,
++
++  KEY("1", "!", KEY_1), KEY("2", "@", KEY_2), KEY("3", "#", KEY_3),
++  KEY("4", "$", KEY_4), KEY("5", "%", KEY_5), KEY("6", "^", KEY_6),
++  KEY("7", "&", KEY_7), KEY("8", "*", KEY_8), KEY("9", "(", KEY_9),
++  KEY("0", ")", KEY_0),
++  ENDROW,
++
++  KEY("-", "_", KEY_MINUS), KEY("=", "+", KEY_EQUAL),
++  KEY("[", "{", KEY_LEFTBRACE), KEY("]", "}", KEY_RIGHTBRACE),
++  KEY("\\", "|", KEY_BACKSLASH), KEY(";", ":", KEY_SEMICOLON),
++  /* shifted, the slash key of the latin keymap gives >, the full stop ? */
++  {"/", "?", 1.0, Code, KEY_SLASH, .shift_code = KEY_DOT},
++  KEY("`", "~", KEY_GRAVE),
++  FN("Del", KEY_DELETE),
++  BACKSPACE,
++  ENDROW,
++
++  SHIFT,
++  /* KEY_102ND is the key of < and > in the latin keymap */
++  KEY("<", ">", KEY_102ND),
++  /* Copy keys: the AltGr level of minus and equal has no Shift level, so
++   * with Shift held a Code key would type nothing */
++  COPY("€", "€", 0x20AC, 0x20AC), COPY("£", "£", 0x00A3, 0x00A3),
++  COPY("§", "§", 0x00A7, 0x00A7), COPY("°", "°", 0x00B0, 0x00B0),
++  COPY("¿", "¿", 0x00BF, 0x00BF), COPY("¡", "¡", 0x00A1, 0x00A1),
++  ENTER,
++  ENDROW,
++
++  BOTTOM_ROW(TO_LETTERS, TO_ACCENT),
++};
++
++/* The accented letters of Dutch, German and French, as Copy keys because the
++ * latin keymap has no keys for them. ß has no capital in the Latin-1 block,
++ * so it stays the same when shifted. */
++static struct key keys_accent[] = {
++  FUNCTION_ROW,
++
++  COPY("à", "À", 0x00E0, 0x00C0), COPY("â", "Â", 0x00E2, 0x00C2),
++  COPY("ç", "Ç", 0x00E7, 0x00C7), COPY("é", "É", 0x00E9, 0x00C9),
++  COPY("è", "È", 0x00E8, 0x00C8), COPY("ê", "Ê", 0x00EA, 0x00CA),
++  COPY("ë", "Ë", 0x00EB, 0x00CB), COPY("î", "Î", 0x00EE, 0x00CE),
++  COPY("ï", "Ï", 0x00EF, 0x00CF), COPY("ô", "Ô", 0x00F4, 0x00D4),
++  ENDROW,
++
++  COPY("ù", "Ù", 0x00F9, 0x00D9), COPY("û", "Û", 0x00FB, 0x00DB),
++  COPY("ü", "Ü", 0x00FC, 0x00DC), COPY("ä", "Ä", 0x00E4, 0x00C4),
++  COPY("ö", "Ö", 0x00F6, 0x00D6), COPY("ß", "ß", 0x00DF, 0x00DF),
++  COPY("œ", "Œ", 0x0153, 0x0152), COPY("ó", "Ó", 0x00F3, 0x00D3),
++  COPY("á", "Á", 0x00E1, 0x00C1),
++  BACKSPACE,
++  ENDROW,
++
++  SHIFT,
++  COPY("í", "Í", 0x00ED, 0x00CD), COPY("ú", "Ú", 0x00FA, 0x00DA),
++  COPY("æ", "Æ", 0x00E6, 0x00C6), COPY("ÿ", "Ÿ", 0x00FF, 0x0178),
++  COPY("ñ", "Ñ", 0x00F1, 0x00D1), COPY("«", "«", 0x00AB, 0x00AB),
++  COPY("»", "»", 0x00BB, 0x00BB),
++  ENTER,
++  ENDROW,
++
++  BOTTOM_ROW(TO_LETTERS, TO_SYMBOLS),
++};
++
++static struct key keys_index[] = {
++  {"Abc", "Abc", 1.0, Layout, 0, &layouts[Full], .scheme = 1},
++  {"123", "123", 1.0, Layout, 0, &layouts[Symbols], .scheme = 1},
++  {"äé", "äé", 1.0, Layout, 0, &layouts[Accent], .scheme = 1},
++  {"", "", 0.0, Last},
++};
++
++#undef KEY
++#undef FN
++#undef COPY
++#undef ENDROW
++#undef FUNCTION_ROW
++#undef BACKSPACE
++#undef SHIFT
++#undef ENTER
++#undef BOTTOM_ROW
++#undef TO_SYMBOLS
++#undef TO_ACCENT
++#undef TO_LETTERS
+diff --git a/main.c b/main.c
+index bbad307..d69a431 100644
+--- a/main.c
++++ b/main.c
+@@ -24,6 +24,9 @@
+ #include "config.h"
+ 
+ /* Configs written before the macro existed keep upstream's behaviour. */
++#ifndef DEFAULT_EXCLUSIVE
++#define DEFAULT_EXCLUSIVE true
++#endif
+ #ifndef DEFAULT_SHOW_POPUP
+ #define DEFAULT_SHOW_POPUP true
+ #endif
+@@ -83,6 +86,9 @@ static int cur_x = -1, cur_y = -1;
+ static bool cur_press = false;
+ static struct kbd keyboard;
+ static uint32_t height, normal_height, landscape_height;
++/* Set when the user gave the height, which a layout's own default never
++ * overrides. */
++static bool normal_height_forced, landscape_height_forced;
+ static int rounding = DEFAULT_ROUNDING;
+ static bool hidden = false;
+ static bool im_auto = false;
+@@ -601,10 +607,12 @@ redimension_keyboard()
+     enum layout_id layer;
+     if (keyboard.landscape) {
+         layer = keyboard.landscape_layers[0];
+-        height = landscape_height;
++        height = kbd_pick_height(true, available_width, landscape_height,
++                                 landscape_height_forced);
+     } else {
+         layer = keyboard.layers[0];
+-        height = normal_height;
++        height = kbd_pick_height(false, available_width, normal_height,
++                                 normal_height_forced);
+     }
+ 
+     if (custom_width > 0) {
+@@ -898,9 +906,13 @@ usage(char *argv0)
+     fprintf(stderr, "  --bg-alpha [0-255]       - Independent opacity for keyboard baseplate "
+                     "(ignored unless the buffer format is argb8888)\n");
+     fprintf(stderr, "  --double-space-period    - Double tap space to insert period and space\n");
++    fprintf(stderr, "  --exclusive        - Request an exclusive zone so that "
++                    "windows do not sit under the keyboard%s\n",
++            DEFAULT_EXCLUSIVE ? " (default)" : "");
+     fprintf(stderr, "  --non-exclusive    - Allow the keyboard to overlap "
+                     "windows. Do not request an exclusive zone from the "
+-                    "compositor\n");
++                    "compositor%s\n",
++            DEFAULT_EXCLUSIVE ? "" : " (default)");
+     fprintf(stderr, "  --wayland-layer [background|bottom|top|overlay]"
+                     " - Wayland layer shell z index\n");
+ }
+@@ -1073,10 +1085,14 @@ main(int argc, char **argv)
+         layer_names_list = estrdup(tmp);
+     if ((tmp = getenv("WVKBD_LANDSCAPE_LAYERS")))
+         landscape_layer_names_list = estrdup(tmp);
+-    if ((tmp = getenv("WVKBD_HEIGHT")))
++    if ((tmp = getenv("WVKBD_HEIGHT"))) {
+         normal_height = atoi(tmp);
+-    if ((tmp = getenv("WVKBD_LANDSCAPE_HEIGHT")))
++        normal_height_forced = true;
++    }
++    if ((tmp = getenv("WVKBD_LANDSCAPE_HEIGHT"))) {
+         landscape_height = atoi(tmp);
++        landscape_height_forced = true;
++    }
+ 
+     /* keyboard settings */
+     keyboard.layers = (enum layout_id *)&layers;
+@@ -1086,7 +1102,7 @@ main(int argc, char **argv)
+     keyboard.layer_index = 0;
+     keyboard.preferred_scale = 1;
+     keyboard.preferred_fractional_scale = 0;
+-    keyboard.exclusive = true;
++    keyboard.exclusive = DEFAULT_EXCLUSIVE;
+     keyboard.corner_radius = 0;
+     keyboard.show_popup = DEFAULT_SHOW_POPUP;
+     keyboard.show_highlight = true;
+@@ -1237,12 +1253,14 @@ main(int argc, char **argv)
+                 exit(1);
+             }
+             normal_height = atoi(argv[++i]);
++            normal_height_forced = true;
+         } else if (!strcmp(argv[i], "-L")) {
+             if (i >= argc - 1) {
+                 usage(argv[0]);
+                 exit(1);
+             }
+             height = landscape_height = atoi(argv[++i]);
++            landscape_height_forced = true;
+         } else if (!strcmp(argv[i], "-R")) {
+             if (i >= argc - 1) {
+                 usage(argv[0]);
+@@ -1287,6 +1305,9 @@ main(int argc, char **argv)
+             exit(0);
+         } else if ((!strcmp(argv[i], "-non-exclusive")) || (!strcmp(argv[i], "--non-exclusive"))) {
+             keyboard.exclusive = false;
++        } else if ((!strcmp(argv[i], "-exclusive")) ||
++                   (!strcmp(argv[i], "--exclusive"))) {
++            keyboard.exclusive = true;
+         } else if ((!strcmp(argv[i], "-auto")) ||
+                    (!strcmp(argv[i], "--auto"))) {
+             im_auto = true;
+@@ -1375,6 +1396,8 @@ main(int argc, char **argv)
+     if (keyboard.debug) {
+         fprintf(stderr, "wvkbd: key popup %s\n",
+                 keyboard.show_popup ? "on" : "off");
++        fprintf(stderr, "wvkbd: exclusive zone %s\n",
++                keyboard.exclusive ? "on" : "off");
+     }
+ 
+     display = wl_display_connect(NULL);
+diff --git a/meson_options.txt b/meson_options.txt
+index 818aba4..19e05b0 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,4 +1,4 @@
+-option('kbd_layout', type: 'combo', choices: ['mobintl', 'deskintl'], value: 'mobintl',
++option('kbd_layout', type: 'combo', choices: ['mobintl', 'deskintl', 'ipaq'], value: 'mobintl',
+        description: 'Layout, keymap and config header set to build (meson reserves the name "layout")')
+ option('tests', type: 'boolean', value: false,
+        description: 'Build and register the test suite')
+diff --git a/tests/check-exclusive.sh b/tests/check-exclusive.sh
+new file mode 100755
+index 0000000..0b1b963
+--- /dev/null
++++ b/tests/check-exclusive.sh
+@@ -0,0 +1,38 @@
++#!/bin/sh
++# usage: check-exclusive.sh BINARY CONFIG_HEADER
++# Same idea as check-popup.sh: -D reports the resolved setting before the
++# binary connects to Wayland. A config header without DEFAULT_EXCLUSIVE keeps
++# upstream's behaviour, an exclusive zone.
++bin=$1
++cfg=$2
++want=$(sed -n 's/^#define DEFAULT_EXCLUSIVE \(true\|false\)$/\1/p' "$cfg")
++case $want in
++true | "") want=on ;;
++false) want=off ;;
++esac
++
++unset WAYLAND_DISPLAY WAYLAND_SOCKET
++export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}
++
++state() {
++	"$bin" -D "$@" 2>&1 | sed -n 's/^wvkbd: exclusive zone //p'
++}
++expect() {
++	exp=$1; shift
++	got=$(state "$@")
++	[ "$got" = "$exp" ] || { echo "args '$*': got '$got', want '$exp'"; exit 1; }
++}
++
++expect "$want"
++expect on --exclusive
++expect off --non-exclusive
++expect on --non-exclusive --exclusive
++expect off --exclusive --non-exclusive
++# the geometry options do not change it
++expect "$want" --dock left --ratio 0.5 --width 200 --corner-radius 4
++
++help=$("$bin" --help 2>&1)
++echo "$help" | grep -q -- '--exclusive ' || { echo "--help lacks --exclusive"; exit 1; }
++if [ "$want" = on ]; then mark=--exclusive; else mark=--non-exclusive; fi
++echo "$help" | grep -- "  $mark " | grep -q '(default)' ||
++	{ echo "--help does not mark $mark as default"; exit 1; }
+diff --git a/tests/meson.build b/tests/meson.build
+index 60eba34..e9f84bf 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -10,6 +10,10 @@ test('version', test_sh,
+ test('list-layers', test_sh,
+   args: [files('check-cli.sh'), exe, 'list-layers'])
+ 
++test('exclusive-default', test_sh,
++  args: [files('check-exclusive.sh'), exe,
++         files('../config.@0@.h'.format(kbd_layout))])
++
+ test('popup-default', test_sh,
+   args: [files('check-popup.sh'), exe,
+          files('../config.@0@.h'.format(kbd_layout))])
+@@ -76,3 +80,18 @@ test('label-damage', executable('test-damage',
+   '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
++
++# The ipaq layout is tested whatever the binary is built for: this target
++# compiles keyboard.c again with the ipaq layout and keymap, and draws with the
++# bitmap fonts because the glyph check is about them.
++test_ipaq = executable('test-ipaq',
++  'test-ipaq.c', '../drw.c', '../keyboard.c', '../mask.c',
++  '../os-compatibility.c', '../shm_open.c', '../text-bitmap.c',
++  '../bmfont-data.c', proto_sources,
++  c_args: ['-ULAYOUT', '-DLAYOUT="layout.ipaq.h"',
++           '-UKEYMAP', '-DKEYMAP="keymap.ipaq.h"'],
++  include_directories: test_inc,
++  dependencies: [wayland_client, xkbcommon, cairo, m_dep, util_dep, rt_dep])
++foreach part : ['geometry', 'height', 'glyphs', 'keysyms']
++  test('ipaq-' + part, test_ipaq, args: [part])
++endforeach
+diff --git a/tests/test-damage.c b/tests/test-damage.c
+index 635e8a9..d93067f 100644
+--- a/tests/test-damage.c
++++ b/tests/test-damage.c
+@@ -285,6 +285,19 @@ test_switch(enum drw_format format, struct layout *p, struct layout *q,
+     return same;
+ }
+ 
++/* A copy of a layout's keys, for layouts that lack a pair or a key kind the
++ * test needs. The caller frees it. */
++static struct key *
++copy_keys(const struct layout *l)
++{
++    size_t n = 0;
++    while (l->keys[n].type != Last)
++        n++;
++    struct key *copy = malloc((n + 1) * sizeof(struct key));
++    memcpy(copy, l->keys, (n + 1) * sizeof(struct key));
++    return copy;
++}
++
+ static void
+ test_layers(enum drw_format format)
+ {
+@@ -301,6 +314,25 @@ test_layers(enum drw_format format)
+             if (format == DRW_FORMAT_RGB565 && i < 2)
+                 test_switch(format, p, q, Shift);
+         }
++    if (compared == 0) {
++        /* A layout set whose layers all differ in key kinds (ipaq has Code
++         * keys on one layer and Copy keys on another) still needs the
++         * changed-keys path tested, so make a layer that differs in labels
++         * only. */
++        struct layout q = layouts[0];
++        q.keys = copy_keys(&layouts[0]);
++        int changed = 0;
++        for (struct key *k = q.keys; k->type != Last && changed < 3; k++)
++            if (drawable(k) && k->type == Code && k->label[0] &&
++                k->label[1] == 0 && k->width == 1.0) {
++                k->label = k->shift_label = k->label[0] == 'z' ? "y" : "z";
++                changed++;
++            }
++        CHECK(changed == 3, "could not relabel three keys");
++        if (test_switch(format, &layouts[0], &q, 0))
++            compared++;
++        free(q.keys);
++    }
+     CHECK(compared > 0, "no pair of layers has the same geometry");
+     CHECK(fallback > 0, "no pair of layers has different geometry");
+     fprintf(stderr, "format %d: %d pairs compared by key, %d full redraws\n",
+@@ -448,6 +480,19 @@ test_pressed(enum drw_format format)
+         for (const struct key *k = layouts[i].keys; k->type != Last; k++)
+             if (k->type == Compose)
+                 cl = &layouts[i];
++    struct layout made;
++    if (!cl) {
++        /* no shipped layout has one (ipaq), so turn a key into one */
++        made = layouts[0];
++        made.keys = copy_keys(&layouts[0]);
++        for (struct key *k = made.keys; k->type != Last; k++)
++            if (k->type == Code && k->w > 8) {
++                /* const in the struct, but this copy is ours */
++                *(enum key_type *)&k->type = Compose;
++                break;
++            }
++        cl = &made;
++    }
+     CHECK(cl != NULL, "no layout has a compose key");
+     if (cl) {
+         cairo_region_destroy(want);
+@@ -465,6 +510,8 @@ test_pressed(enum drw_format format)
+               "compose pending: damage is not the compose keys");
+         check_pixels("compose pending", &e, idle, cl, 0, false, e.ds.damage);
+         free(idle);
++        if (cl == &made)
++            free(made.keys);
+     }
+     cairo_region_destroy(want);
+     free(plain);
+diff --git a/tests/test-ipaq.c b/tests/test-ipaq.c
+new file mode 100644
+index 0000000..6ea1302
+--- /dev/null
++++ b/tests/test-ipaq.c
+@@ -0,0 +1,428 @@
++/* Checks the ipaq layout without a compositor: its geometry at the supported
++ * screen widths, that the built-in fonts can draw every label, and that every
++ * key produces what its label says through the latin keymap.
++ *
++ * The test is built with LAYOUT and KEYMAP set to the ipaq files whatever
++ * layout the binary is built for, so every build runs it.
++ *
++ * usage: test-ipaq geometry|height|glyphs|keysyms */
++#include <linux/input-event-codes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <xkbcommon/xkbcommon.h>
++
++#include "check.h"
++#include "keyboard.h"
++#include "text-bitmap.h"
++
++#ifndef KBD_DEFAULT_HEIGHT
++#error "the ipaq layout must define KBD_DEFAULT_HEIGHT"
++#endif
++#include KEYMAP
++
++#define ROWS 5
++/* Index is a one-row picker that only a Compose key can reach and this layout
++ * has none; the layers a user sees are the ones before it. */
++#define LAYERS Index
++
++static bool
++is_key(const struct key *k)
++{
++    return k->type != Pad && k->type != EndRow && k->type != Last;
++}
++
++/* Rows have at most 16 keys; one more than any layer has. */
++#define MAXKEYS 64
++
++static void
++check_layout(uint32_t w, uint32_t h, const char *what, bool exact_height)
++{
++    for (int li = 0; li < LAYERS; li++) {
++        struct layout *l = &layouts[li];
++        kbd_init_layout(l, w, h);
++
++        CHECK(kbd_get_rows(l) == ROWS, "%s %s: %d rows, want %d", what,
++              l->name, kbd_get_rows(l), ROWS);
++        CHECK(l->keyheight == h / ROWS, "%s %s: key height %u, want %u", what,
++              l->name, l->keyheight, h / ROWS);
++        CHECK(l->keyheight * ROWS <= h, "%s %s: rows are taller than %u", what,
++              l->name, h);
++        if (exact_height)
++            CHECK(l->keyheight * ROWS == h,
++                  "%s %s: rows add up to %u, not the height %u", what,
++                  l->name, l->keyheight * ROWS, h);
++
++        struct key *keys[MAXKEYS];
++        int n = 0;
++        double units[ROWS] = {0};
++        uint32_t pixels[ROWS] = {0};
++        int row = 0;
++        for (struct key *k = l->keys; k->type != Last; k++) {
++            if (k->type == EndRow) {
++                row++;
++                continue;
++            }
++            if (!is_key(k))
++                continue;
++            CHECK(row < ROWS && n < MAXKEYS, "%s %s: too many rows or keys",
++                  what, l->name);
++            if (row >= ROWS || n >= MAXKEYS)
++                return;
++            keys[n++] = k;
++            units[row] += k->width;
++            pixels[row] += k->w;
++            CHECK(k->x + k->w <= w && k->y + k->h <= l->keyheight * ROWS,
++                  "%s %s: key '%s' at %u,%u %ux%u leaves the %ux%u surface",
++                  what, l->name, k->label, k->x, k->y, k->w, k->h, w, h);
++            CHECK(k->y == (uint32_t)row * l->keyheight && k->h == l->keyheight,
++                  "%s %s: key '%s' is not on row %d", what, l->name, k->label,
++                  row);
++        }
++        for (int r = 0; r < ROWS; r++) {
++            CHECK(units[r] == 10.0, "%s %s: row %d is %.1f key widths wide",
++                  what, l->name, r, units[r]);
++            /* a gap at the end of a row would be dead surface */
++            CHECK(pixels[r] == w, "%s %s: row %d covers %u of %u px", what,
++                  l->name, r, pixels[r], w);
++        }
++        for (int a = 0; a < n; a++)
++            for (int b = a + 1; b < n; b++) {
++                struct key *p = keys[a], *q = keys[b];
++                bool apart = p->x + p->w <= q->x || q->x + q->w <= p->x ||
++                             p->y + p->h <= q->y || q->y + q->h <= p->y;
++                CHECK(apart, "%s %s: keys '%s' and '%s' overlap", what,
++                      l->name, p->label, q->label);
++            }
++    }
++}
++
++static void
++test_geometry(void)
++{
++    static const uint32_t widths[] = {240, 320, 480, 640};
++    char what[64];
++
++    for (int i = 0; i < 4; i++)
++        for (int land = 0; land < 2; land++) {
++            uint32_t h = kbd_pick_height(land, widths[i], 1, false);
++            snprintf(what, sizeof what, "%ux%u %s", widths[i], h,
++                     land ? "landscape" : "portrait");
++            check_layout(widths[i], h, what, true);
++        }
++
++    /* the four real screens and the sizes the design asks for */
++    static const struct { uint32_t w, h; bool land; } screens[] = {
++        {240, 100, false}, {320, 80, true}, {480, 160, false}, {640, 130, true},
++    };
++    for (int i = 0; i < 4; i++) {
++        uint32_t w = screens[i].w, h = screens[i].h;
++        CHECK(kbd_pick_height(screens[i].land, w, 1, false) == h,
++              "%u px wide: height %u, want %u", w,
++              kbd_pick_height(screens[i].land, w, 1, false), h);
++        for (int li = 0; li < LAYERS; li++) {
++            struct layout *l = &layouts[li];
++            kbd_init_layout(l, w, h);
++            uint32_t minw = ~0u, minh = ~0u;
++            for (struct key *k = l->keys; k->type != Last; k++) {
++                if (!is_key(k))
++                    continue;
++                if (k->w < minw) minw = k->w;
++                if (k->h < minh) minh = k->h;
++                if (k->width == 1.0)
++                    CHECK(k->w == w / 10, "%u wide: key '%s' is %u px wide",
++                          w, k->label, k->w);
++            }
++            printf("%ux%u %-7s: keys at least %ux%u px, %d rows of %u px\n", w,
++                   h, l->name, minw, minh, kbd_get_rows(l), l->keyheight);
++            if (w == 240) {
++                CHECK(minw >= 20 && minh >= 18,
++                      "240x320 %s: smallest key is %ux%u, want 20x18", l->name,
++                      minw, minh);
++            }
++        }
++    }
++
++    /* --dock, --ratio and --width give the keyboard another width, over which
++     * the rows are spread again: 0.68 and 0.5 and 0.3 of 240, a custom 200 and
++     * 0.68 of 480 */
++    static const uint32_t docked[] = {163, 120, 72, 200, 326};
++    for (int i = 0; i < 5; i++) {
++        snprintf(what, sizeof what, "docked %u px", docked[i]);
++        check_layout(docked[i], docked[i] < 250 ? 100 : 160, what, true);
++    }
++}
++
++static void
++test_height(void)
++{
++    CHECK(kbd_pick_height(false, 240, 7, false) == 100, "240 portrait");
++    CHECK(kbd_pick_height(true, 320, 7, false) == 80, "320 landscape");
++    CHECK(kbd_pick_height(false, 480, 7, false) == 160, "480 portrait");
++    CHECK(kbd_pick_height(true, 640, 7, false) == 130, "640 landscape");
++    CHECK(kbd_pick_height(false, 399, 7, false) == 100, "399 is still QVGA");
++    CHECK(kbd_pick_height(false, 400, 7, false) == 160, "400 is VGA");
++    /* -H and -L win over the layout's choice, in either orientation */
++    CHECK(kbd_pick_height(false, 240, 123, true) == 123, "forced portrait");
++    CHECK(kbd_pick_height(true, 640, 77, true) == 77, "forced landscape");
++}
++
++/* A glyph that no font has is drawn as a box and logged; the check is that
++ * nothing was logged while looking up every label. */
++static void
++test_glyphs(void)
++{
++    static const struct { uint32_t w, h; } screens[] = {
++        {240, 100}, {320, 80}, {480, 160}, {640, 130},
++    };
++    char icons[16][8];
++    int nicons = 0;
++
++    CHECK(nbmfonts == 2, "expected two built-in fonts");
++    for (int li = 0; li < NumLayouts; li++) {
++        struct layout *l = &layouts[li];
++        for (struct key *k = l->keys; k->type != Last; k++) {
++            if (!is_key(k))
++                continue;
++            const char *labels[2] = {k->label, k->shift_label};
++            for (int s = 0; s < 2; s++) {
++                const char *label = labels[s];
++                if (!label || !*label)
++                    continue;
++                if (drw_label_is_icon(label)) {
++                    bool seen = false;
++                    for (int i = 0; i < nicons; i++)
++                        seen |= !strcmp(icons[i], label);
++                    if (!seen && nicons < 16)
++                        snprintf(icons[nicons++], 8, "%s", label);
++                    continue;
++                }
++                for (unsigned f = 0; f < nbmfonts; f++) {
++                    unsigned before = bm_missing_logged();
++                    for (const char *p = label; *p;) {
++                        struct label_mask m;
++                        int adv;
++                        bm_glyph_mask(bmfonts[f], bm_utf8_next(&p), &m, &adv);
++                    }
++                    CHECK(bm_missing_logged() == before,
++                          "%s: label '%s' has a glyph missing from the %s "
++                          "font", l->name, label, bmfonts[f]->name);
++                }
++            }
++        }
++    }
++    printf("drawn as icons instead of glyphs:");
++    for (int i = 0; i < nicons; i++)
++        printf(" %s", icons[i]);
++    printf("\n");
++
++    /* the font picked for a key must hold the label inside the key face */
++    for (int i = 0; i < 4; i++)
++        for (int li = 0; li < LAYERS; li++) {
++            struct layout *l = &layouts[li];
++            kbd_init_layout(l, screens[i].w, screens[i].h);
++            const struct bmfont *seen = NULL;
++            for (struct key *k = l->keys; k->type != Last; k++) {
++                if (!is_key(k))
++                    continue;
++                const char *labels[2] = {k->label, k->shift_label};
++                for (int s = 0; s < 2; s++) {
++                    if (!labels[s][0] || drw_label_is_icon(labels[s]))
++                        continue;
++                    unsigned iw = k->w - 2 * KBD_KEY_BORDER,
++                             ih = k->h - 2 * KBD_KEY_BORDER;
++                    const struct bmfont *f = bm_pick_font(labels[s], iw, ih);
++                    seen = f;
++                    CHECK(bm_label_width(f, labels[s]) <= iw &&
++                              f->cell_h <= ih,
++                          "%ux%u %s: '%s' in %s does not fit %ux%u",
++                          screens[i].w, screens[i].h, l->name, labels[s],
++                          f->name, iw, ih);
++                }
++            }
++            if (li == 0)
++                printf("%ux%u: labels drawn with the %s font\n", screens[i].w,
++                       screens[i].h, seen ? seen->name : "?");
++        }
++}
++
++static struct xkb_keymap *
++load_keymap(struct xkb_context *ctx, uint32_t unichr)
++{
++    size_t size = strlen(keymaps[0]) + 64;
++    char *str = malloc(size);
++    snprintf(str, size, keymaps[0], unichr, unichr);
++    struct xkb_keymap *km =
++        xkb_keymap_new_from_string(ctx, str, XKB_KEYMAP_FORMAT_TEXT_V1, 0);
++    free(str);
++    CHECK(km != NULL, "the latin keymap does not compile");
++    return km;
++}
++
++static xkb_keysym_t
++press(struct xkb_keymap *km, uint32_t code, uint32_t mods)
++{
++    struct xkb_state *st = xkb_state_new(km);
++    xkb_state_update_mask(st, mods, 0, 0, 0, 0, 0);
++    xkb_keysym_t sym = xkb_state_key_get_one_sym(st, code + 8);
++    xkb_state_unref(st);
++    return sym;
++}
++
++static uint32_t
++first_cp(const char *label)
++{
++    const char *p = label;
++    uint32_t cp = bm_utf8_next(&p);
++    return *p ? 0 : cp; /* 0 when the label is more than one code point */
++}
++
++struct named { uint32_t code; xkb_keysym_t sym; };
++static const struct named named_keys[] = {
++    {KEY_ESC, XKB_KEY_Escape}, {KEY_TAB, XKB_KEY_Tab},
++    {KEY_LEFT, XKB_KEY_Left}, {KEY_DOWN, XKB_KEY_Down},
++    {KEY_UP, XKB_KEY_Up}, {KEY_RIGHT, XKB_KEY_Right},
++    {KEY_BACKSPACE, XKB_KEY_BackSpace}, {KEY_ENTER, XKB_KEY_Return},
++    {KEY_SPACE, XKB_KEY_space}, {KEY_DELETE, XKB_KEY_Delete},
++};
++
++static void
++test_keysyms(void)
++{
++    (void)keymap_names; /* only keyboard.c looks keymaps up by name */
++    CHECK(NUMKEYMAPS == 1, "the ipaq keymap carries %d keymaps", NUMKEYMAPS);
++    struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
++    struct xkb_keymap *km = load_keymap(ctx, 0);
++    if (!km)
++        return;
++
++    for (int li = 0; li < NumLayouts; li++) {
++        struct layout *l = &layouts[li];
++        CHECK(!strcmp(l->keymap_name, "latin"), "%s uses keymap %s", l->name,
++              l->keymap_name);
++        for (struct key *k = l->keys; k->type != Last; k++) {
++            if (!is_key(k))
++                continue;
++            for (int shifted = 0; shifted < 2; shifted++) {
++                const char *label = shifted ? k->shift_label : k->label;
++                uint32_t shift = shifted ? Shift : 0;
++                if (k->type == Code) {
++                    uint32_t code = shifted && k->shift_code ? k->shift_code
++                                                              : k->code;
++                    xkb_keysym_t sym = press(km, code, shift | k->code_mod);
++                    const struct named *nm = NULL;
++                    for (unsigned i = 0; i < sizeof named_keys / sizeof *named_keys; i++)
++                        if (named_keys[i].code == k->code)
++                            nm = &named_keys[i];
++                    if (nm) {
++                        /* shift turns Tab into the backtab, nothing else */
++                        xkb_keysym_t want = nm->sym;
++                        if (shifted && k->code == KEY_TAB)
++                            want = XKB_KEY_ISO_Left_Tab;
++                        CHECK(sym == want, "%s: key '%s'%s gives keysym 0x%x, "
++                              "want 0x%x", l->name, k->label,
++                              shifted ? " shifted" : "", sym, want);
++                    } else {
++                        uint32_t want = first_cp(label);
++                        CHECK(want && xkb_keysym_to_utf32(sym) == want,
++                              "%s: key '%s'%s gives U+%04X, want U+%04X",
++                              l->name, k->label, shifted ? " shifted" : "",
++                              xkb_keysym_to_utf32(sym), want);
++                    }
++                } else if (k->type == Copy) {
++                    /* the Copy key uploads a keymap whose COMP key holds the
++                     * code point and presses it */
++                    uint32_t cp = shifted ? k->code_mod : k->code;
++                    CHECK(cp == first_cp(label),
++                          "%s: Copy key '%s' carries U+%04X", l->name, label,
++                          cp);
++                    struct xkb_keymap *ckm = load_keymap(ctx, cp);
++                    if (!ckm)
++                        continue;
++                    xkb_keysym_t sym = press(ckm, KEY_COMPOSE, shift);
++                    CHECK(xkb_keysym_to_utf32(sym) == cp,
++                          "%s: Copy key '%s'%s types U+%04X, want U+%04X",
++                          l->name, k->label, shifted ? " shifted" : "",
++                          xkb_keysym_to_utf32(sym), cp);
++                    xkb_keymap_unref(ckm);
++                }
++            }
++            if (k->type == Mod) {
++                xkb_keysym_t sym = press(km, KEY_A, k->code);
++                if (k->code == Ctrl) {
++                    struct xkb_state *st = xkb_state_new(km);
++                    xkb_state_update_mask(st, Ctrl, 0, 0, 0, 0, 0);
++                    CHECK(xkb_state_mod_name_is_active(st, XKB_MOD_NAME_CTRL,
++                                                       XKB_STATE_MODS_DEPRESSED) > 0,
++                          "Ctrl bit does not activate Control");
++                    xkb_state_unref(st);
++                } else if (k->code == Alt) {
++                    struct xkb_state *st = xkb_state_new(km);
++                    xkb_state_update_mask(st, Alt, 0, 0, 0, 0, 0);
++                    CHECK(xkb_state_mod_name_is_active(st, XKB_MOD_NAME_ALT,
++                                                       XKB_STATE_MODS_DEPRESSED) > 0,
++                          "Alt bit does not activate Mod1");
++                    xkb_state_unref(st);
++                } else if (k->code == Shift || k->code == CapsLock) {
++                    CHECK(sym == XKB_KEY_A, "%s: modifier %u gives 0x%x for a",
++                          l->name, k->code, sym);
++                } else {
++                    CHECK(false, "%s: unexpected modifier %u on '%s'", l->name,
++                          k->code, k->label);
++                }
++            }
++        }
++    }
++
++    /* a few by name, so a mistake in the loop above cannot hide the basics */
++    CHECK(press(km, KEY_Q, 0) == XKB_KEY_q, "q");
++    CHECK(press(km, KEY_Q, Shift) == XKB_KEY_Q, "Q");
++    CHECK(press(km, KEY_DOT, Shift) == XKB_KEY_question, "shift . is ?");
++    CHECK(press(km, KEY_1, Shift) == XKB_KEY_exclam, "shift 1 is !");
++    CHECK(press(km, KEY_102ND, 0) == XKB_KEY_less, "the 102nd key is <");
++    CHECK(press(km, KEY_102ND, Shift) == XKB_KEY_greater, "its shift is >");
++    CHECK(press(km, KEY_C, Ctrl) == XKB_KEY_c, "Ctrl c is c with Control");
++    CHECK(press(km, KEY_A, CapsLock) == XKB_KEY_A, "caps lock a");
++
++    /* every layer can be left and entered again */
++    bool to_symbols = false, to_accent = false, back[NumLayouts] = {false};
++    for (int li = 0; li < NumLayouts; li++)
++        for (struct key *k = layouts[li].keys; k->type != Last; k++) {
++            if (k->type == Layout && k->layout == &layouts[Symbols])
++                to_symbols = true;
++            if (k->type == Layout && k->layout == &layouts[Accent])
++                to_accent = true;
++            if (k->type == BackLayer)
++                back[li] = true;
++        }
++    CHECK(to_symbols && to_accent, "no key switches to a layer");
++    CHECK(back[Symbols] && back[Accent] && !back[Full],
++          "Abc is on the symbol and accent layers only");
++
++    xkb_keymap_unref(km);
++    xkb_context_unref(ctx);
++}
++
++int
++main(int argc, char **argv)
++{
++    if (argc != 2) {
++        fprintf(stderr, "usage: %s geometry|height|glyphs|keysyms\n", argv[0]);
++        return 2;
++    }
++    if (!strcmp(argv[1], "geometry"))
++        test_geometry();
++    else if (!strcmp(argv[1], "height"))
++        test_height();
++    else if (!strcmp(argv[1], "glyphs"))
++        test_glyphs();
++    else if (!strcmp(argv[1], "keysyms"))
++        test_keysyms();
++    else {
++        fprintf(stderr, "unknown test %s\n", argv[1]);
++        return 2;
++    }
++    if (failures)
++        fprintf(stderr, "%d check(s) failed\n", failures);
++    return failures != 0;
++}
+diff --git a/tools/regen-fonts.sh b/tools/regen-fonts.sh
+index eab7619..bea8b86 100755
+--- a/tools/regen-fonts.sh
++++ b/tools/regen-fonts.sh
+@@ -36,4 +36,5 @@ done
+ 
+ python3 "$here/bdf2c.py" -o "$root/bmfont-data.c" \
+ 	--layout "$root/layout.mobintl.h" --layout "$root/layout.deskintl.h" \
++	--layout "$root/layout.ipaq.h" \
+ 	10x20="$tmp/10x20.bdf" 6x13="$tmp/6x13.bdf"
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 865ffa9..3f73f95 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -8,6 +8,7 @@ wvkbd - on-screen virtual keyboard for wayland compositors using wlroots
+ 
+ wvkbd-mobintl [OPTIONS]...
+ wvkbd-deskintl [OPTIONS]...
++wvkbd-ipaq [OPTIONS]...
+ 
+ *NOTE*: Your binary may have a different suffix depending on which layout you compiled.
+ 
+@@ -40,10 +41,12 @@ can be patched to add new features.
+ 	prints a list of all available layers.
+ 
+ *-H* _pixels_
+-	Height of the keyboard in pixels, for vertical/portrait mode.
++	Height of the keyboard in pixels, for vertical/portrait mode. The ipaq
++	layout otherwise picks its height from the screen width, see *IPAQ LAYOUT*.
+ 
+ *-L* _pixels_
+-	Height of the keyboard in pixels, for horizontal/landscape mode
++	Height of the keyboard in pixels, for horizontal/landscape mode. The ipaq
++	layout otherwise picks its height from the screen width, see *IPAQ LAYOUT*.
+ 
+ *--fn* _font_
+ 	set font and size (e.g. DejaVu Sans 20). Only builds with the pango text
+@@ -72,6 +75,14 @@ can be patched to add new features.
+ 	Disable all visual key-press feedback; shorthand for *--no-popup* and
+ 	*--no-highlight* together.
+ 
++*--exclusive*
++	Request an exclusive zone from the compositor, so that windows are
++	resized to stay above the keyboard. Whether this is the default depends
++	on the layout: every show and hide then resizes and repaints the focused
++	window, which is slow on a small handheld, so the ipaq layout does not
++	request one. Of *--exclusive* and *--non-exclusive* the last one on the
++	command line wins.
++
+ *--non-exclusive*
+ 	Allow keyboard to overlap existing windows, do not request an
+ 	exclusive zone from the compositor.
+@@ -162,6 +173,35 @@ You can send signals to wvkbd to hide/show it (e.g. using _kill_(1) with _-s_):
+ *SIGRTMIN*
+ 	Toggle visibility
+ 
++# IPAQ LAYOUT
++
++*wvkbd-ipaq* is built for 240x320 and 320x240 handheld screens, and scales
++to 480x640 and 640x480. Every row has ten keys of equal width, so a key is
++24 px wide on a 240 px screen. There are five rows: a function row (*Esc*,
++*Tab*, *Ctl*, *Alt*, the four arrow keys and *Cap* for caps lock) and four rows
++of letters, ending with *Shift*, *Enter*, a layer key on each side of the space
++bar and backspace.
++
++The layers are the letters (Shift gives the capitals; the comma gives ! and the full
++stop ?), *123* for digits and symbols (Shift gives the symbols above
++the digits, and *Del*, the euro and pound signs and a few more are there too)
++and *äé* for the accented letters of Dutch, German and French. *Abc* goes back
++to the letters.
++
++Unless *-H* or *-L* is given, the keyboard is 100 px high on a screen up to
++399 px wide in portrait, 80 px in landscape, and from 400 px wide 160 px in
++portrait and 130 px in landscape. The height follows the screen, not the
++width of a docked keyboard.
++
++This layout honours *--dock*, *--ratio* and *--corner-radius*, and *--width*
++together with *--dock*: the rows are divided over whatever width the keyboard
++gets, so the keys narrow with it (to 16 px at the default docked ratio on a
++240 px screen). It shows no key popup and requests no exclusive zone unless
++*--popup* or *--exclusive* is given. With the popup off its surface, its
++positioner and its two buffers (384 kB at 240x100) are never made. Labels are
++drawn with the 6x13 font on QVGA and 10x20 on VGA screens in the default text
++build.
++
+ # COMPOSE BUTTON
+ 
+ The default mobile international layout features a Compose button (*Cmp*)
+-- 
+2.51.0
+

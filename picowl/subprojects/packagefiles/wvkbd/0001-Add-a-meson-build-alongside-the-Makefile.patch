@@ -1,0 +1,197 @@
+From e3a7161b9b2445db0bba694b83a918d2770da6a9 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 13:16:32 +0200
+Subject: [PATCH 1/9] Add a meson build alongside the Makefile
+
+The iPAQ build runs inside an OpenEmbedded recipe, which expects meson
+and cross-compiles cleanly with it. The Makefile stays untouched so
+upstream users are not affected.
+
+The option is called kbd_layout because meson reserves "layout". The
+protocol code is generated from the vendored XMLs in a proto/ subdir so
+the existing #include "proto/..." lines resolve unchanged. main.c now
+includes the generated input-method client header instead of the
+committed copy, which carries the same include guard as the generated
+one and would otherwise be a second source of truth.
+
+The tests option runs the built binary for --version and --list-layers
+without a compositor, and new cases are added to the same harness.
+---
+ main.c             |  2 +-
+ meson.build        | 66 ++++++++++++++++++++++++++++++++++++++++++++++
+ meson_options.txt  |  6 +++++
+ proto/meson.build  | 22 ++++++++++++++++
+ tests/check-cli.sh | 19 +++++++++++++
+ tests/meson.build  |  6 +++++
+ 6 files changed, 120 insertions(+), 1 deletion(-)
+ create mode 100644 meson.build
+ create mode 100644 meson_options.txt
+ create mode 100644 proto/meson.build
+ create mode 100755 tests/check-cli.sh
+ create mode 100644 tests/meson.build
+
+diff --git a/main.c b/main.c
+index 9e2aa7f..e680f4c 100644
+--- a/main.c
++++ b/main.c
+@@ -3,7 +3,7 @@
+ #include "proto/xdg-shell-client-protocol.h"
+ #include "proto/fractional-scale-v1-client-protocol.h"
+ #include "proto/viewporter-client-protocol.h"
+-#include "proto/input-method-unstable-v2-protocol.h"
++#include "proto/input-method-unstable-v2-client-protocol.h"
+ #include <errno.h>
+ #include <linux/input-event-codes.h>
+ #include <stdio.h>
+diff --git a/meson.build b/meson.build
+new file mode 100644
+index 0000000..d32a808
+--- /dev/null
++++ b/meson.build
+@@ -0,0 +1,66 @@
++project('wvkbd', 'c',
++  version: '0.21',  # keep in step with VERSION in config.mk
++  license: 'GPL-3.0-only',
++  default_options: ['c_std=gnu99', 'warning_level=1'],
++  meson_version: '>=0.59')
++
++kbd_layout = get_option('kbd_layout')
++cc = meson.get_compiler('c')
++
++wayland_client = dependency('wayland-client')
++xkbcommon = dependency('xkbcommon')
++pangocairo = dependency('pangocairo')
++m_dep = cc.find_library('m')
++util_dep = cc.find_library('util')
++rt_dep = cc.find_library('rt', required: false)
++
++wayland_scanner = find_program('wayland-scanner', native: true)
++
++add_project_arguments(
++  '-DWITH_WAYLAND_SHM',
++  '-DVERSION="@0@"'.format(meson.project_version()),
++  '-D_XOPEN_SOURCE=700',
++  '-DLAYOUT="layout.@0@.h"'.format(kbd_layout),
++  '-DKEYMAP="keymap.@0@.h"'.format(kbd_layout),
++  language: 'c')
++
++# main.c includes "config.h"; the Makefile copies config.<layout>.h to the
++# build dir, so do the same instead of keeping a second config in the tree.
++configure_file(
++  input: 'config.@0@.h'.format(kbd_layout),
++  output: 'config.h',
++  copy: true)
++
++subdir('proto')
++
++sources = files(
++  'drw.c',
++  'keyboard.c',
++  'main.c',
++  'os-compatibility.c',
++  'shm_open.c',
++)
++
++exe = executable('wvkbd-' + kbd_layout,
++  sources, proto_sources,
++  include_directories: include_directories('.'),
++  dependencies: [wayland_client, xkbcommon, pangocairo, m_dep, util_dep, rt_dep],
++  install: true)
++
++scdoc_prog = find_program('scdoc', native: true, required: get_option('man'))
++if scdoc_prog.found()
++  man = custom_target('wvkbd.1',
++    input: 'wvkbd.1.scd',
++    output: 'wvkbd.1',
++    capture: true,
++    # Same VERSION substitution as the Makefile's install rule.
++    command: [find_program('sh'), '-c',
++              '"$1" < "$2" | sed "s/VERSION/$3/g"', 'sh',
++              scdoc_prog, '@INPUT@', meson.project_version()],
++    install: true,
++    install_dir: get_option('mandir') / 'man1')
++endif
++
++if get_option('tests')
++  subdir('tests')
++endif
+diff --git a/meson_options.txt b/meson_options.txt
+new file mode 100644
+index 0000000..ca3c884
+--- /dev/null
++++ b/meson_options.txt
+@@ -0,0 +1,6 @@
++option('kbd_layout', type: 'combo', choices: ['mobintl', 'deskintl'], value: 'mobintl',
++       description: 'Layout, keymap and config header set to build (meson reserves the name "layout")')
++option('tests', type: 'boolean', value: false,
++       description: 'Build and register the test suite')
++option('man', type: 'feature', value: 'auto',
++       description: 'Install the man page (needs scdoc)')
+diff --git a/proto/meson.build b/proto/meson.build
+new file mode 100644
+index 0000000..141cf06
+--- /dev/null
++++ b/proto/meson.build
+@@ -0,0 +1,22 @@
++# Lives in proto/ so the generated headers land in <builddir>/proto/ and the
++# sources' #include "proto/..." lines resolve through -I<builddir> unchanged.
++protocols = [
++  'fractional-scale-v1',
++  'input-method-unstable-v2',
++  'viewporter',
++  'virtual-keyboard-unstable-v1',
++  'wlr-layer-shell-unstable-v1',
++  'xdg-shell',
++]
++
++proto_sources = []
++foreach p : protocols
++  proto_sources += custom_target(p + '-client-protocol.h',
++    input: p + '.xml',
++    output: p + '-client-protocol.h',
++    command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
++  proto_sources += custom_target(p + '-client-protocol.c',
++    input: p + '.xml',
++    output: p + '-client-protocol.c',
++    command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
++endforeach
+diff --git a/tests/check-cli.sh b/tests/check-cli.sh
+new file mode 100755
+index 0000000..3a07331
+--- /dev/null
++++ b/tests/check-cli.sh
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# usage: check-cli.sh BINARY version|list-layers [EXPECTED_VERSION]
++# Both options must work with no Wayland display, since CI has no compositor.
++bin=$1
++case $2 in
++version)
++	out=$("$bin" --version) || { echo "exit status $?"; exit 1; }
++	# Catches the -DVERSION in meson.build drifting from config.mk.
++	[ "$out" = "wvkbd-$3" ] || { echo "got '$out', want 'wvkbd-$3'"; exit 1; }
++	;;
++list-layers)
++	out=$("$bin" --list-layers) || { echo "exit status $?"; exit 1; }
++	[ -n "$out" ] || { echo "no output"; exit 1; }
++	# Every layout has at least a Latin letter layer.
++	echo "$out" | grep -qi 'full' || { echo "no layers listed: $out"; exit 1; }
++	;;
++*)
++	echo "unknown check $2"; exit 2 ;;
++esac
+diff --git a/tests/meson.build b/tests/meson.build
+new file mode 100644
+index 0000000..3503815
+--- /dev/null
++++ b/tests/meson.build
+@@ -0,0 +1,6 @@
++test_sh = find_program('sh')
++
++test('version', test_sh,
++  args: [files('check-cli.sh'), exe, 'version', meson.project_version()])
++test('list-layers', test_sh,
++  args: [files('check-cli.sh'), exe, 'list-layers'])
+-- 
+2.51.0
+

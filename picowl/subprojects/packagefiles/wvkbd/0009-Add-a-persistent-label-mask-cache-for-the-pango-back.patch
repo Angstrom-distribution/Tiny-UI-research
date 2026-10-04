@@ -1,0 +1,3818 @@
+From 62efbac1fe3130086b45d43e4064f7142a6c9a6c Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 14:58:57 +0200
+Subject: [PATCH 9/9] Add a persistent label mask cache for the pango backend
+
+Every start with the pango text backend paid for the fontconfig scan and the
+shaping of every label, which takes seconds on a 200 MHz handheld, and did the
+same work again at the next start. The masks only depend on the layout, the
+keyboard size, the scale and the font, so they are kept in one file per
+combination (cache.h describes the format) that later starts map read-only.
+
+The reader checks the header, the checksum and every offset and size against
+the size of the file before it hands out a single pointer, and anything wrong
+is a miss: the labels are rendered and the file is written again. The writer
+builds the file in memory (sorted index, equal masks stored once, nothing that
+varies between runs, so the same input gives the same bytes), writes it to a
+temporary file in the same directory and renames it into place, so a reader
+sees the old file or the new one and a failed write changes nothing.
+
+On a first start the visible layer is rendered at once, as before. The other
+layers are rendered from the main loop's poll timeout, two labels per wake-up
+after 10 ms of quiet, and the file is written once when they are all there.
+--prerender does the same work in one go, needs no compositor, and exits
+non-zero with a message if it cannot write the file. --cache-dir and --no-cache
+choose or disable the directory (default /var/cache/wvkbd-ipaq, changed at
+build time with the cache_dir meson option). The bitmap backend has no cache
+and ignores the options.
+
+The cache_tool meson option builds wvkbd-cache-gen with the native toolchain.
+It writes the files for 240x320, 320x240, 480x640 and 640x480 so a target need
+not run pango where the same libraries and font are installed (see below);
+they are what --prerender writes for the same screen. For
+that the geometry code (kbd_init_layout and friends) moved from keyboard.c to
+geometry.c and the icon and label box helpers from drw.c to label.c, since
+neither needs Wayland. The label boxes are computed in one place for drawing
+and for the cache: with a fractional scale the key popup, drawn one keyboard
+height higher, rounds its edges differently, so the cache also holds the popup
+boxes when the popup is on. An empty label is no longer sent to the backend.
+
+The masks also depend on what pango resolves the font description to, which
+the description does not say: a font package update replaces the file and
+would leave the old masks in use for good. The key (the header and the
+file name, as a hash) therefore includes the versions of pango, cairo,
+harfbuzz and fontconfig and the path, size and modification time of the
+font file, found through pango_fc_font_get_pattern when pangoft2 and
+fontconfig can be linked (they are what pango itself needs, so the meson
+build only warns when their development files are missing and then keys on
+the library versions alone; the Makefile build needs them). Only the first
+face of the description is followed, not the fallback fonts pango picks per
+glyph. Finding the file starts fontconfig, so a start with a usable cache
+still pays for that. Files made by wvkbd-cache-gen on another machine are
+only used where the same versions and font file are installed. A changed
+key is a miss and the new file is written beside the old one.
+
+--prerender sizes the keyboard with the same function as the running
+keyboard (pick_geometry in main.c). That width is the screen width unless
+the keyboard is docked, because a full-width layer surface is sized by the
+compositor, which overrides --width; before, --prerender counted --width
+without --dock and wrote a file no start ever looked for.
+
+The man page and the README describe the options, the first-start behaviour,
+the cache key and the file format.
+---
+ Makefile                  |   6 +-
+ README.md                 |  21 ++
+ cache.c                   | 518 +++++++++++++++++++++++++++
+ cache.h                   | 106 ++++++
+ drw.c                     |  27 +-
+ drw.h                     |  14 +
+ geometry.c                | 144 ++++++++
+ keyboard.c                |  73 ----
+ keyboard.h                |  15 +
+ label.c                   |  36 ++
+ main.c                    | 140 +++++++-
+ meson.build               |  60 +++-
+ meson_options.txt         |   4 +
+ prerender.c               |  32 ++
+ prerender.h               |  15 +
+ tests/check-cache-tool.sh |  43 +++
+ tests/check-prerender.sh  |  77 ++++
+ tests/meson.build         |  55 ++-
+ tests/test-cache.c        | 721 ++++++++++++++++++++++++++++++++++++++
+ tests/test-cachedraw.c    | 114 ++++++
+ tests/test-pangocache.c   | 415 ++++++++++++++++++++++
+ text-bitmap.c             |  38 ++
+ text-pango.c              | 335 ++++++++++++++++--
+ text-pango.h              |  12 +
+ text.h                    |  40 +++
+ tools/gen-cache.c         |  46 +++
+ wvkbd.1.scd               | 104 +++++-
+ 27 files changed, 3052 insertions(+), 159 deletions(-)
+ create mode 100644 cache.c
+ create mode 100644 cache.h
+ create mode 100644 geometry.c
+ create mode 100644 label.c
+ create mode 100644 prerender.c
+ create mode 100644 prerender.h
+ create mode 100755 tests/check-cache-tool.sh
+ create mode 100755 tests/check-prerender.sh
+ create mode 100644 tests/test-cache.c
+ create mode 100644 tests/test-cachedraw.c
+ create mode 100644 tests/test-pangocache.c
+ create mode 100644 tools/gen-cache.c
+
+diff --git a/Makefile b/Makefile
+index b423012..5eccab2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -11,8 +11,8 @@ MAN1 = ${NAME}.1
+ TEXT ?= bitmap
+ PKGS = wayland-client xkbcommon cairo
+ ifeq ($(TEXT),pango)
+-PKGS += pangocairo
+-CFLAGS += -DTEXT_PANGO
++PKGS += pangocairo pangoft2 fontconfig
++CFLAGS += -DTEXT_PANGO -DHAVE_FONTCONFIG
+ endif
+ 
+ WVKBD_SOURCES += $(filter-out $(SRC)/text-%.c $(SRC)/bmfont-data.c, $(wildcard $(SRC)/*.c))
+@@ -25,7 +25,7 @@ WVKBD_HEADERS += $(wildcard $(SRC)/*.h)
+ WVKBD_DIR_SOURCES = $(foreach src, $(WVKBD_SOURCES), $(addprefix $(BUILDDIR)/, $(src)))
+ 
+ PKG_CONFIG ?= pkg-config
+-CFLAGS += -std=gnu99 -Wall -g -DWITH_WAYLAND_SHM -DLAYOUT=\"layout.${LAYOUT}.h\" -DKEYMAP=\"keymap.${LAYOUT}.h\"
++CFLAGS += -std=gnu99 -Wall -g -DWITH_WAYLAND_SHM -DLAYOUT=\"layout.${LAYOUT}.h\" -DLAYOUT_NAME=\"${LAYOUT}\" -DKEYMAP=\"keymap.${LAYOUT}.h\"
+ CFLAGS += $(shell $(PKG_CONFIG) --cflags $(PKGS))
+ LDFLAGS += $(shell $(PKG_CONFIG) --libs $(PKGS)) -lm -lutil -lrt
+ 
+diff --git a/README.md b/README.md
+index 7c275b9..8ee4674 100644
+--- a/README.md
++++ b/README.md
+@@ -48,6 +48,27 @@ libcairo may still pull in fontconfig transitively, depending on how cairo was b
+ To use pango instead (any font, any script, at the cost of the extra libraries), build with `make TEXT=pango` or
+ `meson setup build -Dtext=pango`. The font tables in `bmfont-data.c` are generated by `tools/regen-fonts.sh`.
+ 
++#### Label cache (pango text only)
++
++A pango build renders each label once into a mask. To spare a small machine the fontconfig scan and the
++shaping, the masks of a keyboard size are kept in one file in `--cache-dir` (default `/var/cache/wvkbd-ipaq`,
++set with `-Dcache_dir=...` at build time; `--no-cache` turns the cache off) and mapped read-only by every later start.
++
++- **First start:** the visible layer is rendered at once and the other layers while the keyboard is idle (two
++  labels per wake-up, after 10 ms of quiet), then the file is written once, atomically (temporary file, then rename).
++- **`wvkbd-ipaq --prerender [--screen WxH]`** does that work synchronously and exits with status 0 if the file was
++  written, and non-zero with a message if not; run it from a package post-install or first-boot hook.
++- **`-Dcache_tool=true`** builds `wvkbd-cache-gen DIR` with the native toolchain. It writes the files for 240x320,
++  320x240, 480x640 and 640x480 so that the target never runs pango. The output is byte for byte the same every time.
++  The tool is not installed.
++
++A file that is truncated, corrupt, from another format version, layout, geometry, scale or font is a miss: the
++labels are rendered and the file is written again. The font includes the file it resolves to (path, size and
++modification time) and the versions of pango, cairo, harfbuzz and fontconfig, so a font or library update makes the
++old file a miss and a new one is written beside it. Files made on another machine (`wvkbd-cache-gen`) are only used
++where those versions and that font file are the same. The file format is described in `cache.h` and in wvkbd(1).
++The bitmap text build has no cache and ignores these options.
++
+ You also need [scdoc](https://git.sr.ht/~sircmpwn/scdoc/) to generate the documentation.
+ 
+ The default set of layouts is called `mobintl` *(mobile international)*, which groups various layouts aimed at mobile devices
+diff --git a/cache.c b/cache.c
+new file mode 100644
+index 0000000..daa4307
+--- /dev/null
++++ b/cache.c
+@@ -0,0 +1,518 @@
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "cache.h"
++
++#define MAX_FILE (64u << 20)
++#define MAX_MASK_DIM 4096
++static const uint8_t magic[8] = {'W', 'V', 'K', 'B', 'D', 'L', 'C', 1};
++
++/* Header field offsets, see cache.h. */
++enum {
++    H_VERSION = 8, H_HDRSIZE = 12, H_FILESIZE = 16, H_CRC = 20,
++    H_LAYOUTVER = 24, H_WIDTH = 28, H_HEIGHT = 32, H_SCALE = 36,
++    H_DEPTH = 40, H_COUNT = 44, H_FONTHASH = 48, H_LAYOUT = 56,
++    H_FONT = 88,
++};
++
++static void
++put16(uint8_t *p, uint32_t v)
++{
++    p[0] = v;
++    p[1] = v >> 8;
++}
++
++static void
++put32(uint8_t *p, uint32_t v)
++{
++    put16(p, v);
++    put16(p + 2, v >> 16);
++}
++
++static void
++put64(uint8_t *p, uint64_t v)
++{
++    put32(p, (uint32_t)v);
++    put32(p + 4, (uint32_t)(v >> 32));
++}
++
++static uint32_t
++get16(const uint8_t *p)
++{
++    return p[0] | (uint32_t)p[1] << 8;
++}
++
++static uint32_t
++get32(const uint8_t *p)
++{
++    return get16(p) | get16(p + 2) << 16;
++}
++
++static uint64_t
++get64(const uint8_t *p)
++{
++    return get32(p) | (uint64_t)get32(p + 4) << 32;
++}
++
++static uint64_t
++fnv64(uint64_t h, const void *data, size_t len)
++{
++    const uint8_t *p = data;
++    for (size_t i = 0; i < len; i++)
++        h = (h ^ p[i]) * 1099511628211ull;
++    return h;
++}
++
++uint64_t
++cache_key(const char *label, int inner_w, int inner_h)
++{
++    uint8_t box[9] = {0xff};
++    put32(box + 1, (uint32_t)inner_w);
++    put32(box + 5, (uint32_t)inner_h);
++    uint64_t h = fnv64(14695981039346656037ull, label, strlen(label));
++    return fnv64(h, box, sizeof(box));
++}
++
++uint64_t
++cache_identity_hash(const char *font, const char *env)
++{
++    /* the separator keeps "ab" + "c" apart from "a" + "bc" */
++    static const uint8_t sep = 0xff;
++    uint64_t h = fnv64(14695981039346656037ull, font, strlen(font));
++    h = fnv64(h, &sep, 1);
++    return env ? fnv64(h, env, strlen(env)) : h;
++}
++
++uint32_t
++cache_checksum(const uint8_t *file, size_t len)
++{
++    static uint32_t table[256];
++    if (!table[1]) {
++        for (uint32_t i = 0; i < 256; i++) {
++            uint32_t c = i;
++            for (int k = 0; k < 8; k++)
++                c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
++            table[i] = c;
++        }
++    }
++    uint32_t crc = 0xffffffffu;
++    for (size_t i = 0; i < len; i++) {
++        uint8_t b = (i >= H_CRC && i < H_CRC + 4) ? 0 : file[i];
++        crc = table[(crc ^ b) & 0xff] ^ (crc >> 8);
++    }
++    return ~crc;
++}
++
++static bool
++params_ok(const struct cache_params *p)
++{
++    return p->layout_name && p->font && strlen(p->layout_name) < CACHE_LAYOUT_LEN &&
++           strlen(p->font) < CACHE_FONT_LEN &&
++           (p->depth == 1 || p->depth == 4 || p->depth == 8);
++}
++
++/* The header a file for p starts with, apart from the sizes and the checksum.
++ * The reader compares against it byte for byte, which also rejects junk
++ * after the strings' NULs. */
++static void
++fill_header(uint8_t *h, const struct cache_params *p)
++{
++    memcpy(h, magic, sizeof(magic));
++    put32(h + H_VERSION, CACHE_FORMAT_VERSION);
++    put32(h + H_HDRSIZE, CACHE_HEADER_SIZE);
++    put32(h + H_LAYOUTVER, p->layout_version);
++    put32(h + H_WIDTH, p->width);
++    put32(h + H_HEIGHT, p->height);
++    put32(h + H_SCALE, p->scale_milli);
++    put32(h + H_DEPTH, p->depth);
++    put64(h + H_FONTHASH, cache_identity_hash(p->font, p->env));
++    strncpy((char *)h + H_LAYOUT, p->layout_name, CACHE_LAYOUT_LEN);
++    strncpy((char *)h + H_FONT, p->font, CACHE_FONT_LEN);
++}
++
++bool
++cache_path(char *path, size_t len, const char *dir,
++           const struct cache_params *p)
++{
++    if (!params_ok(p))
++        return false;
++    int n = snprintf(path, len, "%s/%s-%ux%u-s%u-%016llx.cache", dir,
++                     p->layout_name, p->width, p->height, p->scale_milli,
++                     (unsigned long long)cache_identity_hash(p->font, p->env));
++    return n > 0 && (size_t)n < len;
++}
++
++struct wr_ent {
++    const struct cache_item *item;
++    uint32_t offset;
++    uint16_t w, h;
++};
++
++static int
++cmp_ent(const void *a, const void *b)
++{
++    uint64_t ka = ((const struct wr_ent *)a)->item->key;
++    uint64_t kb = ((const struct wr_ent *)b)->item->key;
++    return ka < kb ? -1 : ka > kb;
++}
++
++static bool
++has_ink(const struct label_mask *m)
++{
++    return m->w > 0 && m->h > 0;
++}
++
++static bool
++same_mask(const struct label_mask *a, const struct label_mask *b)
++{
++    if (has_ink(a) != has_ink(b))
++        return false;
++    if (!has_ink(a))
++        return true;
++    return a->w == b->w && a->h == b->h &&
++           !memcmp(a->data, b->data, mask_stride(a->depth, a->w) * a->h);
++}
++
++static bool
++same_item(const struct cache_item *a, const struct cache_item *b)
++{
++    return a->logical_w == b->logical_w && a->logical_h == b->logical_h &&
++           a->mask.bx == b->mask.bx && a->mask.by == b->mask.by &&
++           same_mask(&a->mask, &b->mask);
++}
++
++static int
++fail(char *err, size_t errlen, const char *what, const char *path, int e)
++{
++    if (err && errlen) {
++        if (e)
++            snprintf(err, errlen, "%s %s: %s", what, path, strerror(e));
++        else
++            snprintf(err, errlen, "%s %s", what, path);
++    }
++    return -1;
++}
++
++static int
++write_all(int fd, const uint8_t *buf, size_t len)
++{
++    while (len) {
++        ssize_t n = write(fd, buf, len);
++        if (n < 0) {
++            if (errno == EINTR)
++                continue;
++            return -1;
++        }
++        buf += n;
++        len -= n;
++    }
++    return 0;
++}
++
++int
++cache_write(const char *dir, const struct cache_params *p,
++            const struct cache_item *items, size_t n, char *err, size_t errlen)
++{
++    char path[1024], tmp[1100];
++    if (!params_ok(p) || !cache_path(path, sizeof(path), dir, p))
++        return fail(err, errlen, "bad cache parameters for", dir, 0);
++    if (n > (1u << 20))
++        return fail(err, errlen, "too many labels for", path, 0);
++
++    struct wr_ent *ent = calloc(n ? n : 1, sizeof(*ent));
++    struct wr_ent *shared = calloc(n ? n : 1, sizeof(*shared));
++    uint8_t *file = NULL;
++    int fd = -1, ret = -1;
++    if (!ent || !shared) {
++        fail(err, errlen, "out of memory writing", path, 0);
++        goto out;
++    }
++    for (size_t i = 0; i < n; i++)
++        ent[i].item = &items[i];
++    qsort(ent, n, sizeof(*ent), cmp_ent);
++
++    /* Merge equal keys, and place every distinct mask once. */
++    size_t count = 0, nshared = 0;
++    uint64_t data_size = 0;
++    for (size_t i = 0; i < n; i++) {
++        const struct cache_item *it = ent[i].item;
++        if (count && ent[count - 1].item->key == it->key) {
++            if (!same_item(ent[count - 1].item, it)) {
++                fail(err, errlen, "two different labels share a key in", path, 0);
++                goto out;
++            }
++            continue;
++        }
++        const struct label_mask *m = &it->mask;
++        if ((m->w && m->h) &&
++            (!m->data || m->depth != p->depth || m->w > MAX_MASK_DIM ||
++             m->h > MAX_MASK_DIM)) {
++            fail(err, errlen, "unusable mask for", path, 0);
++            goto out;
++        }
++        ent[count] = ent[i];
++        ent[count].w = has_ink(m) ? m->w : 0;
++        ent[count].h = has_ink(m) ? m->h : 0;
++        ent[count].offset = 0;
++        if (has_ink(m)) {
++            size_t j;
++            for (j = 0; j < nshared; j++)
++                if (same_mask(&shared[j].item->mask, m))
++                    break;
++            if (j == nshared) {
++                shared[nshared].item = it;
++                shared[nshared].offset = 0; /* set below */
++                data_size += mask_stride(p->depth, m->w) * m->h;
++                nshared++;
++            }
++        }
++        count++;
++    }
++
++    size_t index_end = CACHE_HEADER_SIZE + count * CACHE_INDEX_SIZE;
++    if (data_size > MAX_FILE || index_end + data_size > MAX_FILE) {
++        fail(err, errlen, "cache too large:", path, 0);
++        goto out;
++    }
++    size_t total = index_end + data_size;
++    file = calloc(1, total);
++    if (!file) {
++        fail(err, errlen, "out of memory writing", path, 0);
++        goto out;
++    }
++    fill_header(file, p);
++    put32(file + H_FILESIZE, total);
++    put32(file + H_COUNT, count);
++
++    size_t next = index_end;
++    for (size_t j = 0; j < nshared; j++) {
++        const struct label_mask *m = &shared[j].item->mask;
++        size_t size = mask_stride(p->depth, m->w) * m->h;
++        memcpy(file + next, m->data, size);
++        shared[j].offset = next;
++        next += size;
++    }
++    for (size_t i = 0; i < count; i++) {
++        const struct label_mask *m = &ent[i].item->mask;
++        uint32_t off = 0;
++        if (has_ink(m)) {
++            for (size_t j = 0; j < nshared; j++)
++                if (same_mask(&shared[j].item->mask, m)) {
++                    off = shared[j].offset;
++                    break;
++                }
++        }
++        uint8_t *e = file + CACHE_HEADER_SIZE + i * CACHE_INDEX_SIZE;
++        put64(e, ent[i].item->key);
++        put32(e + 8, off);
++        put16(e + 12, ent[i].w);
++        put16(e + 14, ent[i].h);
++        put16(e + 16, (uint16_t)m->bx);
++        put16(e + 18, (uint16_t)m->by);
++        put16(e + 20, ent[i].item->logical_w);
++        put16(e + 22, ent[i].item->logical_h);
++    }
++    put32(file + H_CRC, cache_checksum(file, total));
++
++    /* Same directory as the target, or the rename could cross file systems
++     * and stop being atomic. */
++    if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
++        fail(err, errlen, "cannot create", dir, errno);
++        goto out;
++    }
++    const char *base = strrchr(path, '/') + 1;
++    snprintf(tmp, sizeof(tmp), "%.*s/.%s.XXXXXX", (int)(base - path - 1), path,
++             base);
++    fd = mkstemp(tmp);
++    if (fd < 0) {
++        fail(err, errlen, "cannot create a temporary file in", dir, errno);
++        goto out;
++    }
++    if (write_all(fd, file, total) < 0) {
++        fail(err, errlen, "cannot write", tmp, errno);
++        goto unlink_tmp;
++    }
++    /* The data must be on disk before the name points at it. */
++    if (fsync(fd) < 0 || fchmod(fd, 0644) < 0) {
++        fail(err, errlen, "cannot sync", tmp, errno);
++        goto unlink_tmp;
++    }
++    if (close(fd) < 0) {
++        fd = -1;
++        fail(err, errlen, "cannot close", tmp, errno);
++        goto unlink_tmp;
++    }
++    fd = -1;
++    if (rename(tmp, path) < 0) {
++        fail(err, errlen, "cannot rename onto", path, errno);
++        goto unlink_tmp;
++    }
++    ret = 0;
++    goto out;
++
++unlink_tmp:
++    unlink(tmp);
++out:
++    if (fd >= 0)
++        close(fd);
++    free(file);
++    free(shared);
++    free(ent);
++    return ret;
++}
++
++struct cache {
++    const uint8_t *base;
++    size_t len, count;
++    uint32_t depth;
++    void *map; /* non-NULL when base is an mmap */
++};
++
++/* Every offset and size is checked here, once, so that a lookup afterwards
++ * can hand out pointers without looking at the file again. */
++static bool
++validate_file(const uint8_t *b, size_t len, const struct cache_params *p,
++              size_t *count_out)
++{
++    if (!params_ok(p) || len < CACHE_HEADER_SIZE || len > MAX_FILE)
++        return false;
++    uint8_t want[CACHE_HEADER_SIZE] = {0};
++    fill_header(want, p);
++    /* The sizes, the checksum and the count are the file's own and are
++     * checked below; everything else must match what we asked for. */
++    if (memcmp(b, want, H_FILESIZE) ||
++        memcmp(b + H_LAYOUTVER, want + H_LAYOUTVER, H_COUNT - H_LAYOUTVER) ||
++        memcmp(b + H_FONTHASH, want + H_FONTHASH,
++               CACHE_HEADER_SIZE - H_FONTHASH))
++        return false;
++    if (get32(b + H_FILESIZE) != len)
++        return false;
++    if (get32(b + H_CRC) != cache_checksum(b, len))
++        return false;
++    uint64_t count = get32(b + H_COUNT);
++    uint64_t data_start = CACHE_HEADER_SIZE + count * CACHE_INDEX_SIZE;
++    if (data_start > len)
++        return false;
++    unsigned depth = p->depth;
++    uint64_t prev = 0;
++    for (uint64_t i = 0; i < count; i++) {
++        const uint8_t *e = b + CACHE_HEADER_SIZE + i * CACHE_INDEX_SIZE;
++        uint64_t key = get64(e);
++        /* strictly ascending, so the binary search is sound and no key is
++         * there twice */
++        if (i && key <= prev)
++            return false;
++        prev = key;
++        uint64_t off = get32(e + 8), w = get16(e + 12), h = get16(e + 14);
++        if (!w || !h) {
++            if (w || h || off)
++                return false;
++            continue;
++        }
++        if (w > MAX_MASK_DIM || h > MAX_MASK_DIM)
++            return false;
++        uint64_t size = (uint64_t)mask_stride(depth, w) * h;
++        if (off % 4 || off < data_start || off > len || size > len - off)
++            return false;
++    }
++    *count_out = count;
++    return true;
++}
++
++struct cache *
++cache_open_buffer(const void *buf, size_t len, const struct cache_params *p)
++{
++    size_t count;
++    if (!validate_file(buf, len, p, &count))
++        return NULL;
++    struct cache *c = calloc(1, sizeof(*c));
++    if (!c)
++        return NULL;
++    c->base = buf;
++    c->len = len;
++    c->count = count;
++    c->depth = p->depth;
++    return c;
++}
++
++struct cache *
++cache_open(const char *dir, const struct cache_params *p)
++{
++    char path[1024];
++    if (!cache_path(path, sizeof(path), dir, p))
++        return NULL;
++    int fd = open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0)
++        return NULL;
++    struct stat st;
++    void *map = MAP_FAILED;
++    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
++        st.st_size >= CACHE_HEADER_SIZE && st.st_size <= MAX_FILE)
++        map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
++    close(fd);
++    if (map == MAP_FAILED)
++        return NULL;
++    struct cache *c = cache_open_buffer(map, st.st_size, p);
++    if (!c) {
++        munmap(map, st.st_size);
++        return NULL;
++    }
++    c->map = map;
++    return c;
++}
++
++bool
++cache_item_at(const struct cache *c, size_t i, struct cache_item *out)
++{
++    if (i >= c->count)
++        return false;
++    const uint8_t *e = c->base + CACHE_HEADER_SIZE + i * CACHE_INDEX_SIZE;
++    uint32_t w = get16(e + 12), h = get16(e + 14);
++    out->key = get64(e);
++    out->mask = (struct label_mask){
++        .depth = c->depth, .w = w, .h = h,
++        .bx = (int16_t)get16(e + 16), .by = (int16_t)get16(e + 18),
++        .data = w && h ? c->base + get32(e + 8) : NULL};
++    out->logical_w = get16(e + 20);
++    out->logical_h = get16(e + 22);
++    return true;
++}
++
++bool
++cache_lookup(const struct cache *c, uint64_t key, struct cache_item *out)
++{
++    size_t lo = 0, hi = c->count;
++    while (lo < hi) {
++        size_t mid = lo + (hi - lo) / 2;
++        uint64_t k = get64(c->base + CACHE_HEADER_SIZE + mid * CACHE_INDEX_SIZE);
++        if (k == key)
++            return cache_item_at(c, mid, out);
++        if (k < key)
++            lo = mid + 1;
++        else
++            hi = mid;
++    }
++    return false;
++}
++
++size_t
++cache_count(const struct cache *c)
++{
++    return c->count;
++}
++
++void
++cache_close(struct cache *c)
++{
++    if (!c)
++        return;
++    if (c->map)
++        munmap(c->map, c->len);
++    free(c);
++}
+diff --git a/cache.h b/cache.h
+new file mode 100644
+index 0000000..b663ea2
+--- /dev/null
++++ b/cache.h
+@@ -0,0 +1,106 @@
++#ifndef CACHE_H
++#define CACHE_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "mask.h"
++
++/* The persistent label mask cache: every mask of a keyboard geometry in one
++ * file that a later start maps instead of asking pango to render again.
++ *
++ * File format version 2, all integers little endian:
++ *
++ *   offset size  field
++ *        0    8  magic "WVKBDLC\1"
++ *        8    4  format version (2)
++ *       12    4  header size (216)
++ *       16    4  file size
++ *       20    4  CRC-32 of the whole file, this field counted as zero
++ *       24    4  layout version (derived from the label text)
++ *       28    4  keyboard width in pixels
++ *       32    4  keyboard height in pixels
++ *       36    4  surface scale times 1000
++ *       40    4  mask depth in bits per pixel (1, 4 or 8)
++ *       44    4  label count
++ *       48    8  hash of the font description and of the environment
++ *       56   32  layout name, NUL padded
++ *       88  128  font description, NUL padded
++ *      216       index, label count entries of 24 bytes, sorted by key:
++ *                  0 8 key (hash of label and key box)
++ *                  8 4 offset of the mask data in the file
++ *                 12 2 width   14 2 height   (0 and 0: the label has no ink)
++ *                 16 2 bearing x   18 2 bearing y   (signed)
++ *                 20 2 logical width   22 2 logical height
++ *      after the index: mask data, every mask at a multiple of 4 bytes, rows
++ *                padded to 4 bytes as mask_stride() says. Equal masks are
++ *                stored once and several index entries point at them.
++ *
++ * Nothing in the file is a timestamp or an address, so the same input gives
++ * the same bytes. */
++
++#define CACHE_FORMAT_VERSION 2
++#define CACHE_HEADER_SIZE 216
++#define CACHE_INDEX_SIZE 24
++#define CACHE_LAYOUT_LEN 32
++#define CACHE_FONT_LEN 128
++
++/* What a file must have been made for to be of use. */
++struct cache_params {
++	const char *layout_name;
++	uint32_t layout_version;
++	uint32_t width, height;
++	uint32_t scale_milli;
++	const char *font;
++	/* What else the masks depend on and the font description does not say:
++	 * library versions and the font file behind the description. Only its
++	 * hash is stored, in the file and in the file name, so a changed
++	 * environment is a miss. NULL is the same as "". */
++	const char *env;
++	uint32_t depth;
++};
++
++struct cache_item {
++	uint64_t key;
++	struct label_mask mask;
++	uint16_t logical_w, logical_h;
++};
++
++/* The key of a label drawn in a box of inner_w x inner_h pixels: the same
++ * text wraps differently in a key of another size. */
++uint64_t cache_key(const char *label, int inner_w, int inner_h);
++uint64_t cache_identity_hash(const char *font, const char *env);
++/* CRC-32 of a whole file image with its checksum field counted as zero. */
++uint32_t cache_checksum(const uint8_t *file, size_t len);
++
++/* Writes the file name for the parameters into path. False if too long. */
++bool cache_path(char *path, size_t len, const char *dir,
++                const struct cache_params *p);
++
++/* Writes the cache for the parameters, replacing any earlier one in one step:
++ * the data goes to a temporary file in the same directory, which is renamed
++ * over the final name only when it is complete, so a reader never sees half a
++ * file and a failure leaves the old file in place. The directory is created
++ * if it is missing. Items with equal keys are merged when they are equal and
++ * rejected otherwise. Returns 0, or -1 with a message in err. */
++int cache_write(const char *dir, const struct cache_params *p,
++                const struct cache_item *items, size_t n, char *err,
++                size_t errlen);
++
++struct cache;
++/* Maps the file read-only and checks it against the parameters. NULL means
++ * a miss for any reason: no file, wrong size, wrong checksum, made for other
++ * parameters, or an offset or size that does not fit the file. */
++struct cache *cache_open(const char *dir, const struct cache_params *p);
++/* The same checks on memory the caller keeps alive. */
++struct cache *cache_open_buffer(const void *buf, size_t len,
++                                const struct cache_params *p);
++/* The mask data of a found item points into the file, so it is valid until
++ * cache_close. */
++bool cache_lookup(const struct cache *c, uint64_t key, struct cache_item *out);
++size_t cache_count(const struct cache *c);
++bool cache_item_at(const struct cache *c, size_t i, struct cache_item *out);
++void cache_close(struct cache *c);
++
++#endif
+diff --git a/drw.c b/drw.c
+index 489f212..b8cf305 100644
+--- a/drw.c
++++ b/drw.c
+@@ -307,27 +307,6 @@ drwsurf_flip(struct drwsurf *ds)
+     drwsurf_backport(ds);
+ }
+ 
+-/* Shift, caps lock, backspace and enter are shapes rather than glyphs: the
+- * built-in fonts draw them too small to read and as one fixed bitmap, while
+- * these scale with the key. */
+-enum icon { ICON_NONE, ICON_SHIFT, ICON_CAPS, ICON_BACKSPACE, ICON_ENTER };
+-
+-static enum icon
+-drw_icon_for_label(const char *label)
+-{
+-    if (!strcmp(label, "\u21e7")) return ICON_SHIFT;
+-    if (!strcmp(label, "\u21eb")) return ICON_CAPS;
+-    if (!strcmp(label, "\u232b")) return ICON_BACKSPACE;
+-    if (!strcmp(label, "\u21b5")) return ICON_ENTER;
+-    return ICON_NONE;
+-}
+-
+-bool
+-drw_label_is_icon(const char *label)
+-{
+-    return drw_icon_for_label(label) != ICON_NONE;
+-}
+-
+ static void
+ drw_path(cairo_t *cr, double cx, double cy, double u, const double (*pts)[2],
+          int n)
+@@ -438,11 +417,9 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+     };
+     /* The mask blitter works in buffer pixels, which differ from surface
+      * coordinates when the compositor scales the surface. */
+-    int bx = lround(x * ds->scale), by = lround(y * ds->scale);
+-    int bw = lround((x + w) * ds->scale) - bx;
+-    int bh = lround((y + h) * ds->scale) - by;
++    struct drw_label_box box = drw_label_box(ds->scale, x, y, w, h, b);
+ 
+-    text_draw(font, label, &t, bx, by, bw, bh, lround(b * ds->scale),
++    text_draw(font, label, &t, box.x, box.y, box.w, box.h, box.border,
+               ds->scale, color);
+     /* cairo does not know that the blitter changed the memory */
+     cairo_surface_mark_dirty(d->cairo_surf);
+diff --git a/drw.h b/drw.h
+index cf4a8ae..a8b2b44 100644
+--- a/drw.h
++++ b/drw.h
+@@ -88,9 +88,23 @@ void drw_fill_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+ void drw_over_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                         uint32_t w, uint32_t h, int rounding);
+ 
++/* Shift, caps lock, backspace and enter are shapes rather than glyphs: the
++ * built-in fonts draw them too small to read and as one fixed bitmap, while
++ * these scale with the key. */
++enum icon { ICON_NONE, ICON_SHIFT, ICON_CAPS, ICON_BACKSPACE, ICON_ENTER };
++enum icon drw_icon_for_label(const char *label);
++
+ /* Whether drw_draw_text draws the label as a shape instead of through the
+  * text backend, so a font without its glyph is no defect. */
+ bool drw_label_is_icon(const char *label);
++/* The box a label is drawn into, in buffer pixels. drw_draw_text and the
++ * label cache both ask for it, so the sizes a mask is rendered for and the
++ * sizes it is looked up with cannot drift apart. */
++struct drw_label_box {
++	int x, y, w, h, border;
++};
++struct drw_label_box drw_label_box(double scale, uint32_t x, uint32_t y,
++                                   uint32_t w, uint32_t h, uint32_t b);
+ void drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+                    uint32_t w, uint32_t h, uint32_t b, const char *label,
+                    struct text_font *font);
+diff --git a/geometry.c b/geometry.c
+new file mode 100644
+index 0000000..5d0bf86
+--- /dev/null
++++ b/geometry.c
+@@ -0,0 +1,144 @@
++/* Key geometry, kept apart from keyboard.c because it needs neither Wayland
++ * nor xkbcommon: the build-time cache tool links it on the build machine. */
++#include <stdint.h>
++#include <string.h>
++
++#include "keyboard.h"
++
++uint32_t
++kbd_pick_height(bool landscape, uint32_t screen_w, uint32_t configured,
++                bool forced)
++{
++#ifdef KBD_DEFAULT_HEIGHT
++    if (!forced)
++        return KBD_DEFAULT_HEIGHT(screen_w, landscape);
++#endif
++    (void)landscape;
++    (void)screen_w;
++    (void)forced;
++    return configured;
++}
++
++uint8_t
++kbd_get_rows(struct layout *l)
++{
++    uint8_t rows = 0;
++    struct key *k = l->keys;
++    while (k->type != Last) {
++        if (k->type == EndRow) {
++            rows++;
++        }
++        k++;
++    }
++    return rows + 1;
++}
++
++void
++kbd_init_layout(struct layout *l, uint32_t width, uint32_t height)
++{
++    uint32_t y = 0;
++    uint8_t rows = kbd_get_rows(l);
++
++    l->keyheight = height / rows;
++
++    struct key *k = l->keys;
++    double rowlength = kbd_get_row_length(k);
++    double units = 0.0; /* widths of the keys of this row so far */
++    while (k->type != Last) {
++        if (k->type == EndRow) {
++            y += l->keyheight;
++            units = 0.0;
++            rowlength = kbd_get_row_length(k + 1);
++        } else if (k->width > 0) {
++            /* Both edges are rounded from the exact position, so the keys
++             * of a row always end exactly at the width. Rounding the
++             * accumulated pixel position as an upstream version did could
++             * be one pixel off after floating point error, and the last key
++             * then stuck out of the surface (seen at --width 200). */
++            uint32_t left = (uint32_t)(units * width / rowlength + 0.5);
++            units += k->width;
++            uint32_t right = (uint32_t)(units * width / rowlength + 0.5);
++            k->x = left;
++            k->y = y;
++            k->w = right - left;
++        }
++        k->h = l->keyheight;
++        k++;
++    }
++}
++
++double
++kbd_get_row_length(struct key *k)
++{
++    double l = 0.0;
++    while ((k->type != Last) && (k->type != EndRow)) {
++        l += k->width;
++        k++;
++    }
++    return l;
++}
++
++void
++kbd_each_label(struct layout *l, double scale, uint32_t popup_kbd_h,
++               kbd_label_fn fn, void *data)
++{
++    for (struct key *k = l->keys; k->type != Last; k++) {
++        if (k->type == Pad || k->type == EndRow)
++            continue;
++        /* The same boxes drw_draw_text computes for the key, and the same
++         * two labels key_label can pick: icons are shapes and an empty label
++         * draws nothing. */
++        struct drw_label_box box[2];
++        box[0] = drw_label_box(scale, k->x, k->y, k->w, k->h, KBD_KEY_BORDER);
++        int nbox = 1;
++        if (popup_kbd_h) {
++            /* The popup draws the key one keyboard height higher, and with a
++             * fractional scale the rounding of its edges then differs. */
++            box[1] = drw_label_box(scale, k->x, popup_kbd_h + k->y - k->h,
++                                   k->w, k->h, KBD_KEY_BORDER);
++            nbox = box[1].w == box[0].w && box[1].h == box[0].h ? 1 : 2;
++        }
++        const char *labels[2] = {k->label, k->shift_label};
++        for (int b = 0; b < nbox; b++) {
++            int iw = box[b].w - 2 * box[b].border;
++            int ih = box[b].h - 2 * box[b].border;
++            if (iw <= 0 || ih <= 0)
++                continue;
++            for (int i = 0; i < 2; i++) {
++                if (!labels[i] || !*labels[i] || drw_label_is_icon(labels[i]))
++                    continue;
++                fn(data, labels[i], iw, ih);
++            }
++        }
++    }
++}
++
++/* A cache made for other labels must not be used, and nothing else tells the
++ * reader that the layout changed, so the version is derived from the text. */
++uint32_t
++kbd_layout_version(void)
++{
++    uint32_t h = 2166136261u;
++    for (int i = 0; i < NumLayouts; i++) {
++        for (struct key *k = layouts[i].keys; k->type != Last; k++) {
++            const char *s[2] = {k->label, k->shift_label};
++            for (int j = 0; j < 2; j++) {
++                for (const char *p = s[j] ? s[j] : ""; *p; p++)
++                    h = (h ^ (unsigned char)*p) * 16777619u;
++                h = (h ^ 0xffu) * 16777619u;
++            }
++        }
++        h = (h ^ 0xfeu) * 16777619u;
++    }
++    return h;
++}
++
++#ifndef LAYOUT_NAME
++#define LAYOUT_NAME "wvkbd"
++#endif
++
++const char *
++kbd_layout_name(void)
++{
++    return LAYOUT_NAME;
++}
+diff --git a/keyboard.c b/keyboard.c
+index 0bdc1f6..fe42d11 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -110,34 +110,6 @@ kbd_next_layer(struct kbd *kb, struct key *k, bool invert)
+     kbd_switch_layout(kb, &kb->layouts[layer], layer_index);
+ }
+ 
+-uint32_t
+-kbd_pick_height(bool landscape, uint32_t screen_w, uint32_t configured,
+-                bool forced)
+-{
+-#ifdef KBD_DEFAULT_HEIGHT
+-    if (!forced)
+-        return KBD_DEFAULT_HEIGHT(screen_w, landscape);
+-#endif
+-    (void)landscape;
+-    (void)screen_w;
+-    (void)forced;
+-    return configured;
+-}
+-
+-uint8_t
+-kbd_get_rows(struct layout *l)
+-{
+-    uint8_t rows = 0;
+-    struct key *k = l->keys;
+-    while (k->type != Last) {
+-        if (k->type == EndRow) {
+-            rows++;
+-        }
+-        k++;
+-    }
+-    return rows + 1;
+-}
+-
+ enum layout_id *
+ kbd_init_layers(char *layer_names_list)
+ {
+@@ -221,51 +193,6 @@ kbd_init(struct kbd *kb, struct layout *layouts, char *layer_names_list,
+     create_and_upload_keymap(kb, kb->layout->keymap_name, 0);
+ }
+ 
+-void
+-kbd_init_layout(struct layout *l, uint32_t width, uint32_t height)
+-{
+-    uint32_t y = 0;
+-    uint8_t rows = kbd_get_rows(l);
+-
+-    l->keyheight = height / rows;
+-
+-    struct key *k = l->keys;
+-    double rowlength = kbd_get_row_length(k);
+-    double units = 0.0; /* widths of the keys of this row so far */
+-    while (k->type != Last) {
+-        if (k->type == EndRow) {
+-            y += l->keyheight;
+-            units = 0.0;
+-            rowlength = kbd_get_row_length(k + 1);
+-        } else if (k->width > 0) {
+-            /* Both edges are rounded from the exact position, so the keys
+-             * of a row always end exactly at the width. Rounding the
+-             * accumulated pixel position as an upstream version did could
+-             * be one pixel off after floating point error, and the last key
+-             * then stuck out of the surface (seen at --width 200). */
+-            uint32_t left = (uint32_t)(units * width / rowlength + 0.5);
+-            units += k->width;
+-            uint32_t right = (uint32_t)(units * width / rowlength + 0.5);
+-            k->x = left;
+-            k->y = y;
+-            k->w = right - left;
+-        }
+-        k->h = l->keyheight;
+-        k++;
+-    }
+-}
+-
+-double
+-kbd_get_row_length(struct key *k)
+-{
+-    double l = 0.0;
+-    while ((k->type != Last) && (k->type != EndRow)) {
+-        l += k->width;
+-        k++;
+-    }
+-    return l;
+-}
+-
+ struct key *
+ kbd_get_key(struct kbd *kb, uint32_t x, uint32_t y)
+ {
+diff --git a/keyboard.h b/keyboard.h
+index 6d4301f..0758337 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -1,6 +1,9 @@
+ #ifndef __KEYBOARD_H
+ #define __KEYBOARD_H
+ 
++#include <linux/input-event-codes.h>
++#include <stddef.h>
++
+ #include "drw.h"
+ 
+ #define MAX_LAYERS 25
+@@ -178,6 +181,18 @@ uint8_t kbd_get_rows(struct layout *l);
+ uint32_t kbd_pick_height(bool landscape, uint32_t screen_w,
+                          uint32_t configured, bool forced);
+ double kbd_get_row_length(struct key *k);
++/* Calls fn for every label the keyboard may draw with the text backend, on
++ * any shift state, with the size in buffer pixels of the box inside the key
++ * border that text_draw receives. popup_kbd_h is the keyboard height when the
++ * key popup is on, else 0. The keys must have been through kbd_init_layout. */
++typedef void (*kbd_label_fn)(void *data, const char *label, int inner_w,
++                             int inner_h);
++void kbd_each_label(struct layout *l, double scale, uint32_t popup_kbd_h,
++                    kbd_label_fn fn, void *data);
++/* The name of the layout this binary was built for, as in "ipaq". */
++const char *kbd_layout_name(void);
++/* Changes whenever a label of any layout changes. */
++uint32_t kbd_layout_version(void);
+ void kbd_next_layer(struct kbd *kb, struct key *k, bool invert);
+ void kbd_switch_layout(struct kbd *kb, struct layout *l, size_t layer_index);
+ void create_and_upload_keymap(struct kbd *kb, const char *name, uint32_t comp_unichr);
+diff --git a/label.c b/label.c
+new file mode 100644
+index 0000000..be67439
+--- /dev/null
++++ b/label.c
+@@ -0,0 +1,36 @@
++/* What decides where a label goes and whether the text backend draws it, kept
++ * apart from drw.c because the build-time cache tool needs it without
++ * Wayland. */
++#include <math.h>
++#include <string.h>
++
++#include "drw.h"
++
++enum icon
++drw_icon_for_label(const char *label)
++{
++    if (!strcmp(label, "\u21e7")) return ICON_SHIFT;
++    if (!strcmp(label, "\u21eb")) return ICON_CAPS;
++    if (!strcmp(label, "\u232b")) return ICON_BACKSPACE;
++    if (!strcmp(label, "\u21b5")) return ICON_ENTER;
++    return ICON_NONE;
++}
++
++bool
++drw_label_is_icon(const char *label)
++{
++    return drw_icon_for_label(label) != ICON_NONE;
++}
++
++struct drw_label_box
++drw_label_box(double scale, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
++              uint32_t b)
++{
++    struct drw_label_box box;
++    box.x = lround(x * scale);
++    box.y = lround(y * scale);
++    box.w = lround((x + w) * scale) - box.x;
++    box.h = lround((y + h) * scale) - box.y;
++    box.border = lround(b * scale);
++    return box;
++}
+diff --git a/main.c b/main.c
+index d69a431..65e5d5f 100644
+--- a/main.c
++++ b/main.c
+@@ -19,6 +19,7 @@
+ #include <wchar.h>
+ 
+ #include "keyboard.h"
++#include "prerender.h"
+ #include "text.h"
+ #include "visibility.h"
+ #include "config.h"
+@@ -63,6 +64,14 @@ static struct zwp_input_method_manager_v2 *im_mgr;
+ static struct vis vis;
+ /* The size and scale the current buffers were made for, zero before the
+  * first successful resize. */
++#ifndef DEFAULT_CACHE_DIR
++#define DEFAULT_CACHE_DIR "/var/cache/wvkbd-ipaq"
++#endif
++static const char *cache_dir = DEFAULT_CACHE_DIR;
++static bool no_cache, prerender;
++/* the screen --prerender sizes the keyboard for: it has no compositor to ask */
++static uint32_t screen_w = 240, screen_h = 320;
++
+ static uint32_t applied_w, applied_h;
+ static double applied_scale;
+ 
+@@ -599,29 +608,41 @@ im_unavailable(void *data, struct zwp_input_method_v2 *zwp_input_method_v2)
+ {
+ }
+ 
++/* The size the keyboard takes on a screen, in one place so that --prerender
++ * computes exactly what a start on that screen asks for and finds the cache
++ * file it wrote. */
++static void
++pick_geometry(uint32_t screen_w, uint32_t screen_h, bool *landscape,
++              uint32_t *w, uint32_t *h)
++{
++    *landscape = screen_w > screen_h;
++    *h = *landscape ? kbd_pick_height(true, screen_w, landscape_height,
++                                      landscape_height_forced)
++                    : kbd_pick_height(false, screen_w, normal_height,
++                                      normal_height_forced);
++    /* Only a docked layer surface is given a width: a full-width one is
++     * sized by the compositor, which overrides --width, so counting it here
++     * would size the buffers and the cache for a width that never shows. */
++    if (dock_mode == DOCK_FULL)
++        *w = screen_w;
++    else if (custom_width > 0)
++        *w = custom_width;
++    else
++        *w = (uint32_t)((double)screen_w * width_ratio);
++}
++
+ void
+ redimension_keyboard()
+ {
+-    keyboard.landscape = available_width > available_height;
++    uint32_t w;
++    pick_geometry(available_width, available_height, &keyboard.landscape, &w,
++                  &height);
+ 
+-    enum layout_id layer;
+-    if (keyboard.landscape) {
+-        layer = keyboard.landscape_layers[0];
+-        height = kbd_pick_height(true, available_width, landscape_height,
+-                                 landscape_height_forced);
+-    } else {
+-        layer = keyboard.layers[0];
+-        height = kbd_pick_height(false, available_width, normal_height,
+-                                 normal_height_forced);
+-    }
++    enum layout_id layer = keyboard.landscape
++                               ? keyboard.landscape_layers[0]
++                               : keyboard.layers[0];
+ 
+-    if (custom_width > 0) {
+-        keyboard.w = custom_width;
+-    } else if (dock_mode != DOCK_FULL) {
+-        keyboard.w = (uint32_t)((double)available_width * width_ratio);
+-    } else {
+-        keyboard.w = available_width;
+-    }
++    keyboard.w = w;
+     keyboard.h = height;
+     keyboard.layout = &keyboard.layouts[layer];
+     keyboard.layer_index = 0;
+@@ -734,6 +755,13 @@ popup_sync(void)
+         drwsurf_map(&popup_draw_surf);
+ }
+ 
++static void
++want_label(void *data, const char *label, int inner_w, int inner_h)
++{
++    (void)data;
++    text_cache_want(label, inner_w, inner_h);
++}
++
+ /* Makes the buffers for the configured size. When that fails the keyboard
+  * keeps describing what the old buffers hold. */
+ static bool
+@@ -741,6 +769,15 @@ apply_size(uint32_t w, uint32_t h, double scale)
+ {
+     double old_scale = keyboard.scale;
+     keyboard.scale = scale;
++    /* attached before the resize so that drawing the visible layer already
++     * finds its labels in the file */
++    text_cache_attach(keyboard.schemes[0].text_font,
++                      &(struct text_cache_config){
++                          .dir = no_cache ? NULL : cache_dir,
++                          .layout_name = kbd_layout_name(),
++                          .layout_version = kbd_layout_version(),
++                          .width = keyboard.w, .height = keyboard.h,
++                          .scale = scale, .read = true});
+     if (!kbd_resize(&keyboard, layouts, NumLayouts)) {
+         fprintf(stderr, "cannot make the keyboard buffers, keeping the old ones\n");
+         keyboard.scale = old_scale;
+@@ -753,6 +790,10 @@ apply_size(uint32_t w, uint32_t h, double scale)
+     applied_w = w;
+     applied_h = h;
+     applied_scale = scale;
++    /* the other layers are rendered while the keyboard is idle */
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_each_label(&layouts[i], scale, keyboard.show_popup ? keyboard.h : 0,
++                       want_label, NULL);
+ 
+     if (draw_surf_viewport) {
+         wp_viewport_set_destination(draw_surf_viewport, keyboard.w,
+@@ -858,6 +899,13 @@ usage(char *argv0)
+     fprintf(stderr, "  --fn [font] - Set font (e.g: DejaVu Sans 20); only with "
+             "the pango text backend\n");
+     fprintf(stderr, "  --hidden    - Start hidden (send SIGUSR2 to show)\n");
++    fprintf(stderr, "  --cache-dir DIR        - Where the pango text backend keeps its label "
++                    "cache (default %s)\n", DEFAULT_CACHE_DIR);
++    fprintf(stderr, "  --no-cache             - Do not read or write the label cache\n");
++    fprintf(stderr, "  --prerender            - Render every label of every layer, write the "
++                    "label cache and exit; sized by --screen, -H, -L, --width\n");
++    fprintf(stderr, "  --screen WxH           - Screen size --prerender sizes the keyboard "
++                    "for (default 240x320)\n");
+     fprintf(stderr, "  --popup                - Show the key-press popup%s\n",
+             DEFAULT_SHOW_POPUP ? " (default)" : "");
+     fprintf(stderr, "  --no-popup             - Disable the key-press popup%s\n",
+@@ -1279,6 +1327,27 @@ main(int argc, char **argv)
+             fprintf(stderr, "wvkbd: --fn is ignored, this build draws text "
+                             "with built-in bitmap fonts\n");
+ #endif
++        } else if (!strcmp(argv[i], "--cache-dir")) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            cache_dir = argv[++i];
++        } else if (!strcmp(argv[i], "--no-cache")) {
++            no_cache = true;
++        } else if (!strcmp(argv[i], "--prerender")) {
++            prerender = true;
++        } else if (!strcmp(argv[i], "--screen")) {
++            unsigned sw, sh;
++            char junk;
++            if (i >= argc - 1 ||
++                sscanf(argv[++i], "%ux%u%c", &sw, &sh, &junk) != 2 || !sw ||
++                !sh || sw > 16384 || sh > 16384) {
++                usage(argv[0]);
++                exit(1);
++            }
++            screen_w = sw;
++            screen_h = sh;
+         } else if (!strcmp(argv[i], "-o")) {
+             keyboard.print = true;
+         } else if (!strcmp(argv[i], "-O")) {
+@@ -1392,6 +1461,35 @@ main(int argc, char **argv)
+             schemes[i].rounding = rounding;
+     }
+ 
++    if (prerender) {
++        /* The size a start on this screen asks for, so the file is the one
++         * it looks for. */
++        bool landscape;
++        uint32_t pw, ph;
++        pick_geometry(screen_w, screen_h, &landscape, &pw, &ph);
++#ifdef TEXT_PANGO
++        if (no_cache) {
++            fprintf(stderr, "wvkbd: --prerender and --no-cache contradict "
++                            "each other\n");
++            return 1;
++        }
++        char err[512];
++        if (kbd_prerender(cache_dir, schemes[0].font, pw, ph, 1.0,
++                          keyboard.show_popup, err, sizeof(err)) < 0) {
++            fprintf(stderr, "wvkbd: --prerender failed: %s\n", err);
++            return 1;
++        }
++        fprintf(stderr, "wvkbd: label cache written to %s for %ux%u\n",
++                cache_dir, pw, ph);
++#else
++        (void)pw;
++        (void)ph;
++        fprintf(stderr, "wvkbd: --prerender has nothing to do, this build "
++                        "draws text with built-in bitmap fonts\n");
++#endif
++        return 0;
++    }
++
+     /* Lets the tests read the resolved default without a compositor. */
+     if (keyboard.debug) {
+         fprintf(stderr, "wvkbd: key popup %s\n",
+@@ -1503,7 +1601,11 @@ main(int argc, char **argv)
+ 
+     while (run_display) {
+         wl_display_flush(display);
+-        poll(fds, 2, -1);
++        /* While labels are left to render, wake up at once after a short
++         * quiet spell and do a little of it. */
++        int nready = poll(fds, 2, text_cache_pending() ? 10 : -1);
++        if (nready == 0)
++            text_cache_step(2);
+ 
+         if (fds[WAYLAND_FD].revents & POLLIN)
+             wl_display_dispatch(display);
+diff --git a/meson.build b/meson.build
+index cdf0667..851c546 100644
+--- a/meson.build
++++ b/meson.build
+@@ -17,6 +17,29 @@ text_deps = []
+ if text_backend == 'pango'
+   text_deps += dependency('pangocairo')
+   add_project_arguments('-DTEXT_PANGO', language: 'c')
++  # The cache key names the font file a description resolves to, which only
++  # pangoft2 and fontconfig can tell. pango itself needs both, so this adds no
++  # package; without their development files the key still has the library
++  # versions but not the file.
++  fc_deps = [dependency('pangoft2', required: false),
++             dependency('fontconfig', required: false)]
++  if fc_deps[0].found() and fc_deps[1].found()
++    text_deps += fc_deps
++    add_project_arguments('-DHAVE_FONTCONFIG', language: 'c')
++  else
++    warning('pangoft2 or fontconfig not found: the label cache key will not include the font file')
++  endif
++endif
++# the same for the generator, which is built for the build machine
++native_fc = []
++if text_backend == 'pango' and get_option('cache_tool')
++  native_fc = [dependency('pangoft2', native: true, required: false),
++               dependency('fontconfig', native: true, required: false)]
++  if native_fc[0].found() and native_fc[1].found()
++    add_project_arguments('-DHAVE_FONTCONFIG', language: 'c', native: true)
++  else
++    native_fc = []
++  endif
+ endif
+ m_dep = cc.find_library('m')
+ util_dep = cc.find_library('util')
+@@ -24,13 +47,20 @@ rt_dep = cc.find_library('rt', required: false)
+ 
+ wayland_scanner = find_program('wayland-scanner', native: true)
+ 
+-add_project_arguments(
++project_args = [
+   '-DWITH_WAYLAND_SHM',
+   '-DVERSION="@0@"'.format(meson.project_version()),
+   '-D_XOPEN_SOURCE=700',
+   '-DLAYOUT="layout.@0@.h"'.format(kbd_layout),
+   '-DKEYMAP="keymap.@0@.h"'.format(kbd_layout),
+-  language: 'c')
++  '-DLAYOUT_NAME="@0@"'.format(kbd_layout),
++  '-DDEFAULT_CACHE_DIR="@0@"'.format(get_option('cache_dir')),
++]
++add_project_arguments(project_args, language: 'c')
++# the generator is built for the build machine, which gets its own arguments
++if get_option('cache_tool')
++  add_project_arguments(project_args, language: 'c', native: true)
++endif
+ 
+ # main.c includes "config.h"; the Makefile copies config.<layout>.h to the
+ # build dir, so do the same instead of keeping a second config in the tree.
+@@ -44,14 +74,17 @@ subdir('proto')
+ # bmfont-data.c is generated by tools/bdf2c.py but committed: the OE build
+ # fetches nothing and the target build then needs no python (rerun
+ # tools/regen-fonts.sh to refresh it).
+-text_sources = text_backend == 'pango' ? files('text-pango.c') : files('text-bitmap.c', 'bmfont-data.c')
++text_sources = text_backend == 'pango' ? files('text-pango.c', 'cache.c') : files('text-bitmap.c', 'bmfont-data.c')
+ 
+ sources = files(
+   'drw.c',
++  'geometry.c',
+   'keyboard.c',
++  'label.c',
+   'main.c',
+   'mask.c',
+   'os-compatibility.c',
++  'prerender.c',
+   'shm_open.c',
+   'visibility.c',
+ ) + text_sources
+@@ -76,6 +109,27 @@ if scdoc_prog.found()
+     install_dir: get_option('mandir') / 'man1')
+ endif
+ 
++# The cache files for the standard screens, made on the build machine so that
++# a target never has to run pango. It is built with the native toolchain and
++# never installed.
++if get_option('cache_tool')
++  if text_backend != 'pango'
++    error('cache_tool needs text=pango: the bitmap backend has no cache')
++  endif
++  native_cc = meson.get_compiler('c', native: true)
++  native_deps = [dependency('cairo', native: true),
++                 dependency('pangocairo', native: true),
++                 native_cc.find_library('m')]
++  native_deps += native_fc
++  cache_gen = executable('wvkbd-cache-gen',
++    'tools/gen-cache.c', 'cache.c', 'geometry.c', 'label.c', 'mask.c',
++    'prerender.c', 'text-pango.c',
++    include_directories: include_directories('.'),
++    dependencies: native_deps,
++    native: true,
++    install: false)
++endif
++
+ if get_option('tests')
+   subdir('tests')
+ endif
+diff --git a/meson_options.txt b/meson_options.txt
+index 19e05b0..38ea0cc 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -6,3 +6,7 @@ option('man', type: 'feature', value: 'auto',
+        description: 'Install the man page (needs scdoc)')
+ option('text', type: 'combo', choices: ['bitmap', 'pango'], value: 'bitmap',
+        description: 'Label text backend: built-in bitmap fonts, or pango rendered once into masks')
++option('cache_dir', type: 'string', value: '/var/cache/wvkbd-ipaq',
++       description: 'Default --cache-dir: where the pango backend keeps its label cache')
++option('cache_tool', type: 'boolean', value: false,
++       description: 'Build wvkbd-cache-gen with the native toolchain: it writes the label cache files for the standard screens at build time (needs text=pango; not installed)')
+diff --git a/prerender.c b/prerender.c
+new file mode 100644
+index 0000000..9801c2a
+--- /dev/null
++++ b/prerender.c
+@@ -0,0 +1,32 @@
++#include "keyboard.h"
++#include "prerender.h"
++#include "text.h"
++
++static void
++want_label(void *data, const char *label, int inner_w, int inner_h)
++{
++    (void)data;
++    text_cache_want(label, inner_w, inner_h);
++}
++
++int
++kbd_prerender(const char *dir, const char *font_desc, uint32_t w, uint32_t h,
++              double scale, bool popup, char *err, size_t errlen)
++{
++    /* the labels' boxes depend on the key sizes, which depend on the size */
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_init_layout(&layouts[i], w, h);
++
++    struct text_font *font = text_font_new(font_desc);
++    struct text_cache_config cfg = {
++        .dir = dir, .layout_name = kbd_layout_name(),
++        .layout_version = kbd_layout_version(), .width = w, .height = h,
++        .scale = scale, .read = false};
++    text_cache_attach(font, &cfg);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_each_label(&layouts[i], scale, popup ? h : 0, want_label, NULL);
++    int ret = text_cache_flush(err, errlen);
++    text_cache_attach(NULL, NULL);
++    text_font_free(font);
++    return ret;
++}
+diff --git a/prerender.h b/prerender.h
+new file mode 100644
+index 0000000..b14c628
+--- /dev/null
++++ b/prerender.h
+@@ -0,0 +1,15 @@
++#ifndef PRERENDER_H
++#define PRERENDER_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/* Renders every label of every layer for a keyboard of w x h pixels (popup:
++ * and for the key popup, whose boxes can round differently) and writes
++ * the label cache file into dir, replacing any earlier one. Needs no display.
++ * 0, or -1 with a message in err. */
++int kbd_prerender(const char *dir, const char *font, uint32_t w, uint32_t h,
++                  double scale, bool popup, char *err, size_t errlen);
++
++#endif
+diff --git a/tests/check-cache-tool.sh b/tests/check-cache-tool.sh
+new file mode 100755
+index 0000000..10182de
+--- /dev/null
++++ b/tests/check-cache-tool.sh
+@@ -0,0 +1,43 @@
++#!/bin/sh
++# usage: check-cache-tool.sh GENERATOR BINARY
++# The build-time generator must give the same bytes every time, cover the four
++# standard screens, and make the files the keyboard itself looks for.
++gen=$1
++bin=$2
++
++unset WAYLAND_DISPLAY WAYLAND_SOCKET
++work=$(mktemp -d "${TMPDIR:-/tmp}/wvkbd-gen.XXXXXX") || exit 1
++trap 'rm -rf "$work"' EXIT
++fail() { echo "FAIL: $*"; exit 1; }
++
++"$gen" "$work/a" >"$work/a.out" || fail "generator failed"
++"$gen" "$work/b" >"$work/b.out" || fail "second run failed"
++[ "$(ls "$work/a" | wc -l | tr -d ' ')" = 4 ] || fail "expected four files: $(ls "$work/a")"
++[ "$(ls -A "$work/a" | wc -l | tr -d ' ')" = 4 ] || fail "stray files: $(ls -A "$work/a")"
++cmp -s "$work/a.out" "$work/b.out" || fail "the generator output differs"
++for f in $(ls "$work/a"); do
++	cmp -s "$work/a/$f" "$work/b/$f" || fail "$f differs between two runs"
++done
++cat "$work/a.out"
++
++# every standard screen has its file, named the way the keyboard names it
++n=0
++for s in 240x320 320x240 480x640 640x480; do
++	"$bin" --prerender --cache-dir "$work/k" --screen $s 2>/dev/null || fail "--prerender $s failed"
++done
++for f in $(ls "$work/k"); do
++	[ -f "$work/a/$f" ] || fail "the keyboard's $f is not among the generated files"
++	cmp -s "$work/a/$f" "$work/k/$f" || fail "$f from the generator differs from --prerender"
++	n=$((n + 1))
++done
++[ $n = 4 ] || fail "the keyboard wrote $n files"
++
++for f in $(ls "$work/a"); do
++	size=$(wc -c <"$work/a/$f" | tr -d ' ')
++	echo "size $f: $size bytes"
++done
++f=$(ls "$work/a" | grep -- '-240x')
++size=$(wc -c <"$work/a/$f" | tr -d ' ')
++echo "size report: the 240 px wide portrait cache is $size bytes"
++[ "$size" -lt 262144 ] || fail "the 240 px cache is $size bytes"
++exit 0
+diff --git a/tests/check-prerender.sh b/tests/check-prerender.sh
+new file mode 100755
+index 0000000..35ecd43
+--- /dev/null
++++ b/tests/check-prerender.sh
+@@ -0,0 +1,77 @@
++#!/bin/sh
++# usage: check-prerender.sh BINARY TEXT_BACKEND
++# --prerender must not need a compositor, and its exit status is what a
++# package post-install hook acts on.
++bin=$1
++text=$2
++
++unset WAYLAND_DISPLAY WAYLAND_SOCKET
++export XDG_RUNTIME_DIR=${TMPDIR:-/tmp}
++work=$(mktemp -d "${TMPDIR:-/tmp}/wvkbd-prerender.XXXXXX") || exit 1
++trap 'rm -rf "$work"' EXIT
++
++fail() { echo "FAIL: $*"; exit 1; }
++
++# The options are documented where the user looks first, in both builds.
++help=$("$bin" --help 2>&1)
++for opt in --cache-dir --no-cache --prerender --screen; do
++	echo "$help" | grep -q -- "  $opt" || fail "--help lacks $opt"
++done
++echo "$help" | grep -q '/var/cache/wvkbd-ipaq' || fail "--help does not show the default cache directory"
++
++if [ "$text" != pango ]; then
++	# The bitmap backend has no cache: nothing to do is not a failure, and
++	# nothing is written.
++	"$bin" --prerender --cache-dir "$work/c" --screen 240x320 2>"$work/err"
++	[ $? -eq 0 ] || fail "bitmap --prerender exited non-zero"
++	grep -q 'nothing to do' "$work/err" || fail "no message from bitmap --prerender"
++	[ ! -e "$work/c" ] || fail "bitmap --prerender created the cache directory"
++	exit 0
++fi
++
++count() { ls -A "$1" 2>/dev/null | wc -l | tr -d ' '; }
++
++"$bin" --prerender --cache-dir "$work/c" --screen 240x320 2>"$work/err"
++st=$?
++[ $st -eq 0 ] || { cat "$work/err"; fail "--prerender exited $st"; }
++[ "$(count "$work/c")" = 1 ] || fail "expected one file, found $(count "$work/c")"
++f=$(ls "$work/c")
++case $f in *-240x*.cache) ;; *) fail "unexpected file name $f" ;; esac
++[ -s "$work/c/$f" ] || fail "the cache file is empty"
++cp "$work/c/$f" "$work/first"
++
++# Again: replaces the file with the same bytes, leaves nothing else behind.
++"$bin" --prerender --cache-dir "$work/c" --screen 240x320 2>/dev/null || fail "second --prerender failed"
++cmp -s "$work/first" "$work/c/$f" || fail "a second --prerender gave other bytes"
++[ "$(count "$work/c")" = 1 ] || fail "second --prerender left $(count "$work/c") files"
++
++# Landscape is a file of its own.
++"$bin" --prerender --cache-dir "$work/c" --screen 320x240 2>/dev/null || fail "landscape --prerender failed"
++[ "$(count "$work/c")" = 2 ] || fail "landscape did not add a file"
++
++# The width is the one a start would use: --width only counts when docked,
++# because the compositor sizes a full-width keyboard.
++mkdir "$work/w" || exit 1
++"$bin" --prerender --cache-dir "$work/w" --screen 240x320 --width 200 2>/dev/null || fail "--width --prerender failed"
++[ "$(ls "$work/w")" = "$f" ] || fail "--width without --dock changed the file: $(ls "$work/w") instead of $f"
++"$bin" --prerender --cache-dir "$work/w" --screen 240x320 --dock left --width 200 2>/dev/null || fail "docked --width --prerender failed"
++ls "$work/w" | grep -Eq -- '-200x[0-9]+-' || fail "docked --width 200 did not make a 200 px file: $(ls "$work/w")"
++"$bin" --prerender --cache-dir "$work/w" --screen 240x320 --dock right --ratio 0.5 2>/dev/null || fail "docked --ratio --prerender failed"
++ls "$work/w" | grep -Eq -- '-120x[0-9]+-' || fail "--dock right --ratio 0.5 did not make a 120 px file: $(ls "$work/w")"
++
++# A damaged file is replaced, not trusted.
++printf 'x' | dd of="$work/c/$f" bs=1 seek=300 conv=notrunc 2>/dev/null
++"$bin" --prerender --cache-dir "$work/c" --screen 240x320 2>/dev/null || fail "--prerender over a damaged file failed"
++cmp -s "$work/first" "$work/c/$f" || fail "--prerender did not replace the damaged file"
++
++# Failures are loud and non-zero.
++: >"$work/plain"
++"$bin" --prerender --cache-dir "$work/plain/sub" --screen 240x320 2>"$work/err"
++[ $? -ne 0 ] || fail "--prerender into an impossible directory exited 0"
++grep -q 'prerender failed' "$work/err" || fail "no message when --prerender failed"
++"$bin" --prerender --no-cache --cache-dir "$work/n" 2>"$work/err"
++[ $? -ne 0 ] || fail "--prerender --no-cache exited 0"
++[ ! -e "$work/n" ] || fail "--no-cache created a directory"
++"$bin" --prerender --screen nonsense 2>/dev/null
++[ $? -ne 0 ] || fail "--screen nonsense exited 0"
++exit 0
+diff --git a/tests/meson.build b/tests/meson.build
+index e9f84bf..cdd548c 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -40,16 +40,16 @@ if text_backend == 'bitmap'
+     dependencies: cairo))
+ else
+   test('pango-text', executable('test-pango',
+-    'test-pango.c', '../mask.c', '../text-pango.c',
++    'test-pango.c', '../mask.c', '../text-pango.c', '../cache.c',
+     include_directories: test_inc,
+-    dependencies: [cairo, text_deps]))
++    dependencies: [cairo, text_deps, m_dep]))
+ endif
+ 
+ # Draws a layer into plain memory, so it links the drawing and keyboard code
+ # without main.c and needs no compositor.
+ test_draw = executable('test-draw',
+-  'test-draw.c', '../drw.c', '../keyboard.c', '../mask.c',
+-  '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
++  'test-draw.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  '../mask.c', '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep])
+ test('draw-formats', test_draw)
+@@ -62,22 +62,22 @@ test('visibility', executable('test-visibility',
+ # Replaces allocate_shm_file to force the failures of a resize, so it links
+ # drw.c without shm_open.c.
+ test('buffer-failure', executable('test-buffer',
+-  'test-buffer.c', '../drw.c', '../mask.c', text_sources,
++  'test-buffer.c', '../drw.c', '../label.c', '../mask.c', text_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, cairo, text_deps, m_dep]))
+ 
+ # Counts the buffers the drawing layer asks for, so it replaces
+ # allocate_shm_file and links without shm_open.c.
+ test('popup-memory', executable('test-popup',
+-  'test-popup.c', '../drw.c', '../keyboard.c', '../mask.c',
+-  '../os-compatibility.c', text_sources, proto_sources,
++  'test-popup.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  '../mask.c', '../os-compatibility.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+ 
+ # Same plain-memory setup as test-draw: no compositor, only the drawing code.
+ test('label-damage', executable('test-damage',
+-  'test-damage.c', '../drw.c', '../keyboard.c', '../mask.c',
+-  '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
++  'test-damage.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  '../mask.c', '../os-compatibility.c', '../shm_open.c', text_sources, proto_sources,
+   include_directories: test_inc,
+   dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep, util_dep, rt_dep]))
+ 
+@@ -85,8 +85,8 @@ test('label-damage', executable('test-damage',
+ # compiles keyboard.c again with the ipaq layout and keymap, and draws with the
+ # bitmap fonts because the glyph check is about them.
+ test_ipaq = executable('test-ipaq',
+-  'test-ipaq.c', '../drw.c', '../keyboard.c', '../mask.c',
+-  '../os-compatibility.c', '../shm_open.c', '../text-bitmap.c',
++  'test-ipaq.c', '../drw.c', '../geometry.c', '../keyboard.c', '../label.c',
++  '../mask.c', '../os-compatibility.c', '../shm_open.c', '../text-bitmap.c',
+   '../bmfont-data.c', proto_sources,
+   c_args: ['-ULAYOUT', '-DLAYOUT="layout.ipaq.h"',
+            '-UKEYMAP', '-DKEYMAP="keymap.ipaq.h"'],
+@@ -95,3 +95,36 @@ test_ipaq = executable('test-ipaq',
+ foreach part : ['geometry', 'height', 'glyphs', 'keysyms']
+   test('ipaq-' + part, test_ipaq, args: [part])
+ endforeach
++
++# The cache file format and reader do not need pango, so the corruption tests
++# run in the bitmap build too.
++test('cache-file', executable('test-cache',
++  'test-cache.c', '../cache.c', '../mask.c',
++  include_directories: test_inc,
++  dependencies: cairo),
++  timeout: 120)
++
++test('prerender-cli', test_sh,
++  args: [files('check-prerender.sh'), exe, text_backend])
++
++if text_backend == 'pango'
++  test('cache-pango', executable('test-pangocache',
++    'test-pangocache.c', '../geometry.c', '../label.c', '../prerender.c',
++    '../mask.c', text_sources,
++    include_directories: test_inc,
++    dependencies: [cairo, text_deps, m_dep]),
++    timeout: 120)
++  test('cache-draw', executable('test-cachedraw',
++    'test-cachedraw.c', '../drw.c', '../geometry.c', '../keyboard.c',
++    '../label.c', '../mask.c', '../os-compatibility.c', '../prerender.c',
++    '../shm_open.c', text_sources, proto_sources,
++    include_directories: test_inc,
++    dependencies: [wayland_client, xkbcommon, cairo, text_deps, m_dep,
++                   util_dep, rt_dep]),
++    timeout: 120)
++  if get_option('cache_tool')
++    test('cache-tool', test_sh,
++      args: [files('check-cache-tool.sh'), cache_gen, exe],
++      timeout: 120)
++  endif
++endif
+diff --git a/tests/test-cache.c b/tests/test-cache.c
+new file mode 100644
+index 0000000..7c6daf9
+--- /dev/null
++++ b/tests/test-cache.c
+@@ -0,0 +1,721 @@
++/* The label cache file: round trip, determinism, and a reader that treats
++ * every damaged or hostile file as a miss without reading outside it. Needs
++ * no pango, so it runs in every build. */
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/resource.h>
++#include <sys/stat.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include "cache.h"
++#include "check.h"
++
++static char root[256];
++
++static const struct cache_params params = {
++    .layout_name = "ipaq", .layout_version = 0x1234abcd, .width = 240,
++    .height = 100, .scale_milli = 1000, .font = "Sans 8", .depth = 8};
++
++/* a deterministic mask whose pixels depend on seed, w and h only */
++static uint8_t *
++make_data(unsigned depth, unsigned w, unsigned h, unsigned seed)
++{
++    size_t stride = mask_stride(depth, w);
++    uint8_t *d = calloc(h, stride);
++    unsigned x = seed * 2654435761u + 1;
++    for (unsigned r = 0; r < h; r++)
++        for (size_t i = 0; i < (w * depth + 7) / 8; i++) {
++            x = x * 1664525u + 1013904223u;
++            d[r * stride + i] = x >> 24;
++        }
++    return d;
++}
++
++#define NITEMS 40
++static struct cache_item items[NITEMS];
++static unsigned nitems;
++
++/* NITEMS keys of which the ones divisible by 5 have no ink and the ones
++ * divisible by 7 repeat the mask of key 1, so there is sharing to check */
++static void
++make_items(unsigned depth, bool reverse)
++{
++    for (unsigned i = 0; i < nitems; i++)
++        free((void *)items[i].mask.data);
++    nitems = NITEMS;
++    for (unsigned n = 0; n < NITEMS; n++) {
++        unsigned i = reverse ? NITEMS - 1 - n : n;
++        unsigned seed = i % 7 == 0 ? 1 : i;
++        unsigned w = 3 + seed % 17, h = 4 + seed % 13;
++        struct cache_item *it = &items[n];
++        it->key = cache_key("label", i, i * 3);
++        it->logical_w = 10 + i;
++        it->logical_h = 12 + i;
++        if (i % 5 == 0) {
++            it->mask = (struct label_mask){.depth = depth, .bx = 0, .by = 0};
++        } else {
++            it->mask = (struct label_mask){
++                .depth = depth, .w = w, .h = h, .bx = (int16_t)(i - 20),
++                .by = (int16_t)(2 * i), .data = make_data(depth, w, h, seed)};
++        }
++    }
++}
++
++static size_t
++mask_size(const struct label_mask *m)
++{
++    return mask_stride(m->depth, m->w) * m->h;
++}
++
++static uint8_t *
++slurp(const char *path, size_t *len)
++{
++    FILE *f = fopen(path, "rb");
++    if (!f)
++        return NULL;
++    fseek(f, 0, SEEK_END);
++    *len = ftell(f);
++    rewind(f);
++    uint8_t *b = malloc(*len ? *len : 1);
++    if (fread(b, 1, *len, f) != *len) {
++        free(b);
++        b = NULL;
++    }
++    fclose(f);
++    return b;
++}
++
++static void
++spit(const char *path, const uint8_t *b, size_t len)
++{
++    FILE *f = fopen(path, "wb");
++    if (f) {
++        fwrite(b, 1, len, f);
++        fclose(f);
++    }
++}
++
++static char *
++make_dir(const char *name)
++{
++    static char path[4][320];
++    static int n;
++    char *p = path[n++ % 4];
++    snprintf(p, 320, "%s/%s", root, name);
++    mkdir(p, 0755);
++    return p;
++}
++
++static unsigned
++count_files(const char *dir)
++{
++    unsigned n = 0;
++    DIR *d = opendir(dir);
++    for (struct dirent *e; d && (e = readdir(d));)
++        n += e->d_name[0] != '.' || (e->d_name[1] && strcmp(e->d_name, ".."));
++    if (d)
++        closedir(d);
++    return n;
++}
++
++/* every byte of every mask, so that a bad offset reads outside the buffer
++ * where a sanitizer can see it */
++static unsigned
++touch_all(const struct cache *c)
++{
++    unsigned sum = 0;
++    for (size_t i = 0; i < cache_count(c); i++) {
++        struct cache_item it;
++        if (!cache_item_at(c, i, &it))
++            return ~0u;
++        size_t size = it.mask.w && it.mask.h ? mask_size(&it.mask) : 0;
++        for (size_t k = 0; k < size; k++)
++            sum += it.mask.data[k];
++    }
++    return sum;
++}
++
++static void
++same_items(const struct cache *c, const char *what)
++{
++    for (unsigned i = 0; i < NITEMS; i++) {
++        struct cache_item got;
++        const struct cache_item *want = &items[i];
++        bool ink = want->mask.w && want->mask.h;
++        if (!cache_lookup(c, want->key, &got)) {
++            CHECK(0, "%s: key %u not found", what, i);
++            continue;
++        }
++        CHECK(got.mask.depth == want->mask.depth && got.mask.bx == want->mask.bx &&
++                  got.mask.by == want->mask.by &&
++                  got.logical_w == want->logical_w &&
++                  got.logical_h == want->logical_h,
++              "%s: key %u metrics differ", what, i);
++        CHECK(got.mask.w == want->mask.w && got.mask.h == want->mask.h,
++              "%s: key %u size %ux%u, wanted %ux%u", what, i, got.mask.w,
++              got.mask.h, want->mask.w, want->mask.h);
++        if (ink && got.mask.w == want->mask.w && got.mask.h == want->mask.h)
++            CHECK(!memcmp(got.mask.data, want->mask.data, mask_size(&want->mask)),
++                  "%s: key %u mask differs", what, i);
++        else if (!ink)
++            CHECK(got.mask.data == NULL, "%s: key %u has data without ink", what, i);
++    }
++    struct cache_item none;
++    CHECK(!cache_lookup(c, cache_key("absent", 1, 1), &none),
++          "%s: an absent key was found", what);
++}
++
++static char err[512];
++
++static void
++write_ok(const char *dir, const struct cache_params *p)
++{
++    int r = cache_write(dir, p, items, nitems, err, sizeof(err));
++    CHECK(r == 0, "cache_write: %s", err);
++}
++
++static void
++test_round_trip(void)
++{
++    static const unsigned depths[] = {8, 4, 1};
++    for (int d = 0; d < 3; d++) {
++        struct cache_params p = params;
++        p.depth = depths[d];
++        make_items(p.depth, false);
++        char *dir = make_dir("rt");
++        write_ok(dir, &p);
++        struct cache *c = cache_open(dir, &p);
++        CHECK(c != NULL, "depth %u: the file just written is a miss", p.depth);
++        if (!c)
++            continue;
++        CHECK(cache_count(c) == NITEMS, "count %zu", cache_count(c));
++        same_items(c, "round trip");
++
++        /* the index is sorted, and equal masks are stored once */
++        uint64_t prev = 0;
++        const uint8_t *shared = NULL;
++        unsigned sharing = 0;
++        for (size_t i = 0; i < cache_count(c); i++) {
++            struct cache_item it;
++            cache_item_at(c, i, &it);
++            CHECK(i == 0 || it.key > prev, "index not sorted at %zu", i);
++            prev = it.key;
++            CHECK(((uintptr_t)it.mask.data & 3) == 0, "unaligned mask data");
++        }
++        for (unsigned i = 0; i < NITEMS; i += 7) {
++            struct cache_item it;
++            cache_lookup(c, items[i].key, &it);
++            if (i % 5 == 0)
++                continue; /* no ink */
++            if (!shared)
++                shared = it.mask.data;
++            sharing += it.mask.data == shared;
++        }
++        CHECK(sharing >= 4, "identical masks are not shared (%u)", sharing);
++        cache_close(c);
++
++        char path[1024];
++        cache_path(path, sizeof(path), dir, &p);
++        struct stat st;
++        stat(path, &st);
++        size_t total = 0;
++        for (unsigned i = 0; i < NITEMS; i++)
++            total += mask_size(&items[i].mask);
++        CHECK((size_t)st.st_size < CACHE_HEADER_SIZE + NITEMS * CACHE_INDEX_SIZE + total,
++              "sharing saved nothing: %lld bytes", (long long)st.st_size);
++        CHECK(count_files(dir) == 1, "directory holds %u files", count_files(dir));
++        unlink(path);
++    }
++}
++
++static void
++test_deterministic(void)
++{
++    make_items(8, false);
++    char *a = make_dir("det-a");
++    write_ok(a, &params);
++    make_items(8, true); /* same content, other order of arrival */
++    char *b = make_dir("det-b");
++    write_ok(b, &params);
++    char pa[1024], pb[1024];
++    cache_path(pa, sizeof(pa), a, &params);
++    cache_path(pb, sizeof(pb), b, &params);
++    size_t la, lb;
++    uint8_t *fa = slurp(pa, &la), *fb = slurp(pb, &lb);
++    CHECK(fa && fb && la == lb && !memcmp(fa, fb, la),
++          "the same labels written in another order give another file");
++    free(fa);
++    free(fb);
++}
++
++static void
++fix_checksum(uint8_t *f, size_t len)
++{
++    uint32_t c = cache_checksum(f, len);
++    f[20] = c;
++    f[21] = c >> 8;
++    f[22] = c >> 16;
++    f[23] = c >> 24;
++}
++
++static void
++put32(uint8_t *p, uint32_t v)
++{
++    p[0] = v;
++    p[1] = v >> 8;
++    p[2] = v >> 16;
++    p[3] = v >> 24;
++}
++
++/* what the reader says to an image, in a buffer of exactly its size so that a
++ * sanitizer sees any read beyond it */
++static bool
++accepts(const uint8_t *img, size_t len, const struct cache_params *p)
++{
++    uint8_t *copy = malloc(len ? len : 1);
++    memcpy(copy, img, len);
++    struct cache *c = cache_open_buffer(copy, len, p);
++    bool ok = c != NULL;
++    if (c) {
++        touch_all(c);
++        for (unsigned i = 0; i < NITEMS; i++) {
++            struct cache_item it;
++            cache_lookup(c, items[i].key, &it);
++        }
++        cache_close(c);
++    }
++    free(copy);
++    return ok;
++}
++
++static void
++test_damage(void)
++{
++    make_items(8, false);
++    char *dir = make_dir("dmg");
++    write_ok(dir, &params);
++    char path[1024];
++    cache_path(path, sizeof(path), dir, &params);
++    size_t len;
++    uint8_t *img = slurp(path, &len);
++    if (!img) {
++        CHECK(0, "cannot read back the cache");
++        return;
++    }
++    size_t index_end = CACHE_HEADER_SIZE + NITEMS * CACHE_INDEX_SIZE;
++    CHECK(accepts(img, len, &params), "the intact image is a miss");
++
++    /* One flipped byte anywhere: the checksum must catch it. Counted by the
++     * region of the file it is in. */
++    unsigned hdr = 0, idx = 0, data = 0, missed = 0;
++    for (size_t i = 0; i < len; i++) {
++        img[i] ^= 0x10;
++        if (accepts(img, len, &params)) {
++            missed++;
++            CHECK(0, "a flipped byte at offset %zu was accepted", i);
++        }
++        img[i] ^= 0x10;
++        if (i < CACHE_HEADER_SIZE)
++            hdr++;
++        else if (i < index_end)
++            idx++;
++        else
++            data++;
++    }
++    fprintf(stderr, "flipped %u header, %u index and %u data bytes: %u accepted\n",
++            hdr, idx, data, missed);
++
++    /* the same through a real file and mmap, one byte per region */
++    size_t spots[] = {0, 9, 13, 17, 21, 25, 30, 38, 42, 46, 50, 60, 100,
++                      CACHE_HEADER_SIZE, CACHE_HEADER_SIZE + 9,
++                      CACHE_HEADER_SIZE + 13, CACHE_HEADER_SIZE + 17,
++                      index_end, (index_end + len) / 2, len - 1};
++    for (size_t s = 0; s < sizeof(spots) / sizeof(spots[0]); s++) {
++        img[spots[s]] ^= 0x01;
++        spit(path, img, len);
++        CHECK(cache_open(dir, &params) == NULL,
++              "file with byte %zu flipped is a hit", spots[s]);
++        img[spots[s]] ^= 0x01;
++    }
++
++    /* truncated at every length, and with a byte added */
++    for (size_t n = 0; n < len; n++)
++        if (accepts(img, n, &params)) {
++            CHECK(0, "the image cut to %zu bytes was accepted", n);
++            break;
++        }
++    spit(path, img, len - 1);
++    CHECK(cache_open(dir, &params) == NULL, "a truncated file is a hit");
++    spit(path, img, 0);
++    CHECK(cache_open(dir, &params) == NULL, "an empty file is a hit");
++    uint8_t *longer = malloc(len + 1);
++    memcpy(longer, img, len);
++    longer[len] = 0;
++    CHECK(!accepts(longer, len + 1, &params), "a file with a byte appended was accepted");
++    fix_checksum(longer, len + 1);
++    CHECK(!accepts(longer, len + 1, &params),
++          "an appended byte with a fixed checksum was accepted");
++    free(longer);
++
++    /* A wrong format version, with the checksum made right again. */
++    uint8_t *e = malloc(len);
++    memcpy(e, img, len);
++    put32(e + 8, CACHE_FORMAT_VERSION + 1);
++    fix_checksum(e, len);
++    CHECK(!accepts(e, len, &params), "an unknown format version was accepted");
++    memcpy(e, img, len);
++    put32(e + 8, 1);
++    fix_checksum(e, len);
++    CHECK(!accepts(e, len, &params), "format version 1 was accepted");
++    memcpy(e, img, len);
++    put32(e + 12, CACHE_HEADER_SIZE + 8);
++    fix_checksum(e, len);
++    CHECK(!accepts(e, len, &params), "a header size we do not know was accepted");
++    memcpy(e, img, len);
++    put32(e + 16, (uint32_t)len + 4);
++    fix_checksum(e, len);
++    CHECK(!accepts(e, len, &params), "a file size field that lies was accepted");
++
++    /* A file made for something else is a miss when asked for this. */
++    struct cache_params q;
++    q = params; q.width++;
++    CHECK(!accepts(img, len, &q), "wrong width accepted");
++    q = params; q.height++;
++    CHECK(!accepts(img, len, &q), "wrong height accepted");
++    q = params; q.scale_milli = 2000;
++    CHECK(!accepts(img, len, &q), "wrong scale accepted");
++    q = params; q.layout_version++;
++    CHECK(!accepts(img, len, &q), "wrong layout version accepted");
++    q = params; q.layout_name = "mobintl";
++    CHECK(!accepts(img, len, &q), "wrong layout name accepted");
++    q = params; q.font = "Sans 9";
++    CHECK(!accepts(img, len, &q), "wrong font accepted");
++    q = params; q.depth = 4;
++    CHECK(!accepts(img, len, &q), "wrong depth accepted");
++    q = params; q.env = "pango 1.56.3";
++    CHECK(!accepts(img, len, &q), "another environment accepted");
++    q = params; q.env = "";
++    CHECK(accepts(img, len, &q), "an empty environment is not the same as none");
++
++    /* Hostile index entries under a correct checksum. The first ink entry
++     * is tampered with in turn. */
++    size_t ink = 0;
++    for (size_t i = 0; i < NITEMS; i++) {
++        const uint8_t *en = img + CACHE_HEADER_SIZE + i * CACHE_INDEX_SIZE;
++        if (en[12] || en[13]) {
++            ink = i;
++            break;
++        }
++    }
++    uint8_t *en = e + CACHE_HEADER_SIZE + ink * CACHE_INDEX_SIZE;
++    struct {
++        const char *what;
++        int field; /* byte offset in the entry */
++        uint32_t value;
++        int bytes;
++    } hostile[] = {
++        {"offset at the end of the file", 8, (uint32_t)len, 4},
++        {"offset one word before the end", 8, (uint32_t)len - 4, 4},
++        {"offset beyond the file", 8, (uint32_t)len + 4096, 4},
++        {"offset 0xfffffffc", 8, 0xfffffffcu, 4},
++        {"offset 0xffffffff", 8, 0xffffffffu, 4},
++        {"offset inside the header", 8, 8, 4},
++        {"offset inside the index", 8, CACHE_HEADER_SIZE + 4, 4},
++        {"unaligned offset", 8, (uint32_t)index_end + 2, 4},
++        {"width 0xffff", 12, 0xffff, 2},
++        {"height 0xffff", 14, 0xffff, 2},
++        {"width 4097", 12, 4097, 2},
++        {"height 4097", 14, 4097, 2},
++        {"zero width with data", 12, 0, 2},
++        {"zero height with data", 14, 0, 2},
++    };
++    for (size_t h = 0; h < sizeof(hostile) / sizeof(hostile[0]); h++) {
++        memcpy(e, img, len);
++        if (hostile[h].bytes == 4)
++            put32(en + hostile[h].field, hostile[h].value);
++        else {
++            en[hostile[h].field] = hostile[h].value;
++            en[hostile[h].field + 1] = hostile[h].value >> 8;
++        }
++        fix_checksum(e, len);
++        CHECK(!accepts(e, len, &params), "hostile entry accepted: %s",
++              hostile[h].what);
++    }
++    /* a mask that starts inside the file but ends past it */
++    {
++        memcpy(e, img, len);
++        put32(en + 8, (uint32_t)(len - 8) & ~3u);
++        en[12] = 200; en[13] = 0; en[14] = 200; en[15] = 0;
++        fix_checksum(e, len);
++        CHECK(!accepts(e, len, &params), "a mask running past the end was accepted");
++    }
++    /* a no-ink entry may not carry an offset */
++    for (size_t i = 0; i < NITEMS; i++) {
++        uint8_t *x = e + CACHE_HEADER_SIZE + i * CACHE_INDEX_SIZE;
++        memcpy(e, img, len);
++        if (!x[12] && !x[13]) {
++            put32(x + 8, (uint32_t)index_end);
++            fix_checksum(e, len);
++            CHECK(!accepts(e, len, &params), "an empty mask with an offset was accepted");
++            break;
++        }
++    }
++    /* an index that is not sorted, or has a key twice */
++    memcpy(e, img, len);
++    {
++        uint8_t tmp[CACHE_INDEX_SIZE];
++        uint8_t *a = e + CACHE_HEADER_SIZE, *b = a + CACHE_INDEX_SIZE;
++        memcpy(tmp, a, sizeof(tmp));
++        memcpy(a, b, sizeof(tmp));
++        memcpy(b, tmp, sizeof(tmp));
++        fix_checksum(e, len);
++        CHECK(!accepts(e, len, &params), "an unsorted index was accepted");
++        memcpy(e, img, len);
++        memcpy(b, a, 8);
++        fix_checksum(e, len);
++        CHECK(!accepts(e, len, &params), "a duplicate key was accepted");
++    }
++    /* label counts that do not fit the file */
++    static const uint32_t counts[] = {NITEMS + 1, 0xffffffffu, 0x80000000u,
++                                      0x0aaaaaabu, 0x00ffffffu};
++    for (size_t k = 0; k < sizeof(counts) / sizeof(counts[0]); k++) {
++        memcpy(e, img, len);
++        put32(e + 44, counts[k]);
++        fix_checksum(e, len);
++        CHECK(!accepts(e, len, &params), "label count %u was accepted", counts[k]);
++    }
++    memcpy(e, img, len);
++    put32(e + 44, NITEMS - 1);
++    fix_checksum(e, len);
++    /* one entry fewer leaves its mask behind: harmless, and still safe */
++    (void)accepts(e, len, &params);
++
++    /* Whatever a corrupted header or index says, a file the reader accepts
++     * must be safe to read to the end. Three patterns per byte, checksum
++     * fixed each time; run under the sanitizers this is the memory check. */
++    unsigned accepted = 0, tried = 0;
++    for (size_t i = 0; i < index_end; i++) {
++        static const uint8_t pat[] = {0x01, 0x80, 0xff};
++        for (int k = 0; k < 3; k++) {
++            memcpy(e, img, len);
++            e[i] ^= pat[k];
++            fix_checksum(e, len);
++            tried++;
++            accepted += accepts(e, len, &params);
++        }
++    }
++    fprintf(stderr, "checksum-fixed corruptions: %u tried, %u still valid files\n",
++            tried, accepted);
++    free(e);
++
++    /* no file, a directory in its place, a file that is not ours */
++    unlink(path);
++    CHECK(cache_open(dir, &params) == NULL, "a missing file is a hit");
++    mkdir(path, 0755);
++    CHECK(cache_open(dir, &params) == NULL, "a directory is a hit");
++    rmdir(path);
++    uint8_t junk[4096];
++    for (size_t i = 0; i < sizeof(junk); i++)
++        junk[i] = i * 31;
++    spit(path, junk, sizeof(junk));
++    CHECK(cache_open(dir, &params) == NULL, "junk is a hit");
++    unlink(path);
++    CHECK(cache_open("/nonexistent-dir-for-test", &params) == NULL,
++          "a missing directory is a hit");
++    free(img);
++}
++
++static void
++test_atomic(void)
++{
++    make_items(8, false);
++    char *dir = make_dir("atomic");
++    write_ok(dir, &params);
++    char path[1024];
++    cache_path(path, sizeof(path), dir, &params);
++    size_t before_len;
++    uint8_t *before = slurp(path, &before_len);
++
++    /* A write that dies half way: the file size limit makes write() fail
++     * after a few bytes. The old file must be untouched and no temporary
++     * file may be left. */
++    struct rlimit old, lim;
++    getrlimit(RLIMIT_FSIZE, &old);
++    signal(SIGXFSZ, SIG_IGN);
++    lim = old;
++    lim.rlim_cur = 100;
++    setrlimit(RLIMIT_FSIZE, &lim);
++    make_items(8, true);
++    for (unsigned i = 0; i < nitems; i++)
++        items[i].logical_w += 1; /* other content than before */
++    int r = cache_write(dir, &params, items, nitems, err, sizeof(err));
++    setrlimit(RLIMIT_FSIZE, &old);
++    CHECK(r < 0 && err[0], "a write past the size limit reported success");
++    fprintf(stderr, "injected write failure: %s\n", err);
++    size_t after_len;
++    uint8_t *after = slurp(path, &after_len);
++    CHECK(after && after_len == before_len && !memcmp(before, after, after_len),
++          "a failed write changed the existing file");
++    CHECK(count_files(dir) == 1, "a failed write left %u files in the directory",
++          count_files(dir));
++    free(after);
++
++    /* The rename fails: the target is a directory with something in it. */
++    char *dir2 = make_dir("atomic-dir");
++    char path2[1024], inner[1100];
++    cache_path(path2, sizeof(path2), dir2, &params);
++    mkdir(path2, 0755);
++    snprintf(inner, sizeof(inner), "%s/x", path2);
++    spit(inner, (const uint8_t *)"x", 1);
++    r = cache_write(dir2, &params, items, nitems, err, sizeof(err));
++    CHECK(r < 0, "a rename onto a directory reported success");
++    fprintf(stderr, "injected rename failure: %s\n", err);
++    CHECK(count_files(dir2) == 1, "a failed rename left a temporary file (%u entries)",
++          count_files(dir2));
++    unlink(inner);
++    rmdir(path2);
++
++    /* no directory and none can be made */
++    char file_as_dir[320];
++    snprintf(file_as_dir, sizeof(file_as_dir), "%s/plainfile", root);
++    spit(file_as_dir, (const uint8_t *)"x", 1);
++    char below[400];
++    snprintf(below, sizeof(below), "%s/sub", file_as_dir);
++    r = cache_write(below, &params, items, nitems, err, sizeof(err));
++    CHECK(r < 0 && err[0], "a write below a regular file reported success");
++    fprintf(stderr, "uncreatable directory: %s\n", err);
++
++    /* a missing directory is made */
++    char fresh[400];
++    snprintf(fresh, sizeof(fresh), "%s/fresh", root);
++    write_ok(fresh, &params);
++    struct cache *fc = cache_open(fresh, &params);
++    CHECK(fc != NULL, "the cache in a new directory is a miss");
++    cache_close(fc);
++
++    /* A reader that opens the file again and again while it is replaced
++     * again and again never sees a miss: the name always leads to a
++     * complete file. */
++    int p[2];
++    if (pipe(p) == 0) {
++        pid_t pid = fork();
++        if (pid == 0) {
++            close(p[1]);
++            fcntl(p[0], F_SETFL, O_NONBLOCK);
++            unsigned misses = 0, hits = 0;
++            char c;
++            while (read(p[0], &c, 1) < 0 && errno == EAGAIN) {
++                struct cache *k = cache_open(dir, &params);
++                if (k) {
++                    touch_all(k);
++                    cache_close(k);
++                    hits++;
++                } else {
++                    misses++;
++                }
++            }
++            _exit(misses ? 1 : hits ? 0 : 2);
++        }
++        close(p[0]);
++        for (int i = 0; i < 300; i++) {
++            make_items(8, i & 1);
++            for (unsigned k = 0; k < nitems; k++)
++                items[k].logical_h += i; /* a different file each time */
++            write_ok(dir, &params);
++        }
++        close(p[1]);
++        int status;
++        waitpid(pid, &status, 0);
++        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
++              "a reader running during 300 rewrites saw a miss (status %d)",
++              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
++        CHECK(count_files(dir) == 1, "rewrites left %u files", count_files(dir));
++    }
++    free(before);
++}
++
++/* The environment (library versions, the font file) is part of the key: a
++ * file made under another one is not found by name, and is refused even when
++ * put where the new key looks, so that a stale mask is never drawn. */
++static void
++test_environment(void)
++{
++    static const char old_env[] =
++        "pango 1.56.3;cairo 1.18.4;font /usr/share/fonts/sans.ttf 757076 1700000000";
++    static const char new_env[] =
++        "pango 1.56.3;cairo 1.18.4;font /usr/share/fonts/sans.ttf 757076 1700000001";
++    struct cache_params a = params, b = params;
++    a.env = old_env;
++    b.env = new_env;
++
++    make_items(8, false);
++    char *dir = make_dir("env");
++    write_ok(dir, &a);
++    char pa[1024], pb[1024], pn[1024];
++    cache_path(pa, sizeof(pa), dir, &a);
++    cache_path(pb, sizeof(pb), dir, &b);
++    cache_path(pn, sizeof(pn), dir, &params);
++    CHECK(strcmp(pa, pb) && strcmp(pa, pn) && strcmp(pb, pn),
++          "the file name does not depend on the environment");
++
++    struct cache *c = cache_open(dir, &a);
++    CHECK(c != NULL, "the file is a miss under the environment it was made for");
++    cache_close(c);
++    c = cache_open(dir, &b);
++    CHECK(c == NULL, "a changed environment found the old file");
++    cache_close(c);
++    c = cache_open(dir, &params);
++    CHECK(c == NULL, "no environment found a file made with one");
++    cache_close(c);
++
++    /* the header refuses it as well, whatever the file is called */
++    size_t len;
++    uint8_t *img = slurp(pa, &len);
++    if (!img) {
++        CHECK(0, "cannot read back the cache");
++        return;
++    }
++    CHECK(accepts(img, len, &a), "the intact image is a miss");
++    CHECK(!accepts(img, len, &b), "a changed environment accepted the old image");
++    spit(pb, img, len);
++    CHECK(cache_open(dir, &b) == NULL,
++          "the old file under the new name was used");
++    free(img);
++
++    /* and a new file for the new environment sits beside the old one */
++    write_ok(dir, &b);
++    CHECK(count_files(dir) == 2, "%u files for two environments", count_files(dir));
++    c = cache_open(dir, &b);
++    CHECK(c != NULL, "the file for the new environment is a miss");
++    cache_close(c);
++}
++
++int
++main(void)
++{
++    const char *tmp = getenv("TMPDIR");
++    snprintf(root, sizeof(root), "%s/wvkbd-cache-test-XXXXXX", tmp ? tmp : "/tmp");
++    if (!mkdtemp(root)) {
++        perror("mkdtemp");
++        return 1;
++    }
++
++    test_round_trip();
++    test_deterministic();
++    test_damage();
++    test_environment();
++    test_atomic();
++
++    for (unsigned i = 0; i < nitems; i++)
++        free((void *)items[i].mask.data);
++    char cmd[300];
++    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
++    if (system(cmd))
++        fprintf(stderr, "could not remove %s\n", root);
++    return failures ? 1 : 0;
++}
+diff --git a/tests/test-cachedraw.c b/tests/test-cachedraw.c
+new file mode 100644
+index 0000000..bbddbd8
+--- /dev/null
++++ b/tests/test-cachedraw.c
+@@ -0,0 +1,114 @@
++/* Draws every layer, in every shift state and with the popup, from a cache
++ * file made by --prerender, and checks that pango was never asked for a
++ * label. This ties the sizes the cache is made for to the sizes drawing
++ * looks labels up with. */
++#include <cairo.h>
++#include <pango/pangocairo.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "check.h"
++#include "keyboard.h"
++#include "prerender.h"
++#include "text-pango.h"
++#include "text.h"
++
++#define FONT "Sans 8"
++
++static void
++run(const char *dir, double scale, uint32_t w, uint32_t h)
++{
++    char err[512] = "";
++    CHECK(kbd_prerender(dir, FONT, w, h, scale, true, err, sizeof(err)) == 0,
++          "prerender at scale %.2f: %s", scale, err);
++
++    struct text_font *font = text_font_new(FONT);
++    struct clr_scheme schemes[2] = {0};
++    for (int i = 0; i < 2; i++) {
++        schemes[i].bg = (Color){.bgra = {0x30, 0x20, 0x10, 255}};
++        schemes[i].fg = (Color){.bgra = {0x20, 0x90, 0xe0, 255}};
++        schemes[i].high = (Color){.bgra = {0xf0, 0x40, 0x60, 255}};
++        schemes[i].text = (Color){.color = UINT32_MAX};
++        schemes[i].text_press = (Color){.color = UINT32_MAX};
++        schemes[i].rounding = 2;
++        schemes[i].text_font = font;
++    }
++    struct drw ctx = {0};
++    struct drwbuf back = {0}, display = {0}, pback = {0}, pdisplay = {0};
++    struct drwsurf ds = {.ctx = &ctx, .format = DRW_FORMAT_RGB565,
++                         .back_buffer = &back, .display_buffer = &display};
++    struct drwsurf popup = {.ctx = &ctx, .format = DRW_FORMAT_ARGB8888,
++                            .back_buffer = &pback, .display_buffer = &pdisplay};
++    CHECK(drwsurf_resize(&ds, w, h, scale) && drwsurf_resize(&popup, w, h * 2, scale),
++          "buffers");
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_init_layout(&layouts[i], w, h);
++    struct kbd kb = {.surf = &ds, .popup_surf = &popup, .schemes = schemes,
++                     .layout = &layouts[0], .w = w, .h = h, .scale = scale,
++                     .show_highlight = true, .show_popup = true};
++
++    struct text_cache_config cfg = {
++        .dir = dir, .layout_name = kbd_layout_name(),
++        .layout_version = kbd_layout_version(), .width = w, .height = h,
++        .scale = scale, .read = true};
++    text_cache_attach(font, &cfg);
++
++    unsigned before = text_pango_render_count();
++    static const uint8_t states[] = {0, Shift, CapsLock};
++    unsigned drawn = 0;
++    for (int i = 0; i < NumLayouts; i++) {
++        for (unsigned s = 0; s < sizeof(states); s++) {
++            kb.layout = &layouts[i];
++            kb.mods = states[s];
++            kbd_draw_layout(&kb);
++            for (struct key *k = layouts[i].keys; k->type != Last; k++)
++                if (k->type != Pad && k->type != EndRow) {
++                    kbd_draw_key(&kb, k, Press); /* the popup too */
++                    drawn++;
++                }
++        }
++    }
++    CHECK(drawn > 100, "only %u keys drawn", drawn);
++    CHECK(text_pango_render_count() == before,
++          "scale %.2f: %u labels were rendered although the cache had them",
++          scale, text_pango_render_count() - before);
++
++    text_cache_attach(NULL, NULL);
++    drwsurf_drop_buffers(&ds);
++    drwsurf_drop_buffers(&popup);
++    cairo_region_destroy(ds.damage);
++    cairo_region_destroy(ds.backport_damage);
++    cairo_region_destroy(popup.damage);
++    cairo_region_destroy(popup.backport_damage);
++    text_font_free(font);
++}
++
++int
++main(void)
++{
++    int nfam;
++    PangoFontFamily **fam;
++    pango_font_map_list_families(pango_cairo_font_map_get_default(), &fam, &nfam);
++    g_free(fam);
++    if (nfam == 0) {
++        fprintf(stderr, "no fonts installed, skipping\n");
++        return 77;
++    }
++    char root[256];
++    const char *tmp = getenv("TMPDIR");
++    snprintf(root, sizeof(root), "%s/wvkbd-cdraw-XXXXXX", tmp ? tmp : "/tmp");
++    if (!mkdtemp(root)) {
++        perror("mkdtemp");
++        return 1;
++    }
++    run(root, 1.0, 240, kbd_pick_height(false, 240, KBD_PIXEL_HEIGHT, false));
++    /* a fractional scale rounds every edge, so boxes differ from scale 1 */
++    run(root, 1.5, 240, kbd_pick_height(false, 240, KBD_PIXEL_HEIGHT, false));
++    char cmd[300];
++    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
++    if (system(cmd))
++        fprintf(stderr, "could not remove %s\n", root);
++    return failures ? 1 : 0;
++}
+diff --git a/tests/test-pangocache.c b/tests/test-pangocache.c
+new file mode 100644
+index 0000000..533abec
+--- /dev/null
++++ b/tests/test-pangocache.c
+@@ -0,0 +1,415 @@
++/* The pango backend with the persistent cache: what a first start renders,
++ * what a second start does not, and what happens to a damaged file. */
++#include <dirent.h>
++#ifdef HAVE_FONTCONFIG
++#include <fontconfig/fontconfig.h>
++#endif
++#include <pango/pangocairo.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <utime.h>
++
++#include "cache.h"
++#include "check.h"
++#include "keyboard.h"
++#include "prerender.h"
++#include "text-pango.h"
++#include "text.h"
++
++#define FONT "Sans 8"
++
++static char root[256];
++
++struct label_box {
++    const char *label;
++    int w, h;
++};
++static struct label_box boxes[2000];
++static unsigned nboxes;
++
++/* the distinct (label, box) pairs, which is what ends up in the file */
++static void
++collect(void *data, const char *label, int w, int h)
++{
++    (void)data;
++    for (unsigned i = 0; i < nboxes; i++)
++        if (boxes[i].w == w && boxes[i].h == h && !strcmp(boxes[i].label, label))
++            return;
++    if (nboxes < sizeof(boxes) / sizeof(boxes[0]))
++        boxes[nboxes++] = (struct label_box){label, w, h};
++}
++
++static void
++want_all(void *data, const char *label, int w, int h)
++{
++    (void)data;
++    text_cache_want(label, w, h);
++}
++
++static char *
++make_dir(const char *name)
++{
++    static char path[4][320];
++    static int n;
++    char *p = path[n++ % 4];
++    snprintf(p, 320, "%s/%s", root, name);
++    mkdir(p, 0755);
++    return p;
++}
++
++static uint32_t kw, kh;
++/* what the key of a file made with FONT here contains besides the font name */
++static const char *env;
++
++static struct text_cache_config
++config(const char *dir)
++{
++    return (struct text_cache_config){
++        .dir = dir, .layout_name = kbd_layout_name(),
++        .layout_version = kbd_layout_version(), .width = kw, .height = kh,
++        .scale = 1.0, .read = true};
++}
++
++static struct cache_params
++cparams(void)
++{
++    return (struct cache_params){
++        .layout_name = kbd_layout_name(), .layout_version = kbd_layout_version(),
++        .width = kw, .height = kh, .scale_milli = 1000, .font = FONT,
++        .env = env, .depth = 8};
++}
++
++static void
++start(struct text_font *font, const char *dir)
++{
++    struct text_cache_config cfg = config(dir);
++    text_cache_attach(font, &cfg);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_each_label(&layouts[i], 1.0, 0, want_all, NULL);
++}
++
++static void
++start_env(struct text_font *font, const char *dir, const char *key_env)
++{
++    struct text_cache_config cfg = config(dir);
++    cfg.env = key_env;
++    text_cache_attach(font, &cfg);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_each_label(&layouts[i], 1.0, 0, want_all, NULL);
++}
++
++static void
++run_idle(unsigned *calls, unsigned *worst)
++{
++    *calls = *worst = 0;
++    while (text_cache_pending()) {
++        unsigned before = text_pango_render_count();
++        text_cache_step(2);
++        unsigned d = text_pango_render_count() - before;
++        if (d > *worst)
++            *worst = d;
++        (*calls)++;
++    }
++}
++
++static unsigned
++count_files(const char *dir)
++{
++    unsigned n = 0;
++    DIR *d = opendir(dir);
++    for (struct dirent *e; d && (e = readdir(d));)
++        n += e->d_name[0] != '.' || (e->d_name[1] && strcmp(e->d_name, ".."));
++    if (d)
++        closedir(d);
++    return n;
++}
++
++static void
++draw(struct text_font *f, const char *label, int iw, int ih, uint8_t *mem,
++     int w, int h)
++{
++    memset(mem, 0, (size_t)w * h * 4);
++    struct mask_target t = {.data = mem, .stride = w * 4, .width = w,
++                            .height = h, .format = DRW_FORMAT_XRGB8888,
++                            .clip_x1 = w, .clip_y1 = h};
++    Color white = {.color = UINT32_MAX};
++    text_draw(f, label, &t, 0, 0, iw + 2 * KBD_KEY_BORDER,
++              ih + 2 * KBD_KEY_BORDER, KBD_KEY_BORDER, 1.0, white);
++}
++
++int
++main(void)
++{
++    int nfam;
++    PangoFontFamily **fam;
++    pango_font_map_list_families(pango_cairo_font_map_get_default(), &fam, &nfam);
++    g_free(fam);
++    if (nfam == 0) {
++        fprintf(stderr, "no fonts installed, skipping\n");
++        return 77;
++    }
++    const char *tmp = getenv("TMPDIR");
++    snprintf(root, sizeof(root), "%s/wvkbd-pcache-XXXXXX", tmp ? tmp : "/tmp");
++    if (!mkdtemp(root)) {
++        perror("mkdtemp");
++        return 1;
++    }
++
++    /* the key names the libraries and the font file in use */
++    struct text_font *fenv = text_font_new(FONT);
++    env = text_pango_environment(fenv);
++    CHECK(strstr(env, pango_version_string()), "no pango version in \"%s\"", env);
++    CHECK(strstr(env, cairo_version_string()), "no cairo version in \"%s\"", env);
++#ifdef HAVE_FONTCONFIG
++    char fcv[32];
++    snprintf(fcv, sizeof(fcv), "fontconfig %d", FcGetVersion());
++    CHECK(strstr(env, fcv), "no fontconfig version in \"%s\"", env);
++    const char *file = strstr(env, ";font ");
++    CHECK(file, "the font file is not in \"%s\"", env);
++    if (file) {
++        /* ";font <path> <size> <mtime> #<index>": the path may hold spaces */
++        char path[512];
++        snprintf(path, sizeof(path), "%s", file + 6);
++        char *end = strrchr(path, '#');
++        for (int skip = 0; end && skip < 3; skip++) {
++            *end = 0;
++            end = strrchr(path, ' ');
++        }
++        struct stat fst;
++        CHECK(end, "the font entry is malformed in \"%s\"", env);
++        if (end) {
++            *end = 0;
++            CHECK(stat(path, &fst) == 0, "the font file %s is not there", path);
++            char want[600];
++            snprintf(want, sizeof(want), "%s %lld %lld", path,
++                     (long long)fst.st_size, (long long)fst.st_mtime);
++            CHECK(strstr(env, want), "size and mtime of %s are not in \"%s\"",
++                  path, env);
++        }
++    }
++#else
++    fprintf(stderr, "no fontconfig: the key has library versions only: %s\n", env);
++#endif
++
++    kw = 240;
++    kh = kbd_pick_height(false, kw, KBD_PIXEL_HEIGHT, false);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_init_layout(&layouts[i], kw, kh);
++    for (int i = 0; i < NumLayouts; i++)
++        kbd_each_label(&layouts[i], 1.0, 0, collect, NULL);
++    CHECK(nboxes > 20, "only %u labels in the layouts", nboxes);
++
++    struct cache_params p = cparams();
++    char *dir = make_dir("a");
++    char path[1024];
++    cache_path(path, sizeof(path), dir, &p);
++
++    /* First start: nothing on disk. Drawing renders what it shows; the rest
++     * is rendered in small steps and the file appears once, at the end. */
++    struct text_font *f1 = text_font_new(FONT);
++    start(f1, dir);
++    CHECK(text_cache_pending(), "a first start has nothing to do");
++    unsigned r0 = text_pango_render_count();
++    text_pango_mask(f1, boxes[0].label, 1.0, boxes[0].w, boxes[0].h, NULL, NULL);
++    CHECK(text_pango_render_count() == r0 + 1,
++          "the visible label was not rendered synchronously");
++    CHECK(access(path, F_OK) != 0, "the file exists before the work is done");
++    unsigned calls, worst;
++    run_idle(&calls, &worst);
++    CHECK(worst <= 2, "an idle step rendered %u labels, the budget is 2", worst);
++    CHECK(calls >= nboxes / 2 / 4, "only %u idle steps for %u labels", calls, nboxes);
++    CHECK(text_pango_render_count() - r0 == nboxes,
++          "%u renders for %u distinct labels", text_pango_render_count() - r0,
++          nboxes);
++    CHECK(access(path, F_OK) == 0, "no file after the work is done");
++    CHECK(count_files(dir) == 1, "%u files in the cache directory", count_files(dir));
++    struct stat st1;
++    stat(path, &st1);
++    struct cache *c = cache_open(dir, &p);
++    CHECK(c && cache_count(c) == nboxes, "the file holds %zu of %u labels",
++          c ? cache_count(c) : 0, nboxes);
++    cache_close(c);
++    fprintf(stderr, "cache for %ux%u: %u labels, %lld bytes\n", kw, kh, nboxes,
++            (long long)st1.st_size);
++
++    /* A geometry whose buffers could not be made wants nothing: that must not
++     * leave a file with no labels that later starts would trust. */
++    char *edir = make_dir("empty");
++    struct text_cache_config ecfg = config(edir);
++    text_cache_attach(f1, &ecfg);
++    while (text_cache_pending())
++        text_cache_step(2);
++    CHECK(count_files(edir) == 0, "an empty cache file was written");
++
++    /* Second start: all from the file, none rendered, the file not touched. */
++    struct text_font *f2 = text_font_new(FONT);
++    start(f2, dir);
++    unsigned r1 = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() == r1, "a second start rendered %u labels",
++          text_pango_render_count() - r1);
++    struct stat st2;
++    stat(path, &st2);
++    CHECK(st1.st_ino == st2.st_ino && st1.st_mtime == st2.st_mtime &&
++              st1.st_size == st2.st_size,
++          "a start that found everything rewrote the file");
++    /* the pixels from the file are the pixels pango made */
++    enum { W = 80, H = 40 };
++    static uint8_t a[W * H * 4], b[W * H * 4];
++    unsigned compared = 0;
++    for (unsigned i = 0; i < nboxes && compared < 40; i++) {
++        if (boxes[i].w + 2 > W || boxes[i].h + 2 > H)
++            continue;
++        draw(f1, boxes[i].label, boxes[i].w, boxes[i].h, a, W, H);
++        draw(f2, boxes[i].label, boxes[i].w, boxes[i].h, b, W, H);
++        CHECK(!memcmp(a, b, sizeof(a)), "label \"%s\" differs when it comes from the file",
++              boxes[i].label);
++        compared++;
++    }
++    CHECK(text_pango_render_count() == r1, "drawing from the file rendered");
++    CHECK(compared > 10, "only %u labels compared", compared);
++
++    /* A damaged file is a miss: render, rewrite, and the new file is good. */
++    FILE *f = fopen(path, "r+b");
++    fseek(f, CACHE_HEADER_SIZE + 5, SEEK_SET);
++    fputc(0x5a, f);
++    fclose(f);
++    struct text_font *f3 = text_font_new(FONT);
++    start(f3, dir);
++    unsigned r2 = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() - r2 == nboxes,
++          "after damage %u labels were rendered, wanted %u",
++          text_pango_render_count() - r2, nboxes);
++    c = cache_open(dir, &p);
++    CHECK(c && cache_count(c) == nboxes, "the file was not rewritten after damage");
++    cache_close(c);
++    CHECK(count_files(dir) == 1, "%u files after the rewrite", count_files(dir));
++
++    /* A file for other settings is not used and does not stop a new one. */
++    struct text_font *f4 = text_font_new("Sans 9");
++    start(f4, dir);
++    unsigned r3 = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() - r3 == nboxes,
++          "another font rendered %u labels", text_pango_render_count() - r3);
++    CHECK(count_files(dir) == 2, "%u files for two fonts", count_files(dir));
++
++    /* A font update keeps the description and changes the file: the old masks
++     * must not be used, and the new ones go to a file of their own. */
++    char *dir_u = make_dir("update");
++    static const char before_env[] = "pango 1;font /fonts/sans.ttf 100 1000";
++    static const char after_env[] = "pango 1;font /fonts/sans.ttf 100 1001";
++    struct text_font *fu1 = text_font_new(FONT), *fu2 = text_font_new(FONT),
++                     *fu3 = text_font_new(FONT);
++    start_env(fu1, dir_u, before_env);
++    run_idle(&calls, &worst);
++    CHECK(count_files(dir_u) == 1, "no file for the environment before the update");
++    start_env(fu2, dir_u, before_env);
++    unsigned ru = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() == ru,
++          "a start in an unchanged environment rendered %u labels",
++          text_pango_render_count() - ru);
++    start_env(fu3, dir_u, after_env);
++    ru = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() - ru == nboxes,
++          "after the font update %u labels were rendered, wanted %u",
++          text_pango_render_count() - ru, nboxes);
++    CHECK(count_files(dir_u) == 2, "%u files for two environments", count_files(dir_u));
++    text_cache_attach(NULL, NULL);
++    text_font_free(fu1);
++    text_font_free(fu2);
++    text_font_free(fu3);
++
++    /* the file's identity is its path, size and time */
++    char probe[320];
++    snprintf(probe, sizeof(probe), "%s/font.ttf", root);
++    FILE *pf0 = fopen(probe, "w");
++    fputs("abc", pf0);
++    fclose(pf0);
++    char *k1 = text_pango_file_key(probe);
++    pf0 = fopen(probe, "a");
++    fputs("d", pf0);
++    fclose(pf0);
++    char *k2 = text_pango_file_key(probe);
++    struct utimbuf tb = {.actime = 1000, .modtime = 1000};
++    utime(probe, &tb);
++    char *k3 = text_pango_file_key(probe);
++    utime(probe, &tb);
++    char *k4 = text_pango_file_key(probe);
++    CHECK(k1 && k2 && k3 && k4 && strcmp(k1, k2) && strcmp(k2, k3),
++          "the file key does not change with size or time");
++    CHECK(k3 && k4 && !strcmp(k3, k4), "the file key changes without a change");
++    char *kx = text_pango_file_key("/nonexistent/font.ttf");
++    CHECK(kx && strstr(kx, "unreadable"), "a missing file has no marker");
++    free(k1);
++    free(k2);
++    free(k3);
++    free(k4);
++    free(kx);
++
++    /* --no-cache: no file, no pending work. */
++    char *dir2 = make_dir("nocache");
++    struct text_font *f5 = text_font_new(FONT);
++    struct text_cache_config off = config(NULL);
++    text_cache_attach(f5, &off);
++    CHECK(!text_cache_pending(), "work pending without a cache");
++    text_pango_mask(f5, boxes[0].label, 1.0, boxes[0].w, boxes[0].h, NULL, NULL);
++    CHECK(count_files(dir2) == 0, "files appeared without a cache");
++
++    /* prerender: writes a file, the same bytes every time, and fails with a
++     * message when it cannot. */
++    text_cache_attach(NULL, NULL);
++    char *d3 = make_dir("pre1"), *d4 = make_dir("pre2");
++    char err[512] = "";
++    CHECK(kbd_prerender(d3, FONT, kw, kh, 1.0, false, err, sizeof(err)) == 0,
++          "prerender failed: %s", err);
++    CHECK(kbd_prerender(d4, FONT, kw, kh, 1.0, false, err, sizeof(err)) == 0,
++          "prerender failed: %s", err);
++    char p3[1024], p4[1024];
++    cache_path(p3, sizeof(p3), d3, &p);
++    cache_path(p4, sizeof(p4), d4, &p);
++    char cmd[4400];
++    snprintf(cmd, sizeof(cmd), "cmp -s '%s' '%s' && cmp -s '%s' '%s'", p3, p4, p3, path);
++    CHECK(system(cmd) == 0, "prerender twice, or after a first start, gave different files");
++    char plain[320], below[400];
++    snprintf(plain, sizeof(plain), "%s/plain", root);
++    FILE *pf = fopen(plain, "w");
++    if (pf)
++        fclose(pf);
++    snprintf(below, sizeof(below), "%s/sub", plain);
++    err[0] = 0;
++    CHECK(kbd_prerender(below, FONT, kw, kh, 1.0, false, err, sizeof(err)) < 0 && err[0],
++          "prerender into an impossible directory did not fail with a message");
++
++    /* A valid file that lacks one label, as after a layout change that kept
++     * the version: only that label is rendered, and the file gains it. */
++    struct text_font *f6 = text_font_new(FONT);
++    start(f6, dir);
++    text_cache_want("Zq#", 30, 12);
++    unsigned r4 = text_pango_render_count();
++    run_idle(&calls, &worst);
++    CHECK(text_pango_render_count() - r4 == 1,
++          "%u labels rendered for one missing label", text_pango_render_count() - r4);
++    c = cache_open(dir, &p);
++    CHECK(c && cache_count(c) == nboxes + 1,
++          "the file has %zu labels, wanted %u", c ? cache_count(c) : 0, nboxes + 1);
++    cache_close(c);
++
++    text_cache_attach(NULL, NULL);
++    text_font_free(f6);
++    text_font_free(f1);
++    text_font_free(f2);
++    text_font_free(f3);
++    text_font_free(f4);
++    text_font_free(f5);
++    text_font_free(fenv);
++    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
++    if (system(cmd))
++        fprintf(stderr, "could not remove %s\n", root);
++    return failures ? 1 : 0;
++}
+diff --git a/text-bitmap.c b/text-bitmap.c
+index 78bf3ea..d5a8971 100644
+--- a/text-bitmap.c
++++ b/text-bitmap.c
+@@ -191,6 +191,44 @@ bm_pick_font(const char *label, unsigned inner_w, unsigned inner_h)
+     return bmfonts[nbmfonts - 1];
+ }
+ 
++/* The built-in fonts are part of the binary: nothing to render, nothing to
++ * keep. */
++void
++text_cache_attach(struct text_font *font, const struct text_cache_config *config)
++{
++    (void)font;
++    (void)config;
++}
++
++void
++text_cache_want(const char *label, int w, int h)
++{
++    (void)label;
++    (void)w;
++    (void)h;
++}
++
++bool
++text_cache_step(unsigned budget)
++{
++    (void)budget;
++    return false;
++}
++
++bool
++text_cache_pending(void)
++{
++    return false;
++}
++
++int
++text_cache_flush(char *err, size_t errlen)
++{
++    (void)err;
++    (void)errlen;
++    return 0;
++}
++
+ void
+ text_draw(struct text_font *font, const char *label,
+           const struct mask_target *target, int x, int y, int w, int h,
+diff --git a/text-pango.c b/text-pango.c
+index d5f0f25..ce2a21d 100644
+--- a/text-pango.c
++++ b/text-pango.c
+@@ -1,13 +1,24 @@
+ #include <cairo.h>
++#include <harfbuzz/hb.h>
+ #include <pango/pangocairo.h>
++#ifdef HAVE_FONTCONFIG
++#include <fontconfig/fontconfig.h>
++#include <pango/pangofc-font.h>
++#endif
++#include <math.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
+ 
++#include "cache.h"
+ #include "text.h"
+ #include "text-pango.h"
+ 
+ struct text_font {
+     PangoFontDescription *desc;
++    char *name; /* what the cache file is named and matched by */
++    char *env;  /* what else the masks depend on, made on first use */
+ };
+ 
+ /* Rendering a label through pango costs a font lookup and shaping, which is
+@@ -21,8 +32,18 @@ struct entry {
+     char *label;
+     struct label_mask mask;
+     int logical_w, logical_h;
++    bool mapped; /* the mask data lives in the cache file's mapping */
++    bool failed; /* there was ink to draw and no mask could be made of it */
+ };
+ 
++static unsigned renders;
++
++unsigned
++text_pango_render_count(void)
++{
++    return renders;
++}
++
+ #define NBUCKETS 256
+ static struct entry *buckets[NBUCKETS];
+ 
+@@ -33,13 +54,17 @@ text_font_new(const char *description)
+     if (!f)
+         abort();
+     f->desc = pango_font_description_from_string(description);
++    f->name = strdup(description);
++    if (!f->name)
++        abort();
+     return f;
+ }
+ 
+ static void
+ entry_free(struct entry *e)
+ {
+-    free((void *)e->mask.data);
++    if (!e->mapped)
++        free((void *)e->mask.data);
+     free(e->label);
+     free(e);
+ }
+@@ -60,6 +85,8 @@ text_font_free(struct text_font *font)
+         }
+     }
+     pango_font_description_free(font->desc);
++    free(font->name);
++    free(font->env);
+     free(font);
+ }
+ 
+@@ -101,6 +128,7 @@ render(struct entry *e)
+         pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER);
+     }
+ 
++    renders++;
+     PangoRectangle ink, logical;
+     pango_layout_get_pixel_extents(layout, &ink, &logical);
+     e->logical_w = logical.width;
+@@ -130,9 +158,12 @@ render(struct entry *e)
+                 .data = data};
+         } else {
+             free(data);
++            e->failed = true;
+         }
+         cairo_destroy(scr);
+         cairo_surface_destroy(surf);
++    } else if (ink.width > 0 && ink.height > 0) {
++        e->failed = true;
+     }
+ 
+     pango_font_description_free(desc);
+@@ -141,33 +172,153 @@ render(struct entry *e)
+     cairo_surface_destroy(probe);
+ }
+ 
+-const struct label_mask *
+-text_pango_mask(struct text_font *font, const char *label, double scale,
+-                int inner_w, int inner_h, int *logical_w, int *logical_h)
++char *
++text_pango_file_key(const char *path)
++{
++    struct stat st;
++    /* the size and the time catch a package update that keeps the path */
++    bool ok = stat(path, &st) == 0;
++    size_t len = strlen(path) + 64;
++    char *key = malloc(len);
++    if (!key)
++        return NULL;
++    if (ok)
++        snprintf(key, len, "%s %lld %lld", path, (long long)st.st_size,
++                 (long long)st.st_mtime);
++    else
++        snprintf(key, len, "%s unreadable", path);
++    return key;
++}
++
++/* What the masks depend on besides the description: the libraries that
++ * shape and rasterize, and the font file the description resolves to. A font
++ * package update changes the file and leaves the description alone, and the
++ * old masks would then be drawn forever. Only the first face of the
++ * description is followed; a fallback font for a glyph the first one lacks is
++ * not, because pango picks it per glyph. Resolving the face starts
++ * fontconfig, which a start with a usable cache would otherwise not need. */
++static const char *
++font_environment(struct text_font *f)
++{
++    if (f->env)
++        return f->env;
++    char buf[1024];
++    int n = snprintf(buf, sizeof(buf), "pango %s;cairo %s;harfbuzz %s",
++                     pango_version_string(), cairo_version_string(),
++                     hb_version_string());
++#ifdef HAVE_FONTCONFIG
++    n += snprintf(buf + n, sizeof(buf) - n, ";fontconfig %d", FcGetVersion());
++    PangoFontMap *map = pango_cairo_font_map_get_default();
++    PangoContext *ctx = pango_font_map_create_context(map);
++    PangoFont *face = pango_font_map_load_font(map, ctx, f->desc);
++    if (face && PANGO_IS_FC_FONT(face)) {
++        FcPattern *pat = pango_fc_font_get_pattern(PANGO_FC_FONT(face));
++        FcChar8 *file = NULL;
++        int index = 0;
++        if (pat && FcPatternGetString(pat, FC_FILE, 0, &file) == FcResultMatch) {
++            FcPatternGetInteger(pat, FC_INDEX, 0, &index);
++            char *key = text_pango_file_key((const char *)file);
++            if (key) {
++                n += snprintf(buf + n, sizeof(buf) - n, ";font %s #%d", key,
++                              index);
++                free(key);
++            }
++        }
++    }
++    if (face)
++        g_object_unref(face);
++    g_object_unref(ctx);
++#endif
++    if (n >= (int)sizeof(buf))
++        n = sizeof(buf) - 1;
++    f->env = strndup(buf, n);
++    if (!f->env)
++        abort();
++    return f->env;
++}
++
++const char *
++text_pango_environment(struct text_font *font)
++{
++    return font_environment(font);
++}
++
++/* The persistent cache for one geometry. The labels the keyboard may draw
++ * are collected in `want`, so they can be rendered in idle time and written
++ * out together. */
++struct want {
++    const char *label;
++    int w, h;
++};
++
++static struct {
++    bool on, finished;
++    struct text_font *font;
++    char layout[CACHE_LAYOUT_LEN + 1];
++    char *dir, *font_name, *env;
++    struct cache_params params;
++    struct cache *map;
++    struct want *want;
++    size_t nwant, capwant, next;
++    double scale;
++    bool dirty;
++} cs;
++
++static bool
++cache_applies(const struct text_font *font, double scale)
++{
++    return cs.on && !strcmp(font->name, cs.font_name) &&
++           lround(scale * 1000) == cs.params.scale_milli;
++}
++
++static struct entry *
++get_entry(struct text_font *font, const char *label, double scale,
++          int inner_w, int inner_h)
+ {
+     unsigned b = hash(label, font);
+     struct entry *e;
+     for (e = buckets[b]; e; e = e->next)
+         if (e->font == font && e->scale == scale && e->inner_w == inner_w &&
+             e->inner_h == inner_h && !strcmp(e->label, label))
+-            break;
+-    if (!e) {
+-        e = calloc(1, sizeof(*e));
+-        if (!e)
+-            return NULL;
+-        e->font = font;
+-        e->scale = scale;
+-        e->inner_w = inner_w;
+-        e->inner_h = inner_h;
+-        e->label = strdup(label);
+-        if (!e->label) {
+-            free(e);
+-            return NULL;
+-        }
++            return e;
++
++    e = calloc(1, sizeof(*e));
++    if (!e)
++        return NULL;
++    e->font = font;
++    e->scale = scale;
++    e->inner_w = inner_w;
++    e->inner_h = inner_h;
++    e->label = strdup(label);
++    if (!e->label) {
++        free(e);
++        return NULL;
++    }
++    struct cache_item item;
++    bool cached = cache_applies(font, scale);
++    if (cached && cs.map &&
++        cache_lookup(cs.map, cache_key(label, inner_w, inner_h), &item)) {
++        e->mask = item.mask;
++        e->logical_w = item.logical_w;
++        e->logical_h = item.logical_h;
++        e->mapped = true;
++    } else {
+         render(e);
+-        e->next = buckets[b];
+-        buckets[b] = e;
++        if (cached)
++            cs.dirty = true;
+     }
++    e->next = buckets[b];
++    buckets[b] = e;
++    return e;
++}
++
++const struct label_mask *
++text_pango_mask(struct text_font *font, const char *label, double scale,
++                int inner_w, int inner_h, int *logical_w, int *logical_h)
++{
++    struct entry *e = get_entry(font, label, scale, inner_w, inner_h);
++    if (!e)
++        return NULL;
+     if (logical_w)
+         *logical_w = e->logical_w;
+     if (logical_h)
+@@ -175,13 +326,155 @@ text_pango_mask(struct text_font *font, const char *label, double scale,
+     return e->mask.data ? &e->mask : NULL;
+ }
+ 
++static void
++cache_detach(void)
++{
++    /* entries that point into the mapping must go before it does */
++    for (int i = 0; i < NBUCKETS; i++) {
++        for (struct entry **p = &buckets[i]; *p;) {
++            struct entry *e = *p;
++            if (e->mapped) {
++                *p = e->next;
++                entry_free(e);
++            } else {
++                p = &e->next;
++            }
++        }
++    }
++    cache_close(cs.map);
++    free(cs.dir);
++    free(cs.font_name);
++    free(cs.env);
++    free(cs.want);
++    memset(&cs, 0, sizeof(cs));
++}
++
++void
++text_cache_attach(struct text_font *font, const struct text_cache_config *cfg)
++{
++    cache_detach();
++    if (!cfg || !cfg->dir)
++        return;
++    cs.font = font;
++    cs.dir = strdup(cfg->dir);
++    cs.font_name = strdup(font->name);
++    cs.env = strdup(cfg->env ? cfg->env : font_environment(font));
++    if (!cs.dir || !cs.font_name || !cs.env)
++        abort();
++    snprintf(cs.layout, sizeof(cs.layout), "%s", cfg->layout_name);
++    cs.scale = cfg->scale;
++    cs.params = (struct cache_params){
++        .layout_name = cs.layout, .layout_version = cfg->layout_version,
++        .width = cfg->width, .height = cfg->height,
++        .scale_milli = lround(cfg->scale * 1000), .font = cs.font_name,
++        .env = cs.env, .depth = 8};
++    if (cfg->read)
++        cs.map = cache_open(cs.dir, &cs.params);
++    /* without a file everything that gets drawn has to be written */
++    cs.dirty = !cs.map;
++    cs.on = true;
++}
++
++void
++text_cache_want(const char *label, int w, int h)
++{
++    if (!cs.on)
++        return;
++    if (cs.nwant == cs.capwant) {
++        size_t cap = cs.capwant ? cs.capwant * 2 : 256;
++        struct want *n = realloc(cs.want, cap * sizeof(*n));
++        if (!n)
++            return;
++        cs.want = n;
++        cs.capwant = cap;
++    }
++    cs.want[cs.nwant++] = (struct want){label, w, h};
++}
++
++static int
++cache_write_wanted(char *err, size_t errlen)
++{
++    struct cache_item *items = calloc(cs.nwant ? cs.nwant : 1, sizeof(*items));
++    if (!items) {
++        snprintf(err, errlen, "out of memory");
++        return -1;
++    }
++    int ret = -1;
++    for (size_t i = 0; i < cs.nwant; i++) {
++        const struct want *w = &cs.want[i];
++        struct entry *e = get_entry(cs.font, w->label, cs.scale, w->w, w->h);
++        if (!e || e->failed) {
++            snprintf(err, errlen, "cannot render the label \"%s\"", w->label);
++            goto out;
++        }
++        items[i] = (struct cache_item){
++            .key = cache_key(w->label, w->w, w->h), .mask = e->mask,
++            .logical_w = e->logical_w, .logical_h = e->logical_h};
++        if (!e->mask.data)
++            items[i].mask = (struct label_mask){.depth = 8};
++    }
++    ret = cache_write(cs.dir, &cs.params, items, cs.nwant, err, errlen);
++    if (ret == 0)
++        cs.dirty = false;
++out:
++    free(items);
++    return ret;
++}
++
++bool
++text_cache_step(unsigned budget)
++{
++    if (!cs.on || cs.finished)
++        return false;
++    /* Hits cost next to nothing, so only renders count against the budget,
++     * but a call still ends after a fixed number of lookups. */
++    unsigned lookups = 0, rendered = 0;
++    while (cs.next < cs.nwant && rendered < budget && lookups++ < 64) {
++        const struct want *w = &cs.want[cs.next++];
++        unsigned before = renders;
++        get_entry(cs.font, w->label, cs.scale, w->w, w->h);
++        rendered += renders != before;
++    }
++    if (cs.next < cs.nwant)
++        return true;
++
++    cs.finished = true;
++    char err[256];
++    /* nothing wanted means the buffers for this geometry were not made, and a
++     * file with no labels would then pass for a complete one */
++    if (cs.dirty && cs.nwant && cache_write_wanted(err, sizeof(err)) < 0)
++        fprintf(stderr, "wvkbd: label cache not written: %s\n", err);
++    return false;
++}
++
++bool
++text_cache_pending(void)
++{
++    return cs.on && !cs.finished;
++}
++
++int
++text_cache_flush(char *err, size_t errlen)
++{
++    if (!cs.on) {
++        snprintf(err, errlen, "no cache directory");
++        return -1;
++    }
++    for (; cs.next < cs.nwant; cs.next++) {
++        const struct want *w = &cs.want[cs.next];
++        get_entry(cs.font, w->label, cs.scale, w->w, w->h);
++    }
++    cs.finished = true;
++    return cache_write_wanted(err, errlen);
++}
++
+ void
+ text_draw(struct text_font *font, const char *label,
+           const struct mask_target *target, int x, int y, int w, int h,
+           int border, double scale, Color color)
+ {
+     int iw = w - 2 * border, ih = h - 2 * border;
+-    if (iw <= 0 || ih <= 0)
++    if (iw <= 0 || ih <= 0 || !*label)
+         return;
+ 
+     int lw, lh;
+diff --git a/text-pango.h b/text-pango.h
+index 62d8f14..0652636 100644
+--- a/text-pango.h
++++ b/text-pango.h
+@@ -11,4 +11,16 @@ const struct label_mask *text_pango_mask(struct text_font *font,
+                                          int inner_w, int inner_h,
+                                          int *logical_w, int *logical_h);
+ 
++/* What the masks of this font depend on besides its description, as stored in
++ * the cache key: library versions and the resolved font file's path, size and
++ * modification time (the file only when fontconfig is linked, see
++ * HAVE_FONTCONFIG). Owned by the font. */
++const char *text_pango_environment(struct text_font *font);
++/* "path size mtime" of a file, or "path unreadable". Caller frees. */
++char *text_pango_file_key(const char *path);
++
++/* How many labels pango has rendered so far, so that a test can tell a cache
++ * hit from a render. */
++unsigned text_pango_render_count(void);
++
+ #endif
+diff --git a/text.h b/text.h
+index 9680b8e..e48e76e 100644
+--- a/text.h
++++ b/text.h
+@@ -1,6 +1,10 @@
+ #ifndef TEXT_H
+ #define TEXT_H
+ 
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
+ #include "mask.h"
+ 
+ /* Label text, drawn through label masks. The backend is chosen at build time
+@@ -19,4 +23,40 @@ void text_draw(struct text_font *font, const char *label,
+                const struct mask_target *target, int x, int y, int w, int h,
+                int border, double scale, Color color);
+ 
++/* The persistent label cache (only the pango backend has one; for the others
++ * everything below does nothing, and there is never anything to do in idle
++ * time). */
++struct text_cache_config {
++	const char *dir; /* NULL: no cache */
++	const char *layout_name;
++	uint32_t layout_version;
++	uint32_t width, height; /* keyboard size in surface pixels */
++	double scale;
++	/* NULL: the libraries and font file in use (see text-pango.h), which is
++	 * what keeps masks from before a font update out. Set by tests to change
++	 * the key without changing the system. */
++	const char *env;
++	/* false ignores an existing file, so that --prerender renders everything
++	 * again instead of trusting what it is there to replace */
++	bool read;
++};
++
++/* Opens the file for this geometry if there is a usable one, and forgets the
++ * wanted labels of any earlier call. Only labels drawn with this font (or one
++ * with the same description) are cached. */
++void text_cache_attach(struct text_font *font,
++                       const struct text_cache_config *config);
++/* Names a label that will be drawn in a box of w x h pixels. The string must
++ * outlive the cache; layout labels are static. */
++void text_cache_want(const char *label, int w, int h);
++/* Renders at most `budget` wanted labels that are not there yet, and writes
++ * the file once everything wanted is there and something had to be rendered.
++ * Returns true while there is more to do. */
++bool text_cache_step(unsigned budget);
++/* Whether text_cache_step has anything left to do. */
++bool text_cache_pending(void);
++/* Renders all wanted labels and writes the file whatever was in it. 0 on
++ * success, -1 with a message in err. */
++int text_cache_flush(char *err, size_t errlen);
++
+ #endif
+diff --git a/tools/gen-cache.c b/tools/gen-cache.c
+new file mode 100644
+index 0000000..5759f71
+--- /dev/null
++++ b/tools/gen-cache.c
+@@ -0,0 +1,46 @@
++/* Writes the label cache files for the standard screens into a directory, so
++ * that an image can ship them and the keyboard never runs pango on the
++ * device. Built with the native toolchain, see the cache_tool option. */
++#include <stdio.h>
++#include <stdlib.h>
++
++#include "keyboard.h"
++#include "prerender.h"
++
++#include "config.h"
++
++int
++main(int argc, char **argv)
++{
++    if (argc < 2 || argc > 3) {
++        fprintf(stderr, "usage: %s DIR [FONT]\n", argv[0]);
++        return 2;
++    }
++    /* Whatever the binary would run with, unless it is started with --fn. A
++     * cache made for another font is simply never found. */
++    const char *font = argc == 3 ? argv[2] : schemes[0].font;
++    /* config.h defines these for main.c; this program has no use for them */
++    (void)layers;
++    (void)landscape_layers;
++
++    static const struct {
++        uint32_t w, h;
++    } screens[] = {{240, 320}, {320, 240}, {480, 640}, {640, 480}};
++
++    for (size_t i = 0; i < sizeof(screens) / sizeof(screens[0]); i++) {
++        uint32_t sw = screens[i].w;
++        bool landscape = sw > screens[i].h;
++        /* the size the keyboard picks on that screen without -H or -L */
++        uint32_t h = kbd_pick_height(
++            landscape, sw,
++            landscape ? KBD_PIXEL_LANDSCAPE_HEIGHT : KBD_PIXEL_HEIGHT, false);
++        char err[512];
++        if (kbd_prerender(argv[1], font, sw, h, 1.0, DEFAULT_SHOW_POPUP, err,
++                          sizeof(err)) < 0) {
++            fprintf(stderr, "%s: %ux%u: %s\n", argv[0], sw, screens[i].h, err);
++            return 1;
++        }
++        printf("%ux%u keyboard %ux%u\n", sw, screens[i].h, sw, h);
++    }
++    return 0;
++}
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 3f73f95..27a28bd 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -53,6 +53,32 @@ can be patched to add new features.
+ 	backend use it; the default bitmap build ignores it and picks one of its
+ 	two built-in fonts (6x13 or 10x20) from the key height.
+ 
++*--cache-dir* _dir_
++	Directory of the label cache (see *LABEL CACHE*), by default
++	/var/cache/wvkbd-ipaq or whatever the build was configured with. Only
++	the pango text backend has a cache; the bitmap build accepts the option
++	and ignores it.
++
++*--no-cache*
++	Do not read or write the label cache: every label is rendered by pango
++	at start-up.
++
++*--prerender*
++	Render every label of every layer for one keyboard size, write the label
++	cache file and exit, without connecting to a compositor. The exit status
++	is 0 only if the file was written; on failure a message says why and the
++	status is 1. Meant for a package post-install or first-boot hook. The
++	keyboard size is the one a start would use on the screen given with
++	*--screen*, worked out by the same code as at run time, so *-H*, *-L*,
++	*--dock*, *--ratio*, *--width* (with *--dock* only) and *--popup* count as
++	they do there. In a bitmap build there is no cache and
++	the option does nothing, successfully. Cannot be combined with
++	*--no-cache*.
++
++*--screen* _width_x_height_
++	The screen size *--prerender* works for, for example 320x240 (default
++	240x320). A screen wider than it is high is landscape.
++
+ *--hidden*
+ 	Start hidden (send SIGUSR2 to show).
+ 
+@@ -98,7 +124,9 @@ can be patched to add new features.
+ 	Width ratio when docked [0.3-1.0]. Defaults to 0.68.
+ 
+ *--width* _int_
+-	Explicit custom width in pixels.
++	Explicit width in pixels of a docked keyboard, so it only counts together
++	with *--dock* left or right and then replaces *--ratio*. Without *--dock*
++	the compositor sizes the full-width keyboard and the option is ignored.
+ 
+ *--corner-radius* _int_
+ 	Corner radius in pixels for the keyboard window background (defaults to 16 when docked,
+@@ -198,9 +226,77 @@ together with *--dock*: the rows are divided over whatever width the keyboard
+ gets, so the keys narrow with it (to 16 px at the default docked ratio on a
+ 240 px screen). It shows no key popup and requests no exclusive zone unless
+ *--popup* or *--exclusive* is given. With the popup off its surface, its
+-positioner and its two buffers (384 kB at 240x100) are never made. Labels are
+-drawn with the 6x13 font on QVGA and 10x20 on VGA screens in the default text
+-build.
++positioner and its two buffers (384 kB at 240x100) are never made. Labels are drawn with the 6x13 font on QVGA and 10x20 on VGA screens
++in the default text build.
++
++# LABEL CACHE
++
++Rendering the labels with pango costs a fontconfig scan and the shaping of
++every label, which is slow on a small machine. The pango text backend
++therefore renders each label once into a coverage mask and keeps all masks of
++one keyboard size in a file that a later start maps read-only instead of
++rendering again. The bitmap text backend has built-in fonts and no cache.
++
++The file is made by whichever of these happens first:
++
++*First start.* The visible layer is rendered synchronously, as the keyboard
++needs it at once. The other layers are rendered while the keyboard is idle:
++when nothing has happened for 10 ms, two labels are rendered, and so on until
++all are done, so a key press is never kept waiting for more than two labels.
++Then the file is written, once.
++
++*--prerender*, which does the same work in one go and then exits.
++
++*wvkbd-cache-gen*, a program built on the build machine when the meson option
++_cache_tool_ is on (it needs _text=pango_ and is not installed). It writes the
++files for the screens 240x320, 320x240, 480x640 and 640x480 into a directory
++given as its argument, with the font from the layout's configuration (a second
++argument names another font), so that an image can ship them and the device
++never runs pango. Its files are byte for byte what *--prerender* writes for
++the same screen, and the same bytes every time.
++
++The file is named after the layout, the keyboard size in pixels, the surface
++scale and a hash of the font description and of the environment, for example
++_ipaq-240x100-s1000-9a6df02a2244f18a.cache_. It is replaced atomically (data to a
++temporary file in the same directory, flushed, then renamed over the name), so
++a reader sees the old file or the new one and a failed write changes nothing.
++It is written only when something was missing, never touched in normal use, and
++costs no flash wear. If the directory cannot be written, the keyboard works
++as before and says so once on standard error.
++
++The environment in the key is what else the masks depend on: the versions of
++pango, cairo, harfbuzz and fontconfig, and the font file the description
++resolves to, with its path, size and modification time (the first face only; a
++fallback font for a missing glyph is not followed). After a library or font package update the key changes, the old
++file is not used and a new one is written beside it; the old one is never
++removed by the keyboard. Finding the font file starts fontconfig, so a start
++with a usable file is cheaper than one without, but not free. A file made on
++another machine, for example by *wvkbd-cache-gen*, is therefore only used where
++the same library versions and the same font file (path, size and time) are
++installed.
++
++A file is used only if everything in it checks out: the header, the checksum
++and every offset and size against the size of the file, and the layout, its
++version (derived from the label text), keyboard size, scale, font, environment
++and mask depth it was made for. Anything else is a miss: the labels are rendered and the file
++is written again.
++
++All integers in the file are little endian. It consists of
++
++- a header of 216 bytes: the 8 byte magic (the letters WVKBDLC and a byte 1), the
++  format version (2), the header size, the file size, a CRC-32 of the whole
++  file, the layout version, the keyboard width, height and scale times 1000, the
++  mask depth in bits per pixel, the label count, a hash of the font
++  description and the environment, the layout name (32 bytes) and the font description (128
++  bytes);
++- an index of 24 bytes per label, sorted by key, which is a 64-bit hash of the
++  label and the size of the box it is drawn in: key, offset of the mask data in
++  the file, mask width and height (both 0 for a label without ink), bearing x
++  and y, and the width and height of the label's logical box;
++- the mask data, every mask at an offset that is a multiple of 4, rows padded
++  to 4 bytes. Labels with equal masks share one copy.
++
++There are no timestamps or addresses in the file.
+ 
+ # COMPOSE BUTTON
+ 
+-- 
+2.51.0
+

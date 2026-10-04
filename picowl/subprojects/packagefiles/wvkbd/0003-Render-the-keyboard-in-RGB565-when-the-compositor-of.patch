@@ -1,0 +1,702 @@
+From 92542af16e936e0339f2215e7ce458dae1d70e17 Mon Sep 17 00:00:00 2001
+From: Koen Kooi <koen@dominion.thruhere.net>
+Date: Sun, 4 Oct 2026 13:27:02 +0200
+Subject: [PATCH 3/9] Render the keyboard in RGB565 when the compositor offers
+ it
+
+On a 240x320 RGB565 panel an ARGB8888 buffer doubles the memory of the
+double-buffered keyboard surface and forces the compositor to blend and
+convert every repaint. The surface now uses WL_SHM_FORMAT_RGB565 with
+CAIRO_FORMAT_RGB16_565 when wl_shm.format advertises it, otherwise
+XRGB8888, otherwise ARGB8888 as before. --format
+auto|rgb565|xrgb8888|argb8888 forces a choice for testing.
+
+Formats without alpha draw every colour opaque, so --alpha and --bg-alpha
+are ignored there (documented in --help and the man page) and the
+baseplate gets square corners instead of black ones. The popup surface
+stays ARGB8888 because it is mostly transparent.
+
+All buffer-size arithmetic lives in drw_buffer_geometry(), which pads rows
+to 4 bytes and rejects sizes that do not fit the int32 wl_shm and cairo
+use. A drwsurf without a wl_shm now backs onto plain memory, which lets
+tests/test-draw.c draw a layer through kbd_draw_layout() for each format
+and check key, baseplate, label and highlight pixels without a compositor.
+---
+ drw.c             | 146 +++++++++++++++++++++++++-----
+ drw.h             |  23 +++++
+ keyboard.c        |   4 +-
+ main.c            |  61 +++++++++----
+ tests/meson.build |   9 ++
+ tests/test-draw.c | 223 ++++++++++++++++++++++++++++++++++++++++++++++
+ wvkbd.1.scd       |  15 +++-
+ 7 files changed, 443 insertions(+), 38 deletions(-)
+ create mode 100644 tests/test-draw.c
+
+diff --git a/drw.c b/drw.c
+index 89ec8d8..053ad19 100644
+--- a/drw.c
++++ b/drw.c
+@@ -1,3 +1,6 @@
++#include <limits.h>
++#include <stdio.h>
++#include <string.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #include <wayland-client.h>
+@@ -6,6 +9,104 @@
+ #include "shm_open.h"
+ #include "math.h"
+ 
++bool
++drw_parse_format(const char *name, enum drw_format *format)
++{
++    static const struct { const char *name; enum drw_format format; } known[] = {
++        {"auto", DRW_FORMAT_AUTO},
++        {"rgb565", DRW_FORMAT_RGB565},
++        {"xrgb8888", DRW_FORMAT_XRGB8888},
++        {"argb8888", DRW_FORMAT_ARGB8888},
++    };
++    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
++        if (strcmp(name, known[i].name) == 0) {
++            *format = known[i].format;
++            return true;
++        }
++    }
++    return false;
++}
++
++void
++drw_note_shm_format(struct drw *ctx, uint32_t wl_format)
++{
++    if (wl_format == WL_SHM_FORMAT_RGB565)
++        ctx->has_rgb565 = true;
++    else if (wl_format == WL_SHM_FORMAT_XRGB8888)
++        ctx->has_xrgb8888 = true;
++}
++
++enum drw_format
++drw_pick_format(const struct drw *ctx, enum drw_format request)
++{
++    if (request == DRW_FORMAT_ARGB8888)
++        return DRW_FORMAT_ARGB8888;
++    if (request == DRW_FORMAT_RGB565 && !ctx->has_rgb565)
++        fprintf(stderr, "compositor does not advertise RGB565, falling back\n");
++    if (request == DRW_FORMAT_XRGB8888 && !ctx->has_xrgb8888)
++        fprintf(stderr, "compositor does not advertise XRGB8888, using ARGB8888\n");
++    if ((request == DRW_FORMAT_AUTO || request == DRW_FORMAT_RGB565) &&
++        ctx->has_rgb565)
++        return DRW_FORMAT_RGB565;
++    if (ctx->has_xrgb8888)
++        return DRW_FORMAT_XRGB8888;
++    /* every compositor must support ARGB8888 */
++    return DRW_FORMAT_ARGB8888;
++}
++
++bool
++drw_format_has_alpha(enum drw_format format)
++{
++    return format == DRW_FORMAT_ARGB8888;
++}
++
++static uint32_t
++drw_wl_format(enum drw_format format)
++{
++    switch (format) {
++    case DRW_FORMAT_RGB565: return WL_SHM_FORMAT_RGB565;
++    case DRW_FORMAT_XRGB8888: return WL_SHM_FORMAT_XRGB8888;
++    default: return WL_SHM_FORMAT_ARGB8888;
++    }
++}
++
++static cairo_format_t
++drw_cairo_format(enum drw_format format)
++{
++    switch (format) {
++    case DRW_FORMAT_RGB565: return CAIRO_FORMAT_RGB16_565;
++    case DRW_FORMAT_XRGB8888: return CAIRO_FORMAT_RGB24;
++    default: return CAIRO_FORMAT_ARGB32;
++    }
++}
++
++bool
++drw_buffer_geometry(enum drw_format format, uint32_t width, uint32_t height,
++                    uint32_t *stride, uint32_t *size)
++{
++    uint64_t bytes_per_pixel = format == DRW_FORMAT_RGB565 ? 2 : 4;
++    /* cairo wants rows padded to 4 bytes */
++    uint64_t row = (width * bytes_per_pixel + 3) & ~(uint64_t)3;
++    uint64_t total = row * height; /* both < 2^35, cannot wrap in 64 bits */
++
++    if (width == 0 || height == 0 || row > INT32_MAX || total > INT32_MAX)
++        return false;
++    *stride = row;
++    *size = total;
++    return true;
++}
++
++/* Surfaces without alpha would otherwise composite a translucent colour
++ * against black, so colours are made opaque for them. */
++static void
++drw_set_color(cairo_t *cr, enum drw_format format, Color color)
++{
++    double a = drw_format_has_alpha(format) ? color.bgra[3] / (double)255 : 1.0;
++    cairo_set_source_rgba(cr, color.bgra[2] / (double)255,
++                          color.bgra[1] / (double)255,
++                          color.bgra[0] / (double)255, a);
++}
++
+ void drwbuf_handle_release(void *data, struct wl_buffer *wl_buffer) {
+     struct drwsurf *ds = data;
+     ds->released = true;
+@@ -137,9 +238,7 @@ drw_draw_text(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+ 
+     pango_layout_set_font_description(d->layout, font_description);
+ 
+-    cairo_set_source_rgba(
+-        d->cairo, color.bgra[2] / (double)255, color.bgra[1] / (double)255,
+-        color.bgra[0] / (double)255, color.bgra[3] / (double)255);
++    drw_set_color(d->cairo, ds->format, color);
+     cairo_move_to(d->cairo, x + w / 2, y + h / 2);
+ 
+     pango_layout_set_text(d->layout, label, -1);
+@@ -198,9 +297,7 @@ drw_do_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+         cairo_arc (d->cairo, x + radius, y + radius, radius, 180 * degrees, 270 * degrees);
+         cairo_close_path (d->cairo);
+ 
+-        cairo_set_source_rgba(
+-          d->cairo, color.bgra[2] / (double)255, color.bgra[1] / (double)255, 
+-          color.bgra[0] / (double)255, color.bgra[3] / (double)255);
++        drw_set_color(d->cairo, ds->format, color);
+         cairo_fill (d->cairo);
+         cairo_set_source_rgba(d->cairo, 0, 0, 0, 0.9);
+         cairo_set_line_width(d->cairo, 1.0);
+@@ -210,9 +307,7 @@ drw_do_rectangle(struct drwsurf *ds, Color color, uint32_t x, uint32_t y,
+     }
+     else {
+         cairo_rectangle(d->cairo, x, y, w, h);
+-        cairo_set_source_rgba(
+-            d->cairo, color.bgra[2] / (double)255, color.bgra[1] / (double)255,
+-            color.bgra[0] / (double)255, color.bgra[3] / (double)255);
++        drw_set_color(d->cairo, ds->format, color);
+         cairo_fill(d->cairo);
+ 
+         cairo_restore(d->cairo);
+@@ -236,9 +331,15 @@ drw_over_rectangle(struct drwsurf *d, Color color, uint32_t x, uint32_t y,
+ uint32_t
+ setup_buffer(struct drwsurf *drwsurf, struct drwbuf *drwbuf)
+ {
+-    int prev_size = drwbuf->size;
+-    int stride = drwsurf->width * 4;
+-    drwbuf->size = stride * drwsurf->height;
++    uint32_t stride, size;
++    if (!drw_buffer_geometry(drwsurf->format, drwsurf->width, drwsurf->height,
++                             &stride, &size)) {
++        fprintf(stderr, "buffer geometry %ux%u is invalid\n", drwsurf->width,
++                drwsurf->height);
++        return 1;
++    }
++    uint32_t prev_size = drwbuf->size;
++    drwbuf->size = size;
+ 
+     int fd = allocate_shm_file(drwbuf->size);
+     if (fd == -1) {
+@@ -256,20 +357,25 @@ setup_buffer(struct drwsurf *drwsurf, struct drwbuf *drwbuf)
+ 
+     if (drwbuf->buf)
+         wl_buffer_destroy(drwbuf->buf);
+-    struct wl_shm_pool *pool =
+-        wl_shm_create_pool(drwsurf->ctx->shm, fd, drwbuf->size);
+-    drwbuf->buf =
+-        wl_shm_pool_create_buffer(pool, 0, drwsurf->width, drwsurf->height,
+-                                  stride, WL_SHM_FORMAT_ARGB8888);
+-    wl_shm_pool_destroy(pool);
++    /* no shm global means a plain memory target (unit tests) */
++    if (drwsurf->ctx->shm) {
++        struct wl_shm_pool *pool =
++            wl_shm_create_pool(drwsurf->ctx->shm, fd, drwbuf->size);
++        drwbuf->buf = wl_shm_pool_create_buffer(
++            pool, 0, drwsurf->width, drwsurf->height, stride,
++            drw_wl_format(drwsurf->format));
++        wl_shm_pool_destroy(pool);
++        wl_buffer_add_listener(drwbuf->buf, &buffer_listener, drwsurf);
++    } else {
++        drwbuf->buf = NULL;
++    }
+     close(fd);
+-    wl_buffer_add_listener(drwbuf->buf, &buffer_listener, drwsurf);
+ 
+ 
+     if (drwbuf->cairo_surf)
+         cairo_surface_destroy(drwbuf->cairo_surf);
+     drwbuf->cairo_surf = cairo_image_surface_create_for_data(
+-        drwbuf->pool_data, CAIRO_FORMAT_ARGB32, drwsurf->width,
++        drwbuf->pool_data, drw_cairo_format(drwsurf->format), drwsurf->width,
+         drwsurf->height, stride);
+ 
+     if (drwbuf->cairo)
+diff --git a/drw.h b/drw.h
+index 060cb00..47c32ea 100644
+--- a/drw.h
++++ b/drw.h
+@@ -3,9 +3,22 @@
+ 
+ #include <pango/pangocairo.h>
+ #include <stdbool.h>
++#include <stdint.h>
++
++/* The pixel formats the keyboard surface can use. RGB565 halves the memory
++ * and the compositor's blend work on small panels; the other two are the
++ * fallbacks for compositors that do not advertise it. */
++enum drw_format {
++	DRW_FORMAT_AUTO, /* only valid as a request, never as a surface format */
++	DRW_FORMAT_RGB565,
++	DRW_FORMAT_XRGB8888,
++	DRW_FORMAT_ARGB8888,
++};
+ 
+ struct drw {
+ 	struct wl_shm *shm;
++	/* filled from wl_shm.format events */
++	bool has_rgb565, has_xrgb8888;
+ };
+ struct drwbuf {
+ 	uint32_t size;
+@@ -18,6 +31,7 @@ struct drwbuf {
+ struct drwsurf {
+ 	uint32_t width, height;
+ 	double scale;
++	enum drw_format format;
+ 
+ 	struct drw *ctx;
+ 	struct wl_surface *surf;
+@@ -33,6 +47,15 @@ struct drwsurf {
+ };
+ struct kbd;
+ 
++bool drw_parse_format(const char *name, enum drw_format *format);
++void drw_note_shm_format(struct drw *ctx, uint32_t wl_format);
++enum drw_format drw_pick_format(const struct drw *ctx, enum drw_format request);
++bool drw_format_has_alpha(enum drw_format format);
++/* The one place that computes buffer sizes. Returns false if the geometry
++ * does not fit the int32 values wl_shm and cairo use. */
++bool drw_buffer_geometry(enum drw_format format, uint32_t width,
++                         uint32_t height, uint32_t *stride, uint32_t *size);
++
+ void drwsurf_resize(struct drwsurf *ds, uint32_t w, uint32_t h, double s);
+ void drwsurf_attach(struct drwsurf *ds);
+ 
+diff --git a/keyboard.c b/keyboard.c
+index 4aa4e16..93b9cc9 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -709,7 +709,9 @@ kbd_draw_layout(struct kbd *kb)
+     if (kb->debug)
+         fprintf(stderr, "Draw layout\n");
+ 
+-    if (kb->corner_radius > 0) {
++    /* Rounded corners need a transparent surround, which opaque formats lack:
++     * they would turn black. */
++    if (kb->corner_radius > 0 && drw_format_has_alpha(d->format)) {
+         drw_do_clear(d, 0, 0, kb->w, kb->h);
+         drw_fill_rectangle(d, kb->schemes[0].bg, 0, 0, kb->w, kb->h, kb->corner_radius);
+     } else {
+diff --git a/main.c b/main.c
+index aad4489..7d64162 100644
+--- a/main.c
++++ b/main.c
+@@ -440,6 +440,16 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
+     .ping = xdg_wm_base_ping,
+ };
+ 
++static void
++shm_handle_format(void *data, struct wl_shm *shm, uint32_t format)
++{
++    drw_note_shm_format(data, format);
++}
++
++static const struct wl_shm_listener shm_listener = {
++    .format = shm_handle_format,
++};
++
+ void
+ handle_global(void *data, struct wl_registry *registry, uint32_t name,
+               const char *interface, uint32_t version)
+@@ -449,6 +459,7 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
+             wl_registry_bind(registry, name, &wl_compositor_interface, 6);
+     } else if (strcmp(interface, wl_shm_interface.name) == 0) {
+         draw_ctx.shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
++        wl_shm_add_listener(draw_ctx.shm, &shm_listener, &draw_ctx);
+     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+         seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+         wl_seat_add_listener(seat, &seat_listener, NULL);
+@@ -686,7 +697,11 @@ usage(char *argv0)
+                     "(--no-popup and --no-highlight)\n");
+     fprintf(
+         stderr,
+-        "  --alpha [int]          - Set alpha value for all colors [0-255]\n");
++        "  --alpha [int]          - Set alpha value for all colors [0-255] "
++        "(ignored unless the buffer format is argb8888)\n");
++    fprintf(stderr, "  --format [auto|rgb565|xrgb8888|argb8888]\n"
++                    "                         - Buffer pixel format, auto picks the "
++                    "cheapest the compositor offers\n");
+     fprintf(stderr, "  --auto                 - Automatically toggle visibility based on focus\n");
+     fprintf(stderr, "  --bg [rrggbb|aa]       - Set color of background\n");
+     fprintf(stderr, "  --fg [rrggbb|aa]       - Set color of keys\n");
+@@ -718,7 +733,8 @@ usage(char *argv0)
+     fprintf(stderr, "  --ratio [0.3-1.0]        - Screen width ratio for docked keyboard\n");
+     fprintf(stderr, "  --width [pixels]         - Custom fixed width in pixels\n");
+     fprintf(stderr, "  --corner-radius [pixels] - Corner radius of keyboard window\n");
+-    fprintf(stderr, "  --bg-alpha [0-255]       - Independent opacity for keyboard baseplate\n");
++    fprintf(stderr, "  --bg-alpha [0-255]       - Independent opacity for keyboard baseplate "
++                    "(ignored unless the buffer format is argb8888)\n");
+     fprintf(stderr, "  --double-space-period    - Double tap space to insert period and space\n");
+     fprintf(stderr, "  --non-exclusive    - Allow the keyboard to overlap "
+                     "windows. Do not request an exclusive zone from the "
+@@ -937,6 +953,7 @@ main(int argc, char **argv)
+ 
+     uint8_t alpha = 0;
+     bool alpha_defined = false;
++    enum drw_format requested_format = DRW_FORMAT_AUTO;
+ 
+     int i;
+     for (i = 1; argv[i]; i++) {
+@@ -977,6 +994,13 @@ main(int argc, char **argv)
+             }
+             alpha = atoi(argv[++i]);
+             alpha_defined = true;
++        } else if (!strcmp(argv[i], "--format")) {
++            if (i >= argc - 1 ||
++                !drw_parse_format(argv[i + 1], &requested_format)) {
++                usage(argv[0]);
++                exit(1);
++            }
++            i++;
+         } else if (!strcmp(argv[i], "--bg-alpha")) {
+             if (i >= argc - 1) {
+                 usage(argv[0]);
+@@ -1190,18 +1214,6 @@ main(int argc, char **argv)
+         keyboard.corner_radius = 0;
+     }
+ 
+-    if (alpha_defined) {
+-        keyboard.schemes[0].bg.bgra[3] = bg_alpha_defined ? bg_alpha : alpha;
+-        keyboard.schemes[0].fg.bgra[3] = alpha;
+-        keyboard.schemes[0].high.bgra[3] = alpha;
+-        keyboard.schemes[1].bg.bgra[3] = bg_alpha_defined ? bg_alpha : alpha;
+-        keyboard.schemes[1].fg.bgra[3] = alpha;
+-        keyboard.schemes[1].high.bgra[3] = alpha;
+-    } else if (bg_alpha_defined) {
+-        keyboard.schemes[0].bg.bgra[3] = bg_alpha;
+-        keyboard.schemes[1].bg.bgra[3] = bg_alpha;
+-    }
+-
+     if (fc_font_pattern) {
+         for (i = 0; i < countof(schemes); i++)
+             schemes[i].font = fc_font_pattern;
+@@ -1246,9 +1258,28 @@ main(int argc, char **argv)
+         die("virtual_keyboard_manager not available\n");
+     }
+ 
+-    // A second round-trip to receive wl_outputs events
++    // A second round-trip to receive wl_outputs events and wl_shm formats
+     wl_display_roundtrip(display);
+ 
++    draw_surf.format = drw_pick_format(&draw_ctx, requested_format);
++    /* the popup is mostly transparent, so it needs an alpha channel */
++    popup_draw_surf.format = DRW_FORMAT_ARGB8888;
++
++    /* Opaque formats cannot show translucency, so the options are ignored. */
++    if (drw_format_has_alpha(draw_surf.format)) {
++        if (alpha_defined) {
++            keyboard.schemes[0].bg.bgra[3] = bg_alpha_defined ? bg_alpha : alpha;
++            keyboard.schemes[0].fg.bgra[3] = alpha;
++            keyboard.schemes[0].high.bgra[3] = alpha;
++            keyboard.schemes[1].bg.bgra[3] = bg_alpha_defined ? bg_alpha : alpha;
++            keyboard.schemes[1].fg.bgra[3] = alpha;
++            keyboard.schemes[1].high.bgra[3] = alpha;
++        } else if (bg_alpha_defined) {
++            keyboard.schemes[0].bg.bgra[3] = bg_alpha;
++            keyboard.schemes[1].bg.bgra[3] = bg_alpha;
++        }
++    }
++
+     empty_region = wl_compositor_create_region(compositor);
+     popup_xdg_positioner = xdg_wm_base_create_positioner(wm_base);
+ 
+diff --git a/tests/meson.build b/tests/meson.build
+index 934b334..da42767 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -11,3 +11,12 @@ if python.found()
+     args: [files('check-signals.py'), exe],
+     timeout: 30)
+ endif
++
++# Draws a layer into plain memory, so it links the drawing and keyboard code
++# without main.c and needs no compositor.
++test_draw = executable('test-draw',
++  'test-draw.c', '../drw.c', '../keyboard.c', '../os-compatibility.c',
++  '../shm_open.c', proto_sources,
++  include_directories: include_directories('..'),
++  dependencies: [wayland_client, xkbcommon, pangocairo, m_dep, util_dep, rt_dep])
++test('draw-formats', test_draw)
+diff --git a/tests/test-draw.c b/tests/test-draw.c
+new file mode 100644
+index 0000000..e107a73
+--- /dev/null
++++ b/tests/test-draw.c
+@@ -0,0 +1,223 @@
++/* Renders a keyboard layer into plain memory through the same drawing code
++ * the compositor path uses, once per pixel format, and checks pixel values. */
++#include <cairo.h>
++#include <linux/input-event-codes.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "keyboard.h"
++
++static int failures;
++
++#define CHECK(cond, ...)                                                       \
++    do {                                                                       \
++        if (!(cond)) {                                                         \
++            fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__);               \
++            fprintf(stderr, __VA_ARGS__);                                      \
++            fputc('\n', stderr);                                               \
++            failures++;                                                        \
++        }                                                                      \
++    } while (0)
++
++static const char *format_name[] = {"auto", "rgb565", "xrgb8888", "argb8888"};
++
++/* What a stored pixel looks like for an opaque colour. The 565 truncation is
++ * what pixman does when it narrows 8-bit channels. */
++static uint32_t
++expected_pixel(enum drw_format f, Color c)
++{
++    uint32_t r = c.bgra[2], g = c.bgra[1], b = c.bgra[0];
++    if (f == DRW_FORMAT_RGB565)
++        return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
++    if (f == DRW_FORMAT_XRGB8888)
++        return (r << 16) | (g << 8) | b;
++    return 0xff000000u | (r << 16) | (g << 8) | b;
++}
++
++static uint32_t
++read_pixel(struct drwsurf *ds, uint32_t x, uint32_t y)
++{
++    uint32_t stride, size;
++    drw_buffer_geometry(ds->format, ds->width, ds->height, &stride, &size);
++    struct drwbuf *b = ds->back_buffer;
++    cairo_surface_flush(b->cairo_surf);
++    const unsigned char *p = b->pool_data + (size_t)y * stride;
++    uint32_t v;
++    if (ds->format == DRW_FORMAT_RGB565) {
++        uint16_t v16;
++        memcpy(&v16, p + x * 2, 2);
++        return v16;
++    }
++    memcpy(&v, p + x * 4, 4);
++    return ds->format == DRW_FORMAT_XRGB8888 ? v & 0xffffff : v;
++}
++
++static void
++test_geometry(void)
++{
++    uint32_t stride, size;
++
++    CHECK(drw_buffer_geometry(DRW_FORMAT_RGB565, 240, 100, &stride, &size) &&
++              stride == 480 && size == 48000,
++          "240x100 rgb565 is 480 bytes per row");
++    /* odd widths: 2 bytes per pixel must be padded to 4 */
++    CHECK(drw_buffer_geometry(DRW_FORMAT_RGB565, 241, 2, &stride, &size) &&
++              stride == 484 && size == 968,
++          "241 wide rgb565 rows are padded to 4 bytes");
++    CHECK(drw_buffer_geometry(DRW_FORMAT_ARGB8888, 240, 100, &stride, &size) &&
++              stride == 960 && size == 96000,
++          "240x100 argb8888 is 960 bytes per row");
++
++    for (int f = DRW_FORMAT_RGB565; f <= DRW_FORMAT_ARGB8888; f++) {
++        cairo_format_t cf = f == DRW_FORMAT_RGB565    ? CAIRO_FORMAT_RGB16_565
++                            : f == DRW_FORMAT_XRGB8888 ? CAIRO_FORMAT_RGB24
++                                                       : CAIRO_FORMAT_ARGB32;
++        for (uint32_t w = 1; w < 70; w++) {
++            CHECK(drw_buffer_geometry(f, w, 1, &stride, &size) &&
++                      (int)stride == cairo_format_stride_for_width(cf, w),
++                  "%s stride for width %u matches cairo", format_name[f], w);
++        }
++    }
++
++    CHECK(!drw_buffer_geometry(DRW_FORMAT_ARGB8888, 0, 10, &stride, &size),
++          "zero width is rejected");
++    CHECK(!drw_buffer_geometry(DRW_FORMAT_ARGB8888, UINT32_MAX, 1, &stride, &size),
++          "a width whose stride overflows int32 is rejected");
++    CHECK(!drw_buffer_geometry(DRW_FORMAT_ARGB8888, 40000, 40000, &stride, &size),
++          "a size beyond int32 is rejected");
++    CHECK(!drw_buffer_geometry(DRW_FORMAT_RGB565, 1, UINT32_MAX, &stride, &size),
++          "a huge height is rejected");
++}
++
++static void
++test_pick(void)
++{
++    enum drw_format f;
++    struct drw none = {0}, x = {.has_xrgb8888 = true},
++               both = {.has_rgb565 = true, .has_xrgb8888 = true};
++
++    CHECK(drw_parse_format("rgb565", &f) && f == DRW_FORMAT_RGB565, "parse");
++    CHECK(!drw_parse_format("rgb888", &f), "unknown format name is rejected");
++
++    CHECK(drw_pick_format(&both, DRW_FORMAT_AUTO) == DRW_FORMAT_RGB565,
++          "auto prefers rgb565");
++    CHECK(drw_pick_format(&x, DRW_FORMAT_AUTO) == DRW_FORMAT_XRGB8888,
++          "auto without rgb565 uses xrgb8888");
++    CHECK(drw_pick_format(&none, DRW_FORMAT_AUTO) == DRW_FORMAT_ARGB8888,
++          "auto with nothing advertised uses argb8888");
++    CHECK(drw_pick_format(&x, DRW_FORMAT_RGB565) == DRW_FORMAT_XRGB8888,
++          "requested rgb565 falls back to xrgb8888");
++    CHECK(drw_pick_format(&both, DRW_FORMAT_ARGB8888) == DRW_FORMAT_ARGB8888,
++          "an explicit request for argb8888 is honoured");
++    CHECK(drw_pick_format(&both, DRW_FORMAT_XRGB8888) == DRW_FORMAT_XRGB8888,
++          "an explicit request for xrgb8888 is honoured");
++
++    struct drw ctx = {0};
++    drw_note_shm_format(&ctx, 0x36314752); /* WL_SHM_FORMAT_RGB565 */
++    drw_note_shm_format(&ctx, 1);          /* XRGB8888 */
++    drw_note_shm_format(&ctx, 0x34325258); /* some other format */
++    CHECK(ctx.has_rgb565 && ctx.has_xrgb8888, "shm format events are recorded");
++}
++
++static void
++test_render(enum drw_format format, int corner_radius)
++{
++    const char *fn = format_name[format];
++    bool alpha = drw_format_has_alpha(format);
++    /* The baseplate alpha is below 255 to prove opaque formats ignore it. */
++    struct clr_scheme schemes[2] = {0};
++    for (int i = 0; i < 2; i++) {
++        schemes[i].bg = (Color){.bgra = {0x30, 0x20, 0x10, alpha ? 255 : 0x80}};
++        schemes[i].fg = (Color){.bgra = {0x20, 0x90, 0xe0, 255}};
++        schemes[i].high = (Color){.bgra = {0xf0, 0x40, 0x60, 255}};
++        schemes[i].text = (Color){.color = UINT32_MAX};
++        schemes[i].text_press = (Color){.color = UINT32_MAX};
++        schemes[i].rounding = 5;
++        schemes[i].font_description =
++            pango_font_description_from_string("Sans 14");
++    }
++
++    struct drw ctx = {0}; /* no wl_shm: draw into plain memory */
++    struct drwbuf back = {0}, display = {0};
++    struct drwsurf ds = {.ctx = &ctx, .format = format,
++                         .back_buffer = &back, .display_buffer = &display};
++    drwsurf_resize(&ds, 240, 100, 1.0);
++    CHECK(back.cairo_surf &&
++              cairo_surface_status(back.cairo_surf) == CAIRO_STATUS_SUCCESS,
++          "%s: cairo surface created", fn);
++
++    struct layout *l = &layouts[0];
++    kbd_init_layout(l, 240, 100);
++    struct kbd kb = {.surf = &ds, .schemes = schemes, .layout = l,
++                     .w = 240, .h = 100, .scale = 1.0,
++                     .corner_radius = corner_radius, .show_highlight = true};
++    kbd_draw_layout(&kb);
++
++    struct key *k = l->keys;
++    while (k->type == Pad || k->type == EndRow)
++        k++;
++    uint32_t px = k->x + KBD_KEY_BORDER + 5, py = k->y + KBD_KEY_BORDER + 5;
++
++    uint32_t got = read_pixel(&ds, px, py);
++    CHECK(got == expected_pixel(format, schemes[k->scheme].fg),
++          "%s: key background is %08x, want %08x", fn, got,
++          expected_pixel(format, schemes[k->scheme].fg));
++
++    /* between two keys nothing is drawn, so the baseplate shows */
++    Color bg = schemes[0].bg;
++    bg.bgra[3] = 255;
++    got = read_pixel(&ds, k->x, k->y + k->h / 2);
++    CHECK(got == expected_pixel(format, bg),
++          "%s: baseplate between keys is %08x, want %08x", fn, got,
++          expected_pixel(format, bg));
++
++    got = read_pixel(&ds, 0, 0);
++    if (corner_radius > 0 && alpha)
++        CHECK(got == 0, "%s: rounded corner is transparent, got %08x", fn, got);
++    else
++        CHECK(got == expected_pixel(format, bg),
++              "%s: corner is baseplate, got %08x", fn, got);
++
++    /* the label must put at least one pixel of another colour on the key */
++    PangoFontMap *fm = pango_cairo_font_map_get_default();
++    PangoFontFamily **fam;
++    int nfam;
++    pango_font_map_list_families(fm, &fam, &nfam);
++    g_free(fam);
++    if (nfam > 0) {
++        uint32_t keyclr = expected_pixel(format, schemes[k->scheme].fg);
++        int differing = 0;
++        for (uint32_t y = k->y + KBD_KEY_BORDER + 1;
++             y < k->y + k->h - KBD_KEY_BORDER - 1; y++)
++            for (uint32_t x = k->x + KBD_KEY_BORDER + 1;
++                 x < k->x + k->w - KBD_KEY_BORDER - 1; x++)
++                differing += read_pixel(&ds, x, y) != keyclr;
++        CHECK(differing > 0, "%s: label %s drew nothing", fn, k->label);
++    } else {
++        fprintf(stderr, "no fonts installed, skipping the label check\n");
++    }
++
++    kbd_draw_key(&kb, k, Press);
++    got = read_pixel(&ds, px, py);
++    CHECK(got == expected_pixel(format, schemes[k->scheme].high),
++          "%s: highlight is %08x, want %08x", fn, got,
++          expected_pixel(format, schemes[k->scheme].high));
++    /* the neighbouring baseplate must not change */
++    got = read_pixel(&ds, k->x, k->y + k->h / 2);
++    CHECK(got == expected_pixel(format, bg),
++          "%s: baseplate after highlight is %08x", fn, got);
++}
++
++int
++main(void)
++{
++    test_geometry();
++    test_pick();
++    for (int f = DRW_FORMAT_RGB565; f <= DRW_FORMAT_ARGB8888; f++) {
++        test_render(f, 0);
++        test_render(f, 8);
++    }
++    if (failures)
++        fprintf(stderr, "%d failure(s)\n", failures);
++    return failures ? 1 : 0;
++}
+diff --git a/wvkbd.1.scd b/wvkbd.1.scd
+index 4a3a62b..520415f 100644
+--- a/wvkbd.1.scd
++++ b/wvkbd.1.scd
+@@ -87,10 +87,21 @@ can be patched to add new features.
+ *--bg-alpha* _int_
+ 	Set independent alpha value for the keyboard baseplate [0-255]. Allows
+ 	semi-opaque or opaque backing while maintaining translucent keycaps.
++	Ignored unless the buffer format is argb8888, see *--format*.
+ 
+ *--alpha* _int_
+-	Set alpha value (i.e. transparency) for all colors [0-255]
+-	
++	Set alpha value (i.e. transparency) for all colors [0-255]. Ignored
++	unless the buffer format is argb8888, see *--format*.
++
++*--format* _auto|rgb565|xrgb8888|argb8888_
++	Pixel format of the keyboard buffers. The default, _auto_, uses rgb565
++	if the compositor advertises it through wl_shm, else xrgb8888, else
++	argb8888. A format the compositor does not advertise is replaced by the
++	next one in that order. rgb565 and xrgb8888 have no alpha channel: all
++	colors are drawn opaque, *--alpha* and *--bg-alpha* have no effect, and
++	the baseplate has square corners. The key-press popup is always argb8888
++	because it is mostly transparent.
++
+ *--auto*
+ 	Automatically toggle keyboard :visibility based on focus. Requires a compositor
+ 	that implements the zwp_input_method_v2 protocol.
+-- 
+2.51.0
+

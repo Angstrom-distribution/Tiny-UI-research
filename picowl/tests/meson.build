@@ -170,3 +170,10 @@ test('lease-vkms', find_program('sh'),
   args: [files('lease-vkms.sh'), picowl_exe, pw_lease_client],
   suite: 'vkms',
   timeout: 120)
+
+# The two copies of the wvkbd patch series (OE recipe and meson wrap) must stay
+# the same apart from the Upstream-Status header.
+test('wvkbd-patches-sync', find_program('sh'),
+  args: [files('patches-sync.sh'),
+         meson.project_source_root() / 'oe/recipes-graphics/wvkbd/files',
+         meson.project_source_root() / 'subprojects/packagefiles/wvkbd'])
