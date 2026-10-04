@@ -10,6 +10,7 @@ Contents:
 |---|---|
 | `recipes-graphics/wlroots/wlroots_0.19.0.bb` | oe-core, meta-openembedded and meta-angstrom ship no wlroots recipe for these releases. Minimal build: DRM and libinput backends, pixman renderer only, no GLES2/Vulkan/GBM/Xwayland. |
 | `recipes-graphics/picowl/picowl_git.bb` | picowl itself, built from the `picowl` subfolder of the research repository. Installs `picowl.service` (not auto-enabled) and `/etc/picowl.ini` (conffile). |
+| `recipes-graphics/wvkbd/wvkbd-ipaq_git.bb` | The on-screen keyboard: upstream wvkbd plus a nine patch series, built with the `ipaq` layout. See the wvkbd-ipaq section below. |
 
 ## Adding the layer
 
@@ -123,3 +124,13 @@ If `picowl/LICENSE` changes, update the `LIC_FILES_CHKSUM` md5 in `picowl_git.bb
 * `recipes-graphics/wlroots/files/` holds four patches (`0001` pixman dmabuf mmap, `0002` pixman fast paths, `0003` DRM hardware rotation and copy-type, `0004` DRM lease: overlay planes and the grant fix). `wlroots_0.19.0.bb` has `FILESEXTRAPATHS:prepend := "${THISDIR}/files:"` and lists them as `file://` entries in `SRC_URI`. They are byte-identical to `subprojects/packagefiles/wlroots/` (used by the meson wrap `diff_files`); keep both in sync (`diff -r`).
 * `libinput` is back in the picowl `DEPENDS` (and `-DPW_HAVE_LIBINPUT` is set by meson): picowl uses the libinput calibration matrix directly for touch rotation. The comment above `RDEPENDS` in `picowl_git.bb` still says libinput is used inside wlroots only; that is stale (libseat and udev are wlroots-only).
 * The OE recipes were not built here (no bitbake); check the patches apply in `do_patch`.
+
+## wvkbd-ipaq (on-screen keyboard)
+
+* `recipes-graphics/wvkbd/wvkbd-ipaq_git.bb` fetches upstream wvkbd at the pinned commit `e14b53aff4fd1f471add6b21b3885c2cff945509` and applies the nine patches in `recipes-graphics/wvkbd/files/`. It builds with meson, `-Dkbd_layout=ipaq`, and installs the binary `wvkbd-ipaq` and its man page. Design: `doc/design/osk.md`, part 1.
+* The patches are copies of `subprojects/packagefiles/wvkbd/` (used by `subprojects/wvkbd.wrap`) with one extra line, `Upstream-Status: Pending`, directly before the `---` separator, because the OE patch-status QA rejects patches without it. `tests/patches-sync.sh` (meson test `wvkbd-patches-sync`) fails on any other difference. When the series changes, regenerate the packagefiles copies with `git format-patch` and insert the line again in the OE copies.
+* `PACKAGECONFIG[pango]` (off by default) switches the text backend from the built-in bitmap fonts to pango (`-Dtext=pango`, adds pango and fontconfig). cairo itself may pull in fontconfig depending on the cairo recipe, so check the image if the bitmap build is meant to be free of it.
+* Launch with `wvkbd-ipaq --hidden --auto`. picowl needs `[layer.wvkbd]` with `hold_action = none`, and the keyboard must use layer-shell keyboard interactivity `none` (the patched source requests it; to be confirmed on a board). picowl does not start or supervise the keyboard yet (design part 2), and `picowl_git.bb` does not recommend it yet.
+* `LICENSE = "GPL-3.0-only & MIT"` is the conservative reading of an unclear upstream statement; the recipe comment lists what is unsettled.
+* The wrap and `meson setup -Dosk_tests=enabled` build the patched tree for the picowl test run only (they need the network for the clone). Install with `meson install --skip-subprojects` so that nothing of it is installed.
+* Not verified: the recipe was not parsed or built with bitbake (no bitbake here), the fetch of the upstream repository was not run, and the patches were applied only in the earlier verification checkout, not by `do_patch`.
