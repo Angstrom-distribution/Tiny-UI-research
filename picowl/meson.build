@@ -15,21 +15,25 @@ add_project_arguments(
 
 cc = meson.get_compiler('c')
 
-wlroots = dependency('wlroots-0.19', fallback: ['wlroots', 'wlroots_dep'],
+wlroots = dependency('wlroots-0.19', fallback: ['wlroots', 'wlroots'],
   default_options: ['renderers=', 'allocators=', 'backends=drm,libinput',
     'xwayland=disabled', 'examples=false'])
 
-# Verify that wlroots has the picowl patches (checks for wlr_drm_connector_set_copy_type from patch 0003)
-if not cc.has_header_symbol('wlr/backend/drm.h', 'wlr_drm_connector_set_copy_type',
-    dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
-  error('wlroots-0.19 lacks the picowl patches (0001-pixman, 0002-memcpy, 0003-rotation). ' +
-        'Use --force-fallback-for=wlroots or install the patched build.')
-endif
-# Patch 0004 fixes a use-after-free in the lease grant, so leasing needs it.
-if not cc.has_header_symbol('wlr/backend/drm.h', 'WLR_DRM_LEASE_OVERLAY_PLANES',
-    dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
-  error('wlroots-0.19 lacks the picowl patch 0004-drm-lease-overlay-planes. ' +
-        'Use --force-fallback-for=wlroots or install the patched build.')
+# The subproject build applies the patches itself and meson cannot run compiler
+# checks against an internal dependency, so only probe an installed wlroots.
+if wlroots.type_name() != 'internal'
+  # Verify that wlroots has the picowl patches (checks for wlr_drm_connector_set_copy_type from patch 0003)
+  if not cc.has_header_symbol('wlr/backend/drm.h', 'wlr_drm_connector_set_copy_type',
+      dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
+    error('wlroots-0.19 lacks the picowl patches (0001-pixman, 0002-memcpy, 0003-rotation). ' +
+          'Use --force-fallback-for=wlroots or install the patched build.')
+  endif
+  # Patch 0004 fixes a use-after-free in the lease grant, so leasing needs it.
+  if not cc.has_header_symbol('wlr/backend/drm.h', 'WLR_DRM_LEASE_OVERLAY_PLANES',
+      dependencies: wlroots, prefix: '#define WLR_USE_UNSTABLE\n#include <wlr/backend/drm.h>')
+    error('wlroots-0.19 lacks the picowl patch 0004-drm-lease-overlay-planes. ' +
+          'Use --force-fallback-for=wlroots or install the patched build.')
+  endif
 endif
 wayland_server = dependency('wayland-server')
 wayland_protos = dependency('wayland-protocols', version: '>=1.32')
