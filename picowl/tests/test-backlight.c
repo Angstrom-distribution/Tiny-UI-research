@@ -414,6 +414,51 @@ int main(void)
 		}
 	}
 
+	/* Test: a level written by someone else (the panel slider) while ACTIVE
+	 * becomes the user level, so dimming and restoring use it. */
+	snprintf(root, sizeof(root), "%s/sys12", tmpdir);
+	snprintf(path, sizeof(path), "%s/class/backlight/ext", root);
+	mkdir_p(path);
+	write_attr(path, "type", "raw\n");
+	write_attr(path, "max_brightness", "100\n");
+	write_attr(path, "actual_brightness", "50\n");
+	write_attr(path, "brightness", "50\n");
+	/* Like the kernel: actual_brightness follows a write to brightness. */
+	char actual[512];
+	snprintf(actual, sizeof(actual), "%s/actual_brightness", path);
+	unlink(actual);
+	ASSERT_EQ(symlink("brightness", actual), 0, "actual_brightness follows brightness");
+	bl = pw_backlight_open(root, "ext");
+	ASSERT_NOT_NULL(bl, "open external-change device");
+	if (bl) {
+		ASSERT(!pw_backlight_adopt_external(bl), "nothing changed: no adoption");
+		ASSERT_EQ(pw_backlight_get_user(bl), 50, "user level unchanged");
+
+		write_attr(path, "brightness", "70\n");
+		ASSERT(pw_backlight_adopt_external(bl), "external write is adopted");
+		ASSERT_EQ(pw_backlight_get_user(bl), 70, "user level is the external one");
+		ASSERT(!pw_backlight_adopt_external(bl), "adopted once only");
+
+		/* picowl dims: its own write is not an external change, and the
+		 * restore goes to the adopted level. */
+		ASSERT_EQ(pw_backlight_set(bl, 21), 0, "dim write");
+		ASSERT(!pw_backlight_adopt_external(bl), "own write is not external");
+		ASSERT_EQ(pw_backlight_get_user(bl), 70, "dim keeps the adopted user level");
+
+		/* Level 0 is never the user's. */
+		write_attr(path, "brightness", "0\n");
+		int before = pw_backlight_get_user(bl);
+		ASSERT(!pw_backlight_adopt_external(bl), "level 0 is not adopted");
+		ASSERT_EQ(pw_backlight_get_user(bl), before, "user level kept at 0");
+
+		/* Above max is clamped. */
+		write_attr(path, "brightness", "250\n");
+		ASSERT(pw_backlight_adopt_external(bl), "above max adopted");
+		ASSERT_EQ(pw_backlight_get_user(bl), 100, "clamped to max");
+		pw_backlight_close(bl);
+	}
+	ASSERT(!pw_backlight_adopt_external(NULL), "adopt on NULL is false");
+
 	/* Test: read-only file handling (skip if running as root) */
 	if (getuid() != 0) {
 		snprintf(root, sizeof(root), "%s/sys10", tmpdir);

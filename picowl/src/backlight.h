@@ -33,6 +33,13 @@ int pw_backlight_get_max(const struct pw_backlight *bl);
 int pw_backlight_get_user(const struct pw_backlight *bl);
 void pw_backlight_set_user(struct pw_backlight *bl, int level);
 
+/* Another process (the panel's slider) wrote the brightness since picowl last
+ * did: if the device shows a level other than the one picowl left it at, that
+ * level becomes the user level and true is returned. Only valid while the
+ * panel is at the level picowl wrote for the ACTIVE state, i.e. not while
+ * dimmed: a dimmed level is not the user's. Level 0 is ignored. */
+bool pw_backlight_adopt_external(struct pw_backlight *bl);
+
 /* Scale: level = max(1, max * pct / 100) for pct in 1..100, integer maths,
  * never 0 and never above max. Pure; used for the LOW cap. */
 int pw_backlight_scale(int max, int pct);

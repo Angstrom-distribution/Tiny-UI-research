@@ -142,6 +142,10 @@ Devices with `max_brightness = 1` are on/off only (e.g., GPIO backlight, ASIC2 P
 
 Example: h5550 with GPIO backlight. h3870 and h3970 with PWM can have > 1, allowing dimming.
 
+### Changes by Another Process
+
+The user level is read from the device at startup, but another process may write `brightness` later (the panel's brightness slider does). While ACTIVE picowl does not look at the device. Just before it writes a reduced level (the dim, and the `[power.low]` cap when the profile changes) it compares the level the device shows with the one it left it at (read back after its last write), and a different non-zero level becomes the user level, logged as "backlight <name> changed externally". The dim is then a percentage of the new level, an undim or unblank restores it, and so does the clean exit. A level changed while DIMMED is not looked at: the touch that undims restores the user level first, and a slider write that follows is picked up at the next dim. Level 0 written by someone else is ignored, as at startup.
+
 ### Write Failures
 
 If a backlight write fails with EACCES, EPERM or ENOENT (permission denied, device gone), dimming is disabled and blanking continues. Logged as "backlight <name> not writable (...), dimming disabled". Any other error (EIO, EBUSY) is logged as "write failed, will retry" and the level is written again on the next input or transition, so the panel is not left dimmed; the user level is still restored at exit.
@@ -184,9 +188,9 @@ Things to verify on each board:
 ## Testing
 
 `meson test -C build` covers this feature with:
-- **`backlight`, `powersupply` and `dim` unit tests**, using fake sysfs trees and an injected clock;
+- **`backlight`, `powersupply` and `dim` unit tests**, using fake sysfs trees and an injected clock (`backlight` includes the adoption of a level written by another process);
 - **the config parser test**, including the `[power*]` keys, the legacy `[idle] timeout_ms` to `blank_after_s` mapping (rounded up, ignored when any `[power.*] blank_after_s` is set) and the `[core]` alias;
-- **`power-e2e`**: headless picowl against a fake sysfs tree (`PICOWL_SYSFS_ROOT`). On the AC profile it checks that the real event loop dims the backlight from 40 to 12 after 1 s. On the LOW profile it checks that the startup brightness cap is applied (40 to 25). With the test client (`--inhibit`, `--linger S`) it also checks that a visible inhibitor holds dimming and the timers restart on release, that an inhibitor behind the focused window does not count, and that `[power.low] inhibit = no` is honoured. `smoke` checks the inhibit log lines.
+- **`power-e2e`**: headless picowl against a fake sysfs tree (`PICOWL_SYSFS_ROOT`). On the AC profile it checks that the real event loop dims the backlight from 40 to 12 after 1 s. On the LOW profile it checks that the startup brightness cap is applied (40 to 25). With the test client (`--inhibit`, `--linger S`) it also checks that a visible inhibitor holds dimming and the timers restart on release, that an inhibitor behind the focused window does not count, and that `[power.low] inhibit = no` is honoured. A level written by another process while ACTIVE is dimmed as a percentage of that level and restored at exit. `smoke` checks the inhibit log lines.
 
 The `dim` unit test covers `pw_dim_set_inhibited()` in every state, and the unblank, hold and release sequence of a lease.
 

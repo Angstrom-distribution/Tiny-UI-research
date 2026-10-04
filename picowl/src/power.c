@@ -101,6 +101,21 @@ static void apply_level(struct pw_power *p)
 	write_level(p, level);
 }
 
+/* Something else (the panel's brightness slider) may have written the
+ * backlight while ACTIVE. Taking its level as the user level before picowl
+ * writes a reduced one is what makes the change survive a dim and undim,
+ * which would otherwise restore the level read at startup. Only call it while
+ * the backlight is still at the ACTIVE level: a dimmed level is not the user's. */
+static void adopt_external(struct pw_power *p)
+{
+	if (!bl_usable(p))
+		return;
+	int old = pw_backlight_get_user(p->bl);
+	if (pw_backlight_adopt_external(p->bl))
+		pw_log(WLR_INFO, "backlight %s changed externally, user level %d -> %d",
+			pw_backlight_name(p->bl), old, pw_backlight_get_user(p->bl));
+}
+
 static void rearm(struct pw_power *p)
 {
 	if (!p->dim_timer)
@@ -131,6 +146,10 @@ static void run_actions(struct pw_power *p, unsigned act)
 			return;
 		}
 	}
+	/* The state is DIMMED already, but the backlight is still at the ACTIVE
+	 * level until apply_level writes. */
+	if (act & PW_DIM_ACT_DIM)
+		adopt_external(p);
 	if (act & (PW_DIM_ACT_DIM | PW_DIM_ACT_UNDIM | PW_DIM_ACT_UNBLANK))
 		apply_level(p);
 }
@@ -179,6 +198,8 @@ static void profile_changed(struct pw_power *p, enum pw_power_profile np)
 		return;
 	pw_log(WLR_INFO, "power profile %d -> %d", p->profile, np);
 	p->profile = np;
+	if (p->dim.state == PW_DIM_ACTIVE)
+		adopt_external(p); /* the LOW cap is applied to the user level below */
 	apply_inhibit(p); /* the new profile may honour inhibitors or not */
 	unsigned act = pw_dim_set_timeouts(&p->dim, dim_ms_for(p, np),
 		blank_ms_for(p, np), now_ms());

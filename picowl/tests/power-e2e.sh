@@ -94,6 +94,20 @@ kill -TERM "$PID"; wait "$PID"; PID=
 [ "$(cat "$bl/brightness")" = 40 ] || fail "user level lost after crash: $(cat "$bl/brightness"), expected 40"
 echo "power-e2e: user level 40 survives a crash while dimmed"
 
+# 3b. A level set by another process (the panel slider) while ACTIVE becomes
+# the user level: the dim is 30 % of it and the clean exit restores it.
+mktree "$DIR/sys-ext" ac
+bl=$DIR/sys-ext/class/backlight/test-bl
+rm "$bl/actual_brightness"; ln -s brightness "$bl/actual_brightness"
+PICOWL_SYSFS_ROOT=$DIR/sys-ext "$PICOWL" -c "$DIR/picowl.ini" -d 2 >"$DIR/picowl.log" 2>&1 &
+PID=$!
+sleep 0.3
+echo 60 >"$bl/brightness"
+wait_level "$bl/brightness" 18 30
+kill -TERM "$PID"; wait "$PID"; PID=
+[ "$(cat "$bl/brightness")" = 60 ] || fail "external level lost: $(cat "$bl/brightness"), expected 60"
+echo "power-e2e: external level 60 dimmed to 18 and restored"
+
 # Idle inhibitor cases need the test client.
 if [ -z "$CLIENT" ]; then
 	echo "power-e2e: no test client, inhibitor cases skipped"

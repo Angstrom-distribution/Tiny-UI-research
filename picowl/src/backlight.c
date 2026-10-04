@@ -28,6 +28,7 @@ struct pw_backlight {
 	char name[256];
 	int max;
 	int user;
+	int last; /* level the device reported after the last write (or at open) */
 	const char *root;
 	int max_brightness_written; /* for detecting read-only files */
 };
@@ -62,6 +63,14 @@ static int read_sysfs_int(const char *root, const char *dev, const char *attr)
 	if (val >= 0 && val <= INT_MAX)
 		return (int)val;
 	return -1;
+}
+
+/* Level the device shows now: actual_brightness, else brightness. -1 if
+ * neither is readable, 0 is a valid answer. */
+static int read_level(const char *root, const char *dev)
+{
+	int v = read_sysfs_int(root, dev, "actual_brightness");
+	return v >= 0 ? v : read_sysfs_int(root, dev, "brightness");
 }
 
 /* While the panel sits at a level picowl wrote that differs from the user
@@ -247,6 +256,7 @@ struct pw_backlight *pw_backlight_open(const char *root, const char *name)
 	snprintf(bl->name, sizeof(bl->name), "%s", dev_name);
 	bl->max = max;
 	bl->user = user;
+	bl->last = user;
 	bl->root = root;
 	bl->max_brightness_written = 0;
 
@@ -350,8 +360,27 @@ int pw_backlight_set(struct pw_backlight *bl, int level)
 		return -1;
 	}
 
+	/* The driver may round; compare later reads with what it reports. */
+	int now = read_level(bl->root, bl->name);
+	bl->last = now >= 0 ? now : level;
+
 	state_save(bl, level);
 	return 0;
+}
+
+bool pw_backlight_adopt_external(struct pw_backlight *bl)
+{
+	if (!bl)
+		return false;
+	int now = read_level(bl->root, bl->name);
+	/* 0 is never taken as a user level, as at open. */
+	if (now <= 0 || now == bl->last)
+		return false;
+	if (now > bl->max)
+		now = bl->max;
+	bl->user = now;
+	bl->last = now;
+	return true;
 }
 
 void pw_backlight_close(struct pw_backlight *bl)
