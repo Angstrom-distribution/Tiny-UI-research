@@ -193,6 +193,15 @@ code:155 = rotate
 # 25 percent. alt+Tab moves the keyboard between the two while one has it.
 # stack = mediaplayer, havoc
 #
+# While both are mapped and split top and bottom (portrait), a keyboard in one
+# of these layer-shell namespaces (bottom anchored, with an exclusive zone)
+# does not shrink them: they keep their size and get no configure, and the
+# stack moves up by the height of the keyboard, so the lower window ends where
+# the keyboard starts and the upper one slides off the top. Everything else
+# (one app alone, other apps, a side by side split, panels) is resized as usual.
+# Comma separated, default wvkbd; an empty value turns the panning off.
+# pan = wvkbd
+#
 # [app.mediaplayer]
 # aspect = 4:3
 

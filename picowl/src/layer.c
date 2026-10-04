@@ -96,8 +96,11 @@ static void restore_focus(struct pw_layer_surface *ls)
 	}
 }
 
+/* pan, when not NULL, collects the zone that [layout] pan surfaces take at the
+ * bottom: measured as what wlroots takes off the usable area, so margins and
+ * the anchor rules of the protocol are the library's, not a second copy. */
 static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
-		struct wlr_box *usable, bool exclusive, bool hide_top)
+		struct wlr_box *usable, bool exclusive, bool hide_top, int *pan)
 {
 	for (int i = 0; i < 4; i++) {
 		struct pw_layer_surface *ls;
@@ -113,7 +116,7 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 			if (ls->unmapping) {
 				continue;
 			}
-			if (exclusive != (s->current.exclusive_zone > 0)) {
+			if (exclusive !=(s->current.exclusive_zone > 0)) {
 				continue;
 			}
 			if (hide_top && layer_order[i] == ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
@@ -123,7 +126,14 @@ static void arrange_layers(struct pw_output *output, const struct wlr_box *full,
 				wlr_scene_layer_surface_v1_configure(ls->scene_layer, full, &scratch);
 				continue;
 			}
+			struct wlr_box before = *usable;
 			wlr_scene_layer_surface_v1_configure(ls->scene_layer, full, usable);
+			if (pan && s->surface->mapped
+					&& (s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM)
+					&& !(s->current.anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP)
+					&& usable->y == before.y && usable->height < before.height
+					&& pw_config_pan_match(output->server->config, s->namespace))
+				*pan += before.height - usable->height;
 		}
 	}
 }
@@ -135,8 +145,11 @@ void pw_layer_arrange(struct pw_output *output)
 	wlr_output_layout_get_box(server->output_layout, output->wlr_output, &full);
 
 	struct wlr_box usable = full;
-	arrange_layers(output, &full, &usable, true, output->server->panel_hidden);
-	arrange_layers(output, &full, &usable, false, output->server->panel_hidden);
+	int pan = 0;
+	arrange_layers(output, &full, &usable, true, output->server->panel_hidden, &pan);
+	arrange_layers(output, &full, &usable, false, output->server->panel_hidden, NULL);
+	struct wlr_box tile = usable;
+	tile.height += pan;
 
 	bool changed = full.x != output->full_area.x
 		|| full.y != output->full_area.y
@@ -145,8 +158,12 @@ void pw_layer_arrange(struct pw_output *output)
 		|| usable.x != output->usable_area.x
 		|| usable.y != output->usable_area.y
 		|| usable.width != output->usable_area.width
-		|| usable.height != output->usable_area.height;
+		|| usable.height != output->usable_area.height
+		|| pan != output->pan_zone
+		|| tile.height != output->tile_area.height;
 	output->usable_area = usable;
+	output->tile_area = tile;
+	output->pan_zone = pan;
 	output->full_area = full;
 
 	focus_exclusive(server);

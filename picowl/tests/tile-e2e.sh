@@ -2,8 +2,9 @@
 # Headless end-to-end test of the two-window tiled layout: the configure sizes
 # picowl sends to two toplevels, in a landscape (1280x720) and in a portrait
 # (the same output turned by 90 degrees) run, and with a keyboard stand-in (a
-# bottom anchored layer surface with an exclusive zone) which shrinks the pair
-# while it is shown.
+# bottom anchored layer surface with an exclusive zone) which pans the pair
+# instead of resizing it, or, with [layout] pan empty or with the pair side by
+# side, shrinks it.
 # usage: tile-e2e.sh PICOWL PW_TILE_CLIENT
 PICOWL=$1
 CLIENT=$2
@@ -64,6 +65,15 @@ stack = tile-a, tile-b
 EOF
 run portrait "$DIR/portrait.ini"
 
+cat >"$DIR/pan.ini" <<EOF
+[output]
+* = 90
+
+[layout]
+stack = tile-a, tile-b
+EOF
+run pan "$DIR/pan.ini"
+
 cat >"$DIR/nopan.ini" <<EOF
 [output]
 * = 90
@@ -73,6 +83,12 @@ stack = tile-a, tile-b
 pan =
 EOF
 run nopan "$DIR/nopan.ini"
+
+cat >"$DIR/pan-landscape.ini" <<EOF
+[layout]
+stack = tile-a, tile-b
+EOF
+run pan-landscape "$DIR/pan-landscape.ini"
 
 rm -rf "$DIR"
 echo "tile-e2e: ok"

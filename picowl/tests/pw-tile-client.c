@@ -2,13 +2,20 @@
  *   pw-tile-client landscape   output 1280x720, [layout] stack = tile-a, tile-b,
  *                              [app.tile-a] aspect = 1:2
  *   pw-tile-client portrait    the same output turned to 720x1280, no aspect
- *   pw-tile-client nopan       the portrait run with a bottom anchored layer
- *                              surface (namespace wvkbd, exclusive zone 100)
- *                              standing in for the keyboard and [layout] pan
- *                              empty: it shrinks the usable area, so the pair
- *                              is laid out again, and hiding it restores them
- * One connection, two toplevels (app_ids tile-a and tile-b), and the configure
- * sizes the compositor sends are checked after every step. */
+ *   pw-tile-client pan         portrait, with a bottom anchored layer surface
+ *                              (namespace wvkbd, exclusive zone 100) standing in
+ *                              for the keyboard: the tiled pair is panned, not
+ *                              resized, other windows shrink
+ *   pw-tile-client nopan       the same with [layout] pan empty: all shrink
+ *   pw-tile-client pan-landscape  the keyboard on the 1280x720 output: the side
+ *                              by side pair shrinks
+ *   pw-tile-client pixels DIR  portrait pair drawn red (tile-a) and blue
+ *                              (tile-b), keyboard green; stops at each step for
+ *                              tests/pan-e2e.sh, which takes a screenshot and
+ *                              answers by creating a file in DIR
+ * One connection, toplevels (app_ids tile-a and tile-b, and other for a window
+ * outside the stack), and the configure sizes the compositor sends are checked
+ * after every step. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdarg.h>
@@ -31,6 +38,7 @@ static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct zwlr_layer_shell_v1 *layer_shell;
+static bool paint_colours; /* pixels mode: solid colours instead of grey */
 
 struct win {
 	const char *name;
@@ -96,7 +104,15 @@ static void commit_buffer(struct win *w)
 	void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (map == MAP_FAILED)
 		fail("mmap");
-	memset(map, w->name[strlen(w->name) - 1] == 'a' ? 0x40 : 0xc0, size);
+	if (paint_colours) {
+		/* XRGB8888: red for tile-a, blue for tile-b, grey for the rest */
+		uint32_t px = !strcmp(w->name, "tile-a") ? 0xffff0000 :
+			!strcmp(w->name, "tile-b") ? 0xff0000ff : 0xff808080;
+		for (size_t i = 0; i < (size_t)bw * bh; i++)
+			((uint32_t *)map)[i] = px;
+	} else {
+		memset(map, w->name[strlen(w->name) - 1] == 'a' ? 0x40 : 0xc0, size);
+	}
 	munmap(map, size);
 	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
 	struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, bw, bh, bw * 4,
@@ -304,6 +320,30 @@ static void kbd_hide(void)
 	wl_display_roundtrip(dpy);
 }
 
+/* Let whatever the compositor wants to say arrive. */
+static void settle(int ms)
+{
+	int64_t end = now_ms() + ms;
+
+	while (now_ms() < end)
+		pump(50);
+}
+
+/* w was configured width x height at its configure number n, and nothing came
+ * since: a pan must neither resize a window nor send it any configure. */
+static void expect_untouched(const char *step, struct win *w, int width, int height, int n)
+{
+	settle(300);
+	if (w->n_configures != n)
+		fail("%s: %s got %d new configure(s), now %dx%d", step, w->name,
+			w->n_configures - n, w->cfg_w, w->cfg_h);
+	if (w->cfg_w != width || w->cfg_h != height)
+		fail("%s: %s is %dx%d, expected %dx%d", step, w->name, w->cfg_w, w->cfg_h,
+			width, height);
+	printf("pw-tile-client: %s: %s untouched at %dx%d\n", step, w->name, width, height);
+	fflush(stdout);
+}
+
 static void expect_active(const char *step, struct win *w, bool active)
 {
 	if (w->activated != active)
@@ -380,6 +420,61 @@ static void portrait(void)
 /* The keyboard takes 100 rows at the bottom of the 720x1280 portrait output. */
 #define KBD_ZONE 100
 
+static void pan(void)
+{
+	struct win a, b, o;
+
+	open_win(&b, "tile-b");
+	expect_size("alone", &b, 720, 1280);
+	open_win(&a, "tile-a");
+	expect_size("pair", &a, 720, 640);
+	expect_size("pair", &b, 720, 640);
+	int na = a.n_configures, nb = b.n_configures;
+
+	/* the stack is moved, neither window hears about it */
+	kbd_show(KBD_ZONE);
+	expect_untouched("keyboard shown", &a, 720, 640, na);
+	expect_untouched("keyboard shown", &b, 720, 640, nb);
+	kbd_hide();
+	expect_untouched("keyboard hidden", &a, 720, 640, na);
+	expect_untouched("keyboard hidden", &b, 720, 640, nb);
+
+	/* the pair breaks up while the keyboard is up: the pan ends and the
+	 * survivor is maximized into the area the keyboard leaves */
+	kbd_show(KBD_ZONE);
+	expect_untouched("shown again", &a, 720, 640, na);
+	close_win(&a);
+	expect_size("partner closed", &b, 720, 1280 - KBD_ZONE);
+	open_win(&a, "tile-a");
+	expect_size("partner back", &a, 720, 640);
+	expect_size("partner back", &b, 720, 640);
+	kbd_hide();
+	na = a.n_configures;
+	nb = b.n_configures;
+	expect_untouched("hidden again", &a, 720, 640, na);
+	expect_untouched("hidden again", &b, 720, 640, nb);
+
+	/* a window outside the stack is shrunk as always, the pair stays put */
+	open_win(&o, "other");
+	expect_size("other alone", &o, 720, 1280);
+	settle(300);
+	na = a.n_configures;
+	nb = b.n_configures;
+	kbd_show(KBD_ZONE);
+	expect_size("other shrunk", &o, 720, 1280 - KBD_ZONE);
+	expect_untouched("other shown", &a, 720, 640, na);
+	expect_untouched("other shown", &b, 720, 640, nb);
+	kbd_hide();
+	expect_size("other restored", &o, 720, 1280);
+	expect_untouched("other hidden", &a, 720, 640, na);
+	expect_untouched("other hidden", &b, 720, 640, nb);
+
+	close_win(&o);
+	close_win(&a);
+	close_win(&b);
+	wl_display_roundtrip(dpy);
+}
+
 /* [layout] pan empty: the keyboard shrinks the usable area for everyone. */
 static void nopan(void)
 {
@@ -400,15 +495,77 @@ static void nopan(void)
 	wl_display_roundtrip(dpy);
 }
 
+/* A side by side pair has no lower window to lift, so it shrinks. */
+static void pan_landscape(void)
+{
+	struct win a, b;
+
+	open_win(&b, "tile-b");
+	open_win(&a, "tile-a");
+	expect_size("pair", &a, 640, 720);
+	expect_size("pair", &b, 640, 720);
+	kbd_show(KBD_ZONE);
+	expect_size("shrunk", &a, 640, 720 - KBD_ZONE);
+	expect_size("shrunk", &b, 640, 720 - KBD_ZONE);
+	kbd_hide();
+	expect_size("restored", &a, 640, 720);
+	expect_size("restored", &b, 640, 720);
+	close_win(&a);
+	close_win(&b);
+	wl_display_roundtrip(dpy);
+}
+
+/* Stop until the script has looked at the screen: name.ready appears, the
+ * script answers with name.go. */
+static void sync_point(const char *dir, const char *name)
+{
+	char path[512];
+	int64_t end = now_ms() + 20000;
+
+	settle(400);
+	snprintf(path, sizeof(path), "%s/%s.ready", dir, name);
+	FILE *f = fopen(path, "w");
+	if (!f)
+		fail("cannot create %s", path);
+	fclose(f);
+	snprintf(path, sizeof(path), "%s/%s.go", dir, name);
+	while (access(path, F_OK) != 0) {
+		if (now_ms() > end)
+			fail("no %s.go from the script", name);
+		pump(50);
+	}
+}
+
+static void pixels(const char *dir)
+{
+	struct win a, b;
+
+	paint_colours = true;
+	open_win(&b, "tile-b");
+	open_win(&a, "tile-a");
+	expect_size("pair", &a, 720, 640);
+	expect_size("pair", &b, 720, 640);
+	sync_point(dir, "before");
+	kbd_show(KBD_ZONE);
+	sync_point(dir, "shown");
+	kbd_hide();
+	sync_point(dir, "hidden");
+	close_win(&a);
+	close_win(&b);
+	wl_display_roundtrip(dpy);
+}
+
 int main(int argc, char **argv)
 {
-	static const char *const modes[] = { "landscape", "portrait", "nopan" };
+	static const char *const modes[] = { "landscape", "portrait", "pan", "nopan",
+		"pan-landscape", "pixels" };
 	bool known = false;
 
 	for (unsigned i = 0; argc >= 2 && i < sizeof(modes) / sizeof(modes[0]); i++)
 		known |= !strcmp(argv[1], modes[i]);
-	if (!known || argc != 2) {
-		fprintf(stderr, "usage: pw-tile-client landscape|portrait|nopan\n");
+	if (!known || argc != (!strcmp(argv[1], "pixels") ? 3 : 2)) {
+		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|nopan|"
+			"pan-landscape|pixels DIR\n");
 		return 2;
 	}
 	alarm(30);
@@ -425,8 +582,14 @@ int main(int argc, char **argv)
 		landscape();
 	else if (!strcmp(argv[1], "portrait"))
 		portrait();
-	else
+	else if (!strcmp(argv[1], "pan"))
+		pan();
+	else if (!strcmp(argv[1], "nopan"))
 		nopan();
+	else if (!strcmp(argv[1], "pan-landscape"))
+		pan_landscape();
+	else
+		pixels(argv[2]);
 	printf("pw-tile-client: ok %s\n", argv[1]);
 	return 0;
 }

@@ -137,6 +137,10 @@ test('tile-e2e', find_program('sh'),
   args: [files('tile-e2e.sh'), picowl_exe, pw_tile_client],
   timeout: 60)
 
+test('pan-e2e', find_program('sh'),
+  args: [files('pan-e2e.sh'), picowl_exe, pw_tile_client],
+  timeout: 60)
+
 test('smoke', find_program('sh'),
   args: [files('smoke.sh'), picowl_exe, pw_test_client, pw_capture_client, pw_im_client],
   timeout: 30)
@@ -180,6 +184,8 @@ test('implace', executable('test-implace', 'test-implace.c', '../src/implace.c',
   include_directories: test_inc))
 test('tile', executable('test-tile', 'test-tile.c', '../src/tile.c',
   include_directories: test_inc))
+test('scenehit', executable('test-scenehit', 'test-scenehit.c', '../src/tile.c',
+  dependencies: [wlroots, wayland_server], include_directories: test_inc))
 test('rotate', executable('test-rotate', 'test-rotate.c', '../src/rotate.c',
   dependencies: [wayland_server], include_directories: test_inc))
 test('pointercal', executable('test-pointercal', 'test-pointercal.c', '../src/pointercal.c',

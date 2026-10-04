@@ -102,9 +102,16 @@ static bool view_hint_changed(struct pw_view *view)
 
 /* Both stacked apps mapped: fill first and second with them and slots[] with
  * their boxes. Several mapped views with one app_id: the most recently
- * focused (list front) is the one which tiles. */
+ * focused (list front) is the one which tiles.
+ *
+ * While a [layout] pan surface (the keyboard) is shown and the stack is split
+ * top and bottom, the slots are those of the area without the surface and
+ * *pan is how far the stack moves up (see pw_tile_pan), so the windows keep
+ * their size. Otherwise the slots lie in the usable area, which has every
+ * exclusive zone taken off, and *pan is 0. pan may be NULL when the caller
+ * only asks whether the pair tiles. */
 static bool tile_active(struct pw_server *server, struct pw_view **first,
-		struct pw_view **second, struct wlr_box slots[2])
+		struct pw_view **second, struct wlr_box slots[2], int *pan)
 {
 	struct pw_output *output = first_output(server);
 	struct pw_view *v, *pair[2] = { NULL, NULL };
@@ -123,6 +130,12 @@ static bool tile_active(struct pw_server *server, struct pw_view **first,
 		return false;
 
 	pw_output_usable_area(output, &area);
+	/* A side by side split cannot be panned: both windows span the height, so
+	 * the top of each would be cut off. It shrinks like any other window. */
+	bool panned = output->pan_zone > 0 &&
+		output->tile_area.height >= output->tile_area.width;
+	if (panned)
+		area = output->tile_area;
 	usable = (struct pw_tile_box){ area.x, area.y, area.width, area.height };
 	for (int i = 0; i < 2; i++) {
 		const struct pw_app_rule *rule = pw_config_app(server->config,
@@ -135,6 +148,9 @@ static bool tile_active(struct pw_server *server, struct pw_view **first,
 	}
 	if (!pw_tile_layout(&usable, hints, out))
 		return false;
+	if (pan)
+		*pan = panned ? pw_tile_pan(output->pan_zone, output->full_area.height,
+			out[1].y - output->full_area.y) : 0;
 
 	for (int i = 0; i < 2; i++)
 		slots[i] = (struct wlr_box){ out[i].x, out[i].y, out[i].w, out[i].h };
@@ -153,6 +169,7 @@ static void view_arrange(struct pw_view *view)
 	struct pw_view *first, *second;
 	struct wlr_box box, slots[2];
 	bool tiled = false;
+	int pan = 0;
 
 	if (!output || !tl->base->initialized)
 		return;
@@ -161,7 +178,7 @@ static void view_arrange(struct pw_view *view)
 	if (box.width <= 0 || box.height <= 0)
 		return;
 
-	if (tile_active(view->server, &first, &second, slots)) {
+	if (tile_active(view->server, &first, &second, slots, &pan)) {
 		if (view == first) {
 			box = slots[0];
 			tiled = true;
@@ -171,13 +188,24 @@ static void view_arrange(struct pw_view *view)
 		}
 	}
 
-	wlr_scene_node_set_position(&view->scene_tree->node, box.x, box.y);
+	/* Only the scene node moves for a pan: the client is told nothing, and
+	 * hit testing and popup placement read the node position. */
+	wlr_scene_node_set_position(&view->scene_tree->node, box.x,
+		tiled ? box.y - pan : box.y);
 
-	/* The setters skip redundant configures, so this is cheap to repeat. */
-	wlr_xdg_toplevel_set_maximized(tl, true);
+	/* Every wlroots setter schedules a configure even when the value is the
+	 * one already scheduled, and this runs for every window on every change
+	 * of the layout: a client whose slot did not change (a window under a
+	 * panned stack) must not hear anything, a video player would restart its
+	 * scaler on each one. */
 	/* A fullscreen request cannot be honoured inside a slot. */
-	wlr_xdg_toplevel_set_fullscreen(tl, !tiled && tl->requested.fullscreen);
-	wlr_xdg_toplevel_set_size(tl, box.width, box.height);
+	bool fullscreen = !tiled && tl->requested.fullscreen;
+	if (!tl->scheduled.maximized)
+		wlr_xdg_toplevel_set_maximized(tl, true);
+	if (tl->scheduled.fullscreen != fullscreen)
+		wlr_xdg_toplevel_set_fullscreen(tl, fullscreen);
+	if (tl->scheduled.width != box.width || tl->scheduled.height != box.height)
+		wlr_xdg_toplevel_set_size(tl, box.width, box.height);
 }
 
 void pw_view_arrange_all(struct pw_server *server)
@@ -237,7 +265,7 @@ static void view_focus(struct pw_view *view, bool restack)
 
 		/* A tiled window brings its partner along, just below it, or a
 		 * maximized third app raised in between would hide one of them. */
-		if (tile_active(server, &first, &second, slots)) {
+		if (tile_active(server, &first, &second, slots, NULL)) {
 			if (view == first)
 				partner = second;
 			else if (view == second)
@@ -274,7 +302,7 @@ void pw_view_cycle(struct pw_server *server)
 
 	/* With both tiled apps on screen, alt+Tab moves the keyboard between
 	 * them; both stay where they are. */
-	if (server->focused_view && tile_active(server, &first, &second, slots) &&
+	if (server->focused_view && tile_active(server, &first, &second, slots, NULL) &&
 			(server->focused_view == first || server->focused_view == second)) {
 		view_focus(server->focused_view == first ? second : first, false);
 		return;
