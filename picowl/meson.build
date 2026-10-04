@@ -53,7 +53,7 @@ wayland_scanner = find_program(
 wl_proto_dir = wayland_protos.get_variable(pkgconfig: 'pkgdatadir')
 
 # Server protocol headers required by the wlroots 0.19 public headers we use
-# (xdg-shell, layer-shell, output-power-management). The other interfaces
+# (xdg-shell, layer-shell, output-power-management, content-type). The other interfaces
 # (virtual-keyboard, foreign-toplevel, idle-notify, presentation-time,
 # viewporter, single-pixel-buffer, xdg-activation, xdg-decoration) are
 # implemented entirely inside libwlroots and need no headers here.
@@ -62,6 +62,7 @@ protocol_xmls = {
   'wlr-layer-shell-unstable-v1': files('protocols/wlr-layer-shell-unstable-v1.xml'),
   'wlr-output-power-management-unstable-v1': files('protocols/wlr-output-power-management-unstable-v1.xml'),
   'picowl-buffer-v1': files('protocols/picowl-buffer-v1.xml'),
+  'content-type-v1': wl_proto_dir / 'staging' / 'content-type' / 'content-type-v1.xml',
 }
 # wlr-screencopy-unstable-v1 is not listed: wlr_screencopy_v1.h includes no
 # generated header and libwlroots provides the interface.

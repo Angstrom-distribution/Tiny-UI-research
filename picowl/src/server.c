@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_screencopy_v1.h>
@@ -254,6 +255,11 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 	wlr_presentation_create(server->display, server->backend, 2);
 	wlr_viewporter_create(server->display);
 	wlr_single_pixel_buffer_manager_v1_create(server->display);
+	/* Advertised so clients stop falling back to guessing; picowl has no
+	 * content-dependent policy yet, so the hint is only logged (view.c). */
+	server->content_type_mgr = wlr_content_type_manager_v1_create(server->display, 1);
+	if (!server->content_type_mgr)
+		pw_log(WLR_ERROR, "cannot create the content-type manager");
 
 	/* Opt-in: any client that can connect could otherwise read the screen. */
 	if (server->config->capture_enable) {

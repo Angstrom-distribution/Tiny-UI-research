@@ -42,6 +42,7 @@
 struct pw_server;
 struct pw_cursor;
 struct wlr_linux_dmabuf_v1;
+struct wlr_content_type_manager_v1;
 struct wlr_swapchain;
 
 /* ---- configuration ---------------------------------------------------- */
@@ -306,6 +307,7 @@ struct pw_server {
 	struct wlr_foreign_toplevel_manager_v1 *foreign_toplevel_mgr;
 	struct wlr_idle_notifier_v1 *idle_notifier;
 	struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
+	struct wlr_content_type_manager_v1 *content_type_mgr; /* hint is only logged */
 	bool idle_inhibited;       /* last visibility result pushed by idle.c */
 	struct wlr_output_power_manager_v1 *output_power_mgr;
 	struct wl_event_source *idle_timer;

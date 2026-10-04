@@ -12,6 +12,7 @@
 
 #include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_content_type_v1.h>
 
 #include "picowl.h"
 
@@ -248,6 +249,17 @@ static void view_map(struct wl_listener *l, void *data)
 	view_create_handles(view);
 	view_arrange(view);
 	pw_view_focus(view);
+
+	/* The hint is double-buffered state, so it is current once the surface
+	 * maps; later changes are not tracked until something acts on them. */
+	if (view->server->content_type_mgr) {
+		enum wp_content_type_v1_type ct = wlr_surface_get_content_type_v1(
+			view->server->content_type_mgr, view->xdg_toplevel->base->surface);
+		if (ct != WP_CONTENT_TYPE_V1_TYPE_NONE)
+			pw_log(WLR_DEBUG, "view '%s': content type hint %d",
+				view->xdg_toplevel->app_id ? view->xdg_toplevel->app_id : "",
+				(int)ct);
+	}
 }
 
 static void view_unmap(struct wl_listener *l, void *data)

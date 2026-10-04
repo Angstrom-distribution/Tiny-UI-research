@@ -58,6 +58,9 @@ grep -q 'idle inhibit off' "$DIR/picowl.log" || fail "no 'idle inhibit off' in p
 grep -q 'lease: no DRM backend, disabled' "$DIR/picowl.log" || fail "no 'lease: no DRM backend' in picowl log"
 OUT=$("$CLIENT" --expect-no-global wp_drm_lease_device_v1 2>&1) || fail "lease global advertised: $OUT"
 
+# Protocols that need no configuration are always advertised.
+OUT=$("$CLIENT" --expect-global wp_content_type_manager_v1 2>&1) || fail "content-type global missing: $OUT"
+
 # [capture] is off by default: no screencopy global.
 OUT=$("$CAPTURE" 2>&1) || fail "capture client failed: $OUT"
 echo "$OUT"

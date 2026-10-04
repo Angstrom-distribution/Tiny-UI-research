@@ -4,6 +4,7 @@
  *   --app-id ID           xdg_toplevel app_id (default picowl-test-client)
  *   --bind-version N      bind picowl_buffer_manager_v1 at min(advertised, N)
  *                         (default and maximum 2; 1 behaves as a v1 client)
+ *   --expect-global NAME  fail unless the registry advertises NAME (repeatable)
  *   --probe               print what the picowl-buffer global announced and exit
  *   --readback            with --zerocopy: time 32-bit reads of buffer 0 */
 #define _GNU_SOURCE
@@ -45,6 +46,10 @@ static uint32_t pb_version, pb_bind_max = 2;
 static struct zwp_idle_inhibit_manager_v1 *inhibit_mgr;
 static const char *no_global;      /* --expect-no-global NAME */
 static bool saw_no_global;         /* ... and the registry advertised it */
+#define MAX_EXPECT 8
+static const char *expect[MAX_EXPECT]; /* --expect-global NAME */
+static bool expect_seen[MAX_EXPECT];
+static int n_expect;
 
 static void shm_format(void *d, struct wl_shm *s, uint32_t f)
 {
@@ -89,6 +94,9 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	(void)d;
 	if (no_global && !strcmp(iface, no_global))
 		saw_no_global = true;
+	for (int i = 0; i < n_expect; i++)
+		if (!strcmp(iface, expect[i]))
+			expect_seen[i] = true;
 	if (!strcmp(iface, wl_compositor_interface.name))
 		compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
 	else if (!strcmp(iface, zwp_linux_dmabuf_v1_interface.name) && ver >= 3)
@@ -450,6 +458,8 @@ int main(int argc, char **argv)
 			linger = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--expect-no-global") && i + 1 < argc)
 			no_global = argv[++i];
+		else if (!strcmp(argv[i], "--expect-global") && i + 1 < argc && n_expect < MAX_EXPECT)
+			expect[n_expect++] = argv[++i];
 	}
 
 	alarm(5);
@@ -462,6 +472,16 @@ int main(int argc, char **argv)
 	wl_registry_add_listener(reg, &reg_listener, NULL);
 	wl_display_roundtrip(dpy);
 	wl_display_roundtrip(dpy); /* shm formats */
+	if (n_expect) {
+		for (int i = 0; i < n_expect; i++) {
+			if (!expect_seen[i]) {
+				fprintf(stderr, "picowl-test-client: missing global %s\n", expect[i]);
+				return 1;
+			}
+			printf("picowl-test-client: global %s\n", expect[i]);
+		}
+		return 0;
+	}
 	if (no_global) {
 		if (saw_no_global) {
 			fprintf(stderr, "picowl-test-client: unexpected global %s\n", no_global);
