@@ -289,6 +289,15 @@ fail:
 
 int pw_server_run(struct pw_server *server)
 {
+	/* libwayland only says it failed to bind, which hides that the real
+	 * cause is a service manager that does not create the runtime dir. */
+	const char *rtdir = getenv("XDG_RUNTIME_DIR");
+	if (!rtdir || !rtdir[0]) {
+		pw_log(WLR_ERROR, "XDG_RUNTIME_DIR is not set; it must name a writable "
+			"directory (mode 0700) for the Wayland socket");
+		return 1;
+	}
+
 	const char *socket = wl_display_add_socket_auto(server->display);
 	if (!socket) {
 		pw_log(WLR_ERROR, "cannot open wayland socket");

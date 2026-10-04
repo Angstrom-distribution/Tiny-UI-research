@@ -7,15 +7,16 @@ After=getty@tty1.service
 
 [Service]
 Type=simple
+# No logind session is assumed, so the runtime directory is made here rather than
+# by PAM. A fixed path keeps the unit working without a user session.
+Environment=XDG_RUNTIME_DIR=/run/picowl
+ExecStartPre=/bin/mkdir -p -m 0700 /run/picowl
 ExecStart=/usr/bin/picowl
 Restart=on-failure
 RestartSec=3
-PAMName=login
 SupplementaryGroups=video
 TTYPath=/dev/tty1
 StandardInput=tty
-UtmpIdentifier=tty1
-UtmpMode=user
 
 [Install]
 WantedBy=graphical.target
