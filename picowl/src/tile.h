@@ -30,4 +30,14 @@ struct pw_tile_hint {
 bool pw_tile_layout(const struct pw_tile_box *usable,
 	const struct pw_tile_hint hints[2], struct pw_tile_box out[2]);
 
+/* How far the tiled stack moves up while a panning layer surface (the
+ * on-screen keyboard) takes zone pixels at the bottom of the output. The stack
+ * is laid out as if the surface were not there and then slid up by the zone, so
+ * the lower window ends where the surface starts. out_h is the output height
+ * and lower_top the top edge of the lower window, relative to the top of the
+ * output. The result is clamped to [0, min(out_h, lower_top)]: the lower
+ * window is never pushed above the top of the screen, and a zone larger than
+ * that leaves the rest of the lower window under the surface. */
+int pw_tile_pan(int zone, int out_h, int lower_top);
+
 #endif

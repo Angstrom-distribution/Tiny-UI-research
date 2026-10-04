@@ -254,6 +254,29 @@ static void test_sweep(void)
 	}
 }
 
+static void test_pan(void)
+{
+	/* 240x320 split evenly: the lower window starts at 160 */
+	assert(pw_tile_pan(100, 320, 160) == 100);
+	/* no zone, no pan */
+	assert(pw_tile_pan(0, 320, 160) == 0);
+	assert(pw_tile_pan(-5, 320, 160) == 0);
+	/* the lower window stops at the top of the screen, never above it */
+	assert(pw_tile_pan(250, 320, 160) == 160);
+	assert(pw_tile_pan(160, 320, 160) == 160);
+	assert(pw_tile_pan(161, 320, 160) == 160);
+	assert(pw_tile_pan(159, 320, 160) == 159);
+	/* a lower window already at the top (or an unknown position) cannot move */
+	assert(pw_tile_pan(100, 320, 0) == 0);
+	assert(pw_tile_pan(100, 320, -20) == 0);
+	/* a zone bigger than the output counts as the output */
+	assert(pw_tile_pan(5000, 320, 5000) == 320);
+	/* a lower window which starts below the output is limited by the output */
+	assert(pw_tile_pan(400, 320, 330) == 320);
+	assert(pw_tile_pan(1, 1, 1) == 1);
+	assert(pw_tile_pan(INT_MAX, INT_MAX, INT_MAX) == INT_MAX);
+}
+
 int main(void)
 {
 	test_even_split();
@@ -262,6 +285,7 @@ int main(void)
 	test_clamp();
 	test_degenerate();
 	test_sweep();
+	test_pan();
 	printf("test-tile: ok\n");
 	return 0;
 }

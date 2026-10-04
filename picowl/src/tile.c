@@ -56,3 +56,12 @@ bool pw_tile_layout(const struct pw_tile_box *usable,
 	}
 	return true;
 }
+
+int pw_tile_pan(int zone, int out_h, int lower_top)
+{
+	int limit = lower_top < out_h ? lower_top : out_h;
+
+	if (zone <= 0 || limit <= 0)
+		return 0;
+	return zone < limit ? zone : limit;
+}
