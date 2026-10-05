@@ -1,0 +1,22 @@
+Licences of the pixel fonts in this directory (the BDF files, and the C data
+panel/panel-pixfont-data.c that gen-pixfont.py makes of them).
+
+All five are misc-fixed fonts of the X.Org font-misc-misc package, taken from
+Debian's xfonts-base (trixie), converted with pcf2bdf and reduced to printable
+ASCII by `gen-pixfont.py trim`. The header of each BDF file says what their
+author put on them, and gen-pixfont.py refuses to use a font whose COPYRIGHT
+property does not say "public domain":
+
+    6x10.bdf    COPYRIGHT "Public domain terminal emulator font.  Share and enjoy."
+    7x13B.bdf   COPYRIGHT "Public domain font.  Share and enjoy."
+    7x14B.bdf   COPYRIGHT "Public domain font.  Share and enjoy."
+    9x15B.bdf   COPYRIGHT "Public domain font.  Share and enjoy."
+    10x20.bdf   COPYRIGHT "Public domain font.  Share and enjoy."
+
+None of them has a COMMENT line with other terms. Public domain needs no
+notice, but nothing is lost by keeping the BDF headers, which are the evidence.
+Debian's copyright file for xfonts-base agrees: its entry for font-misc-misc/COPYING
+is the single line "Public domain font.  Share and enjoy."
+
+Terminus (SIL OFL 1.1) is not used: the misc-fixed fonts cover the sizes the
+panel needs and have no licence text that must travel with the binary.
