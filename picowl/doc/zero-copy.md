@@ -351,6 +351,8 @@ are compiled and unit tested only. On a device verify:
 
 ## C8 / 8-bpp palettised output on MediaQ
 
+This section is superseded by `doc/design/mediaq-c8.md` (verified chip and driver facts, measured costs, the recommended plan); where they differ, that document wins.
+
 DRM_FORMAT_C8 is 8 bpp with a palette. A 240x320 frame is 76.8 KB instead of
 153.6 KB in RGB565. Over the ~8 MB/s VRAM bus a full-frame copy drops from about
 19 ms to about 9.6 ms, and the CPU stall time halves for every damaged pixel. The
