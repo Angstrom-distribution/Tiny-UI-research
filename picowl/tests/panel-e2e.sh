@@ -1200,22 +1200,39 @@ if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then
 	restore_clock
 	echo "panel-e2e: clock ok"
 	# Midnight with the date row open (the stylus is held down, so it stays
-	# open): 12 s before the day changes, the row must show the next day after
-	# the minute tick, with no other timer.
+	# open): 8 s before the day changes, the row must show the next day after
+	# the minute tick, with no other timer. A virtual machine whose clock is
+	# set from its host in the meantime makes the run void, not failed: it is
+	# tried again.
 	export TZ=UTC0
 	start_picowl
-	CLOCK_T0=$(date +%s)
-	CLOCK_U0=$(uptime_s)
-	MID=$(( (CLOCK_T0 / 86400 + 1) * 86400 ))
-	BEFORE=$(date -d "@$((MID - 12))" '+%A %-d %B %Y')
-	AFTER=$(date -d "@$MID" '+%A %-d %B %Y')
-	date -s "@$((MID - 12))" >/dev/null || { CLOCK_T0=; fail "T: cannot set the clock"; }
-	start_panel t --inject "icl;p$X,$Y"
-	has "$DIR/t.out" "^row kind=date .* text=\"$BEFORE\"\$" "T the date row before midnight"
-	wait_for "$DIR/t.out" "^row kind=date .* text=\"$AFTER\"\$" 30 "T the date row after midnight"
-	stop_panel T
+	TRY=0
+	DONE=
+	while [ -z "$DONE" ]; do
+		TRY=$((TRY + 1))
+		[ $TRY -gt 3 ] && fail "T: the system clock was reset under the midnight test three times"
+		CLOCK_T0=$(date +%s)
+		CLOCK_U0=$(uptime_s)
+		MID=$(( (CLOCK_T0 / 86400 + 1) * 86400 ))
+		BEFORE=$(date -d "@$((MID - 8))" '+%A %-d %B %Y')
+		AFTER=$(date -d "@$MID" '+%A %-d %B %Y')
+		date -s "@$((MID - 8))" >/dev/null || { CLOCK_T0=; fail "T: cannot set the clock"; }
+		start_panel t --inject "icl;p$X,$Y"
+		has "$DIR/t.out" "^row kind=date .* text=\"$BEFORE\"\$" "T the date row before midnight"
+		i=0
+		while ! grep -q "^row kind=date .* text=\"$AFTER\"\$" "$DIR/t.out"; do
+			i=$((i + 1))
+			if [ $i -gt 400 ] || [ "$(date +%s)" -lt $((MID - 30)) ]; then
+				[ "$(date +%s)" -lt $((MID - 30)) ] && break
+				fail "T the date row after midnight: no '$AFTER' in $DIR/t.out"
+			fi
+			sleep 0.05
+		done
+		[ $i -le 400 ] && [ "$(date +%s)" -ge $((MID - 30)) ] && DONE=1
+		stop_panel T
+		restore_clock
+	done
 	stop_picowl
-	restore_clock
 	unset TZ
 	echo "panel-e2e: midnight ok"
 fi
