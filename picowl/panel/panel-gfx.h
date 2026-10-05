@@ -13,6 +13,7 @@
 #define PICOWL_PANEL_GFX_H
 
 #include "panel-logic.h"
+#include "panel-pixfont.h"
 
 struct pl_canvas {
 	uint8_t *data;
@@ -38,6 +39,10 @@ uint32_t pl_pixel(const struct pl_canvas *c, uint32_t rgb, int alpha);
 
 /* Replaces the pixels, alpha included. */
 void pl_fill(const struct pl_canvas *c, struct pl_rect r, uint32_t rgb, int alpha);
+
+/* The same with a pixel that pl_pixel made, for the code that fills many
+ * rectangles of one colour. */
+void pl_fill_px(const struct pl_canvas *c, struct pl_rect r, uint32_t px);
 
 /* src (0xRRGGBB) over dst, an opaque pixel (alpha 255), with a coverage for
  * each channel, blended in linear light; 0xFFRRGGBB. The three coverages are
@@ -138,7 +143,17 @@ struct pl_face {
 	int digit_top;
 };
 
+/* A face of the crisp style: a pixel font at a whole-number scale. */
+struct pl_pixface {
+	const struct pl_pixfont *f;
+	int scale;
+};
+
 struct pl_font {
+	/* crisp: the faces are the pixel fonts of pix[], nothing is rasterized
+	 * and ttf is false; face[i].px, digit_h and digit_top are set. */
+	bool crisp;
+	struct pl_pixface pix[PL_FACES];
 	bool ttf;
 	char path[300];		/* of the font file, if ttf */
 	struct pl_face face[PL_FACES];
@@ -158,6 +173,17 @@ void pl_row_face_px(int px_bar, int px[PL_ROW_FACES]);
  * there is no usable font file. */
 bool pl_font_load(struct pl_font *f, const char *path, int px_bar, int px_small);
 void pl_font_free(struct pl_font *f);
+
+/* The pixel fonts for a bar of bar_h pixels, no files read. Faces 0 and 1 (the
+ * bar and the value in the slider row) are 7x13 bold and the four text-row
+ * faces are 10x20, 9x15, 7x14 and 6x10, each scaled by a whole number for bars
+ * that are much taller than the default. */
+void pl_font_load_crisp(struct pl_font *f, int bar_h);
+
+/* The size a face is drawn at, in pixels: the point size of a TrueType face,
+ * the cell height of a pixel font times its scale, 7 times the scale for the
+ * 5x7 fallback. */
+int pl_font_face_px(const struct pl_font *f, int face);
 
 int pl_font_text_w(const struct pl_font *f, int face, const char *s);
 

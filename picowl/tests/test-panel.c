@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "panel-crisp.h"
 #include "panel-draw.h"
 #include "panel-gfx.h"
 #include "panel-logic.h"
@@ -139,7 +140,7 @@ static bool overlap(struct pl_rect a, struct pl_rect b)
 }
 
 /* What the 11 px Liberation Sans Bold gives, near enough. */
-static const struct pl_metrics M15 = { 33, 27, 24 };
+static const struct pl_metrics M15 = { 33, 27, 24, false };
 
 /* The default bar, the row under it and the surface with both. */
 #define BAR PL_HEIGHT_DEFAULT
@@ -262,7 +263,7 @@ static void test_layout(void)
 	static const int bars[] = { 18, 20, 40, 80 };
 	for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++)
 		for (size_t j = 0; j < sizeof(bars) / sizeof(bars[0]); j++) {
-			struct pl_metrics m = { 30 + bars[j], 30 + bars[j] / 2, 24 + bars[j] / 3 };
+			struct pl_metrics m = { 30 + bars[j], 30 + bars[j] / 2, 24 + bars[j] / 3, false };
 			pl_layout_compute(&l, widths[i], bars[j], true, false, &m);
 			struct pl_rect all = { 0, 0, l.w, l.h };
 			char msg[96];
@@ -615,7 +616,7 @@ static void test_text_buttons(void)
 		}
 
 	/* A clock narrower than a stylus still gets a 36 px button. */
-	struct pl_metrics thin = { 5, 5, 5 };
+	struct pl_metrics thin = { 5, 5, 5, false };
 	struct pl_layout tl;
 	pl_layout_compute(&tl, 240, BAR, false, false, &thin);
 	CHECK(tl.clock.w < 36 && tl.button[PL_BTN_CLOCK].w == 36, "the clock button is widened to 36 px");
@@ -2155,6 +2156,744 @@ static void test_draw(void)
 	test_render_ttf();
 }
 
+/* ---- the crisp style ---- */
+
+static void crisp_env_init(struct env *e, bool row, int bar_h)
+{
+	struct pl_metrics m;
+
+	pl_assets_init_crisp(&e->a, bar_h, 255, 255);
+	pl_assets_metrics(&e->a, &m);
+	pl_layout_compute(&e->l, 240, bar_h, row, false, &m);
+	CHECK(pl_assets_prepare(&e->a, &e->l), "the crisp style has nothing to build");
+	canvas_init(&e->b, 240, e->l.h, PL_FMT_XRGB8888);
+	e->st = (struct pl_state){ .hour = 20, .min = 22, .bat = PL_BAT_DISCHARGING,
+		.bat_pct = 73, .bl_pct = 60, .vol_pct = 80, .year = 2026, .mon = 9, .mday = 5,
+		.wday = 1 };
+}
+
+/* A ground that no panel colour is, so that a pixel the panel did not write
+ * shows up as a colour of its own. */
+static void patterned(struct canvas_buf *b)
+{
+	for (int y = 0; y < b->c.h; y++)
+		for (int x = 0; x < b->c.w; x++)
+			((uint32_t *)(b->c.data + (size_t)y * b->c.stride))[x] =
+				(x ^ y) & 1 ? 0x123457 : 0xabcdee;
+}
+
+#define MAX_COLORS 64
+
+/* The distinct colours (0xRRGGBB) of the canvas; stops counting at the size of
+ * out, and returns how many there are (more than that if it overflowed). */
+static int colours(const struct canvas_buf *b, uint32_t *out, int max)
+{
+	int n = 0;
+
+	for (int y = 0; y < b->c.h; y++)
+		for (int x = 0; x < b->c.w; x++) {
+			uint32_t v = px(b, x, y) & 0xffffff;
+			int i = 0;
+
+			while (i < n && out[i] != v)
+				i++;
+			if (i < n)
+				continue;
+			if (n < max)
+				out[n] = v;
+			n++;
+		}
+	return n;
+}
+
+/* The canvas has exactly the colours of want (n of them, in any order). */
+static void palette_is(const struct canvas_buf *b, const uint32_t *want, int n, const char *what)
+{
+	uint32_t got[MAX_COLORS];
+	int ng = colours(b, got, MAX_COLORS);
+	char msg[160];
+	int missing = 0, extra = 0;
+
+	for (int i = 0; i < n; i++) {
+		int f = 0;
+		for (int j = 0; j < ng && j < MAX_COLORS; j++)
+			f |= got[j] == want[i];
+		if (!f) {
+			missing++;
+			fprintf(stderr, "  %s: missing #%06x\n", what, want[i]);
+		}
+	}
+	for (int j = 0; j < ng && j < MAX_COLORS; j++) {
+		int f = 0;
+		for (int i = 0; i < n; i++)
+			f |= got[j] == want[i];
+		if (!f) {
+			extra++;
+			fprintf(stderr, "  %s: foreign colour #%06x\n", what, got[j]);
+		}
+	}
+	snprintf(msg, sizeof(msg), "%s: exactly the %d colours of the palette (%d found)", what, n, ng);
+	CHECK(missing == 0 && extra == 0 && ng == n, msg);
+	printf("test-panel: crisp %s: %d distinct colours\n", what, ng);
+}
+
+static void crisp_scene(const char *what, int open, bool row, struct pl_state st,
+	const uint32_t *want, int n)
+{
+	struct env e;
+
+	crisp_env_init(&e, row, BAR);
+	patterned(&e.b);
+	e.st = st;
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, open);
+	CHECK(guards_intact(&e.b), "crisp drawing stays inside the buffer");
+	palette_is(&e.b, want, n, what);
+	env_free(&e);
+}
+
+static void test_crisp_palette(void)
+{
+	struct env e0;
+	crisp_env_init(&e0, false, BAR);
+	struct pl_state base = e0.st;
+	env_free(&e0);
+
+	/* The bar: ground, its line, text, the icons and the battery's outline in
+	 * one colour, and the battery's empty and filled parts. */
+	crisp_scene("closed bar", PL_SLIDER_NONE, false, base,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY, PL_COL_BAT_FILL }, 5);
+
+	/* The backlight row: the highlight and the accent of the open button, the
+	 * row's ground and line, track, thumb and its ring, and the green of a
+	 * charging battery with the white of its bolt (the thumb's colour too). */
+	struct pl_state chg = base;
+	chg.bat = PL_BAT_CHARGING;
+	crisp_scene("backlight row", PL_SLIDER_BACKLIGHT, true, chg,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY, PL_COL_BAT_CHARGING,
+			PL_COL_HL, PL_COL_ACCENT, PL_COL_ROW, PL_COL_ROW_LINE, PL_COL_TRACK,
+			PL_COL_THUMB, PL_COL_THUMB_RING }, 12);
+	CHECK_EQ(PL_COL_BOLT, PL_COL_THUMB, "the bolt and the thumb share their white");
+
+	struct pl_state low = base;
+	low.bat_pct = 10;
+	crisp_scene("volume row", PL_SLIDER_VOLUME, true, low,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY, PL_COL_BAT_LOW,
+			PL_COL_HL, PL_COL_ACCENT, PL_COL_ROW, PL_COL_ROW_LINE, PL_COL_TRACK, PL_COL_THUMB,
+			PL_COL_THUMB_RING }, 12);
+
+	crisp_scene("date row", PL_BTN_CLOCK, true, base,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY, PL_COL_BAT_FILL,
+			PL_COL_HL, PL_COL_ROW, PL_COL_ROW_LINE }, 8);
+
+	struct pl_state est = low;
+	est.bat = PL_BAT_CHARGING;
+	est.est = (struct pl_estimate){ PL_EST_TOFULL, 95, false };
+	crisp_scene("battery row", PL_BTN_BATTERY, true, est,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY, PL_COL_BAT_LOW,
+			PL_COL_BOLT, PL_COL_HL, PL_COL_ROW, PL_COL_ROW_LINE }, 9);
+
+	struct pl_state dis = base;
+	dis.bl_pct = dis.vol_pct = -1;
+	dis.bat_pct = 100;
+	crisp_scene("disabled buttons", PL_SLIDER_NONE, false, dis,
+		(uint32_t[]){ PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_DISABLED, PL_COL_BAT_FILL }, 5);
+
+	/* The same scene in the smooth style has intermediate colours all over. */
+	struct env e;
+	env_init(&e, PL_FMT_XRGB8888, 255, 255, true, NOFONT);
+	patterned(&e.b);
+	e.st.bat = PL_BAT_CHARGING;
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+	uint32_t got[MAX_COLORS];
+	int ns = colours(&e.b, got, MAX_COLORS);
+	CHECK(ns > 25, "the smooth style has many intermediate colours");
+	printf("test-panel: smooth backlight row: %d distinct colours (the crisp one has 12)\n", ns);
+	env_free(&e);
+}
+
+/* The colours are flat in every pixel format, not only in XRGB8888: a premultiplied
+ * ARGB canvas and RGB565 hold one value per colour too. */
+static void test_crisp_formats(void)
+{
+	static const enum pl_fmt fmts[] = { PL_FMT_RGB565, PL_FMT_ARGB8888 };
+
+	for (int k = 0; k < 2; k++) {
+		struct env e;
+		struct pl_metrics m;
+
+		pl_assets_init_crisp(&e.a, BAR, 255, 255);
+		pl_assets_metrics(&e.a, &m);
+		pl_layout_compute(&e.l, 240, BAR, true, false, &m);
+		canvas_init(&e.b, 240, e.l.h, fmts[k]);
+		e.st = (struct pl_state){ .hour = 20, .min = 22, .bat = PL_BAT_CHARGING, .bat_pct = 73,
+			.bl_pct = 60, .vol_pct = 80 };
+		pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+		uint32_t seen[MAX_COLORS];
+		int n = 0, bad = 0;
+		static const uint32_t pal[] = { PL_COL_BG, PL_COL_LINE, PL_COL_FG, PL_COL_BAT_EMPTY,
+			PL_COL_BAT_CHARGING, PL_COL_BOLT, PL_COL_HL, PL_COL_ACCENT, PL_COL_ROW,
+			PL_COL_ROW_LINE, PL_COL_TRACK, PL_COL_THUMB, PL_COL_THUMB_RING };
+		for (int y = 0; y < e.l.h; y++)
+			for (int x = 0; x < 240; x++) {
+				uint32_t v = px(&e.b, x, y);
+				int i = 0, ok = 0;
+
+				for (size_t q = 0; q < sizeof(pal) / sizeof(pal[0]); q++)
+					ok |= v == pl_pixel(&e.b.c, pal[q], 255);
+				bad += !ok;
+				while (i < n && seen[i] != v)
+					i++;
+				if (i == n && n < MAX_COLORS)
+					seen[n++] = v;
+			}
+		CHECK_EQ(bad, 0, fmts[k] == PL_FMT_RGB565 ? "RGB565: every pixel is a palette colour" :
+			"ARGB8888: every pixel is a palette colour");
+		CHECK(n <= 12, "and no more distinct values than the palette has");
+		env_free(&e);
+	}
+}
+
+/* The panel's own wordings, every one the panel can print. */
+static void test_crisp_wordings(void)
+{
+	struct pl_font f;
+	char buf[64];
+
+	pl_font_load_crisp(&f, BAR);
+	CHECK(f.crisp && !f.ttf, "a crisp font is neither TrueType nor the 5x7 fallback");
+	/* Sizes by role. */
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_BAR), 13, "the bar text is a 13 px pixel font");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_SMALL), 13, "so is the value in the slider row");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_ROW), 20, "the text rows start at 20 px");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_ROW + 1), 15, "then 15");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_ROW + 2), 14, "then 14");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_ROW + 3), 10, "and 10");
+	for (int i = 0; i < PL_FACES; i++)
+		CHECK_EQ(f.pix[i].scale, 1, "every face of the default bar is at scale 1");
+	CHECK_STR(f.pix[PL_FACE_BAR].f->name, "7x13B", "the bar font is 7x13 bold");
+	CHECK_STR(f.pix[PL_FACE_ROW].f->name, "10x20", "the largest row font is 10x20");
+	/* The digits are 9 rows high in the 17 rows of the bar: 4 above, 4 below. */
+	CHECK_EQ(f.face[PL_FACE_BAR].digit_h, 9, "the bar's digits are 9 px high");
+	CHECK_EQ((BAR - 1 - f.face[PL_FACE_BAR].digit_h) % 2, 0, "which centres them on whole pixels");
+	CHECK_EQ(f.face[PL_FACE_ROW].digit_h, 13, "the big row's digits are 13 px high");
+	CHECK_EQ((35 - f.face[PL_FACE_ROW].digit_h) % 2, 0, "which centre in the row's 35 px");
+	/* Fixed pitch: a width is the number of characters times the cell. */
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "88:88"), 35, "the clock is 35 px wide");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "100%"), 28, "100% is 28 px");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, "Monday"), 60, "six characters of 10 px");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, ""), 0, "nothing is nothing");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "a\x01\x7f""b"), 14, "characters the font lacks have no width");
+
+	int missing = 0, total = 0;
+	for (int wd = 0; wd < 7; wd++)
+		for (int mon = 0; mon < 12; mon++) {
+			pl_date_text(buf, sizeof(buf), 2026, mon, 28 + wd % 4, wd);
+			for (int face = PL_FACE_ROW; face < PL_FACES; face++)
+				for (const char *c = buf; *c; c++) {
+					const struct pl_pixfont *pf = f.pix[face].f;
+					const uint8_t *g = pl_pixfont_glyph(pf, (unsigned char)*c);
+					int ink = 0;
+
+					for (int r = 0; g && r < pf->h; r++)
+						for (int x = 0; x < pf->w; x++)
+							ink += pl_pixfont_bit(pf, g, r, x);
+					total++;
+					if (!g || (*c != ' ' && !ink))
+						missing++;
+				}
+		}
+	CHECK_EQ(missing, 0, "every character of every date renders in every row face");
+	CHECK(total > 5000, "(and they were all looked at)");
+
+	static const struct pl_estimate kinds[] = {
+		{ PL_EST_NONE, 0, false }, { PL_EST_AC, 0, false }, { PL_EST_FULL, 0, false },
+		{ PL_EST_NOTCHARGING, 0, false }, { PL_EST_CHARGING, 0, false },
+		{ PL_EST_ESTIMATING, 0, false }, { PL_EST_LEFT, 5, false }, { PL_EST_LEFT, 90, false },
+		{ PL_EST_LEFT, 80, true }, { PL_EST_TOFULL, 75, false }, { PL_EST_OVER_LEFT, 0, false },
+		{ PL_EST_OVER_FULL, 0, false },
+	};
+	missing = 0;
+	for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+		for (int v = 0; v < PL_EST_VARIANTS; v++) {
+			pl_est_text(buf, sizeof(buf), &kinds[k], v ? -1 : 94, v);
+			for (int face = PL_FACE_ROW; face < PL_FACES; face++)
+				for (const char *c = buf; *c; c++)
+					missing += pl_pixfont_glyph(f.pix[face].f, (unsigned char)*c) == NULL;
+		}
+	CHECK_EQ(missing, 0, "every character of every battery sentence renders (> and ~ included)");
+	for (const char *c = "0123456789:%-,. ><~ACDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; *c; c++)
+		for (int face = 0; face < PL_FACES; face++)
+			CHECK(pl_pixfont_glyph(f.pix[face].f, (unsigned char)*c) != NULL, "every panel character has a glyph");
+
+	/* Glyph data as the generator made it, from the BDF files. */
+	{
+		const uint8_t *one = pl_pixfont_glyph(&pl_pixfont_7x13B, '1');
+		static const uint8_t want[13] = { 0x00, 0x00, 0x30, 0x70, 0xb0, 0x30, 0x30, 0x30, 0x30,
+			0x30, 0xfc, 0x00, 0x00 };
+		CHECK(!memcmp(one, want, 13), "the 1 of 7x13B is what the BDF says");
+		const uint8_t *zero = pl_pixfont_glyph(&pl_pixfont_7x13B, '0');
+		static const uint8_t z[13] = { 0x00, 0x00, 0x30, 0x48, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x48,
+			0x30, 0x00, 0x00 };
+		CHECK(!memcmp(zero, z, 13), "and the 0");
+		/* A cell of two bytes per row: the M of 10x20 (rows 3 to 15 of 20). */
+		const uint8_t *m = pl_pixfont_glyph(&pl_pixfont_10x20, 'M');
+		CHECK_EQ(m[3 * 2], 0x61, "the first ink row of the 10x20 M, high byte");
+		CHECK_EQ(m[3 * 2 + 1], 0x80, "and low byte");
+		CHECK_EQ(m[7 * 2], 0x7f, "its crossbar");
+		CHECK_EQ(pl_pixfont_bit(&pl_pixfont_10x20, m, 7, 1), 1, "starts at x 1");
+		CHECK_EQ(pl_pixfont_bit(&pl_pixfont_10x20, m, 7, 0), 0, "and not before");
+		CHECK_EQ(pl_pixfont_bit(&pl_pixfont_10x20, m, 7, 8), 1, "ends at x 8");
+		CHECK_EQ(pl_pixfont_bit(&pl_pixfont_10x20, m, 7, 9), 0, "with the pitch on the right");
+		CHECK(pl_pixfont_glyph(&pl_pixfont_7x13B, 0x1f) == NULL && pl_pixfont_glyph(&pl_pixfont_7x13B, 0x7f) == NULL,
+			"only printable ASCII is in the font");
+	}
+	/* Characters are distinct in every font, but for the 0 and the O of 7x14B,
+	 * which the font draws alike. */
+	int same = 0;
+	for (int face = 0; face < PL_FACES; face++) {
+		const struct pl_pixfont *pf = f.pix[face].f;
+		for (int a = PL_PIX_FIRST + 1; a <= PL_PIX_LAST; a++)
+			for (int b = a + 1; b <= PL_PIX_LAST; b++)
+				if (!(a == '0' && b == 'O' && pf == &pl_pixfont_7x14B))
+					same += !memcmp(pl_pixfont_glyph(pf, a), pl_pixfont_glyph(pf, b), (size_t)pf->h * pf->bpr);
+	}
+	CHECK_EQ(same, 0, "no two characters of a pixel font look the same");
+	pl_font_free(&f);
+
+	/* Integer scales only: a taller bar scales the font by a whole number. */
+	pl_font_load_crisp(&f, 38);
+	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 2, "a 38 px bar has the bar font twice as big");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "88:88"), 70, "and twice as wide");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_BAR), 26, "and tall");
+	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 1, "its 46 px row is still the normal size");
+	pl_font_free(&f);
+	pl_font_load_crisp(&f, 64);
+	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 3, "a 64 px bar: scale 3");
+	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 2, "and a 72 px row: scale 2");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, "Monday"), 120, "Monday in 10x20 at scale 2");
+	pl_font_free(&f);
+	pl_font_load_crisp(&f, 80);
+	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 4, "an 80 px bar: scale 4");
+	pl_font_free(&f);
+	pl_font_load_crisp(&f, 18);
+	CHECK(f.pix[PL_FACE_BAR].scale == 1 && f.pix[PL_FACE_ROW].scale == 1, "scales never fall below 1");
+	pl_font_free(&f);
+}
+
+/* The text-fit logic picks among the pixel sizes like it does among the
+ * TrueType ones: the first face (largest) in which a candidate fits. */
+static void test_crisp_fit(void)
+{
+	struct env e;
+	struct pl_rowtext t;
+
+	crisp_env_init(&e, true, BAR);
+	CHECK_EQ(e.l.text.w, 224, "the row's text is 224 px wide");
+	/* Monday 5 October 2026 is 21 characters: 210 px at 10 px each. */
+	e.st.wday = 1; e.st.mday = 5; e.st.mon = 9;
+	pl_row_text(&e.l, &e.a, &e.st, PL_BTN_CLOCK, &t);
+	CHECK_STR(t.text, "Monday 5 October 2026", "the date");
+	CHECK_EQ(t.face, PL_FACE_ROW, "fits the largest font");
+	CHECK_EQ(t.w, 210, "at 10 px a character");
+	/* Wednesday 30 September 2026: 27 characters, 270 and 243 are too wide, 7x14
+	 * bold makes 189. */
+	e.st.wday = 3; e.st.mday = 30; e.st.mon = 8;
+	pl_row_text(&e.l, &e.a, &e.st, PL_BTN_CLOCK, &t);
+	CHECK_STR(t.text, "Wednesday 30 September 2026", "the longest date");
+	CHECK_EQ(t.face, PL_FACE_ROW + 2, "needs the third size");
+	CHECK_EQ(t.w, 189, "which is 7 px a character");
+	/* The estimate loses words before it loses size. */
+	e.st.est = (struct pl_estimate){ PL_EST_LEFT, 90, false };
+	e.st.bat_pct = 94;
+	pl_row_text(&e.l, &e.a, &e.st, PL_BTN_BATTERY, &t);
+	CHECK_STR(t.text, "94%  1 h 30 min left", "the estimate with the percentage");
+	CHECK_EQ(t.face, PL_FACE_ROW, "in the largest font: 200 px of 224");
+	e.st.est = (struct pl_estimate){ PL_EST_LEFT, 80, true };
+	pl_row_text(&e.l, &e.a, &e.st, PL_BTN_BATTERY, &t);
+	CHECK_STR(t.text, "94%  ~1 h 20 min left", "with the hint's tilde");
+	CHECK_EQ(t.face, PL_FACE_ROW, "21 characters, 210 px: still the largest");
+	e.st.est = (struct pl_estimate){ PL_EST_TOFULL, 75, false };
+	pl_row_text(&e.l, &e.a, &e.st, PL_BTN_BATTERY, &t);
+	CHECK_STR(t.text, "1 h 15 min to full", "to full is longer: the percentage goes first");
+	CHECK_EQ(t.face, PL_FACE_ROW, "and the size stays the largest");
+	CHECK_EQ(t.w, 180, "18 characters of 10 px");
+	/* A narrow output: the text shrinks through the sizes and is never wider than the room. */
+	env_free(&e);
+	for (int w = 120; w <= 240; w += 20) {
+		struct pl_metrics m;
+		struct pl_layout l;
+		struct pl_assets a;
+		struct pl_state st = { .est = { PL_EST_TOFULL, 75, false }, .bat_pct = 94,
+			.year = 2026, .mon = 8, .mday = 30, .wday = 3 };
+
+		pl_assets_init_crisp(&a, BAR, 255, 255);
+		pl_assets_metrics(&a, &m);
+		pl_layout_compute(&l, w, BAR, true, false, &m);
+		pl_row_text(&l, &a, &st, PL_BTN_CLOCK, &t);
+		CHECK(t.w <= l.text.w || t.face == PL_FACES - 1, "a date fits or has run out of sizes");
+		pl_row_text(&l, &a, &st, PL_BTN_BATTERY, &t);
+		CHECK(t.w <= l.text.w || t.face == PL_FACES - 1, "an estimate fits or has run out of sizes");
+		pl_assets_free(&a);
+	}
+}
+
+static void test_crisp_layout(void)
+{
+	/* Only the thumb and the track change, to odd sizes, which is what gives a
+	 * disc a centre pixel and a bar a centre row. */
+	for (int bar = 18; bar <= 80; bar += 7) {
+		struct pl_metrics m = { 33, 27, 24, false }, mc = { 33, 27, 24, true };
+		struct pl_layout a, b;
+
+		pl_layout_compute(&a, 240, bar, true, false, &m);
+		pl_layout_compute(&b, 240, bar, true, false, &mc);
+		CHECK(b.slider.thumb_d % 2 == 1 && b.slider.track_h % 2 == 1, "crisp: odd thumb and track");
+		CHECK(b.slider.thumb_d <= a.slider.thumb_d && a.slider.thumb_d - b.slider.thumb_d <= 1,
+			"the thumb is at most a pixel smaller");
+		CHECK(b.slider.track_h <= a.slider.track_h && a.slider.track_h - b.slider.track_h <= 1,
+			"and so is the track");
+		int td = b.slider.thumb_d, th = b.slider.track_h;
+		b.slider.thumb_d = a.slider.thumb_d;
+		b.slider.track_h = a.slider.track_h;
+		CHECK(!memcmp(&a, &b, sizeof(a)), "nothing else of the layout changes: touch targets, rows, highlights");
+		/* The disc and the bar share their centre, on a pixel of both. */
+		b.slider.thumb_d = td;
+		b.slider.track_h = th;
+		struct pl_rect t = pl_slider_thumb(&b, 40);
+		int ty = b.row_in.y + (b.row_h - 1 - th) / 2;
+		if ((b.row_h - 1) % 2 == 1)
+			CHECK_EQ(t.y + td / 2, ty + th / 2, "the thumb's centre row is the track's");
+	}
+}
+
+static void test_crisp_icons(void)
+{
+	const struct pl_bitmap *all[] = { &pl_ico_sun, &pl_ico_speaker[0], &pl_ico_speaker[1],
+		&pl_ico_speaker[2] };
+	int ink[4];
+
+	for (int i = 0; i < 4; i++) {
+		const struct pl_bitmap *b = all[i];
+		int n = 0, ok = 1;
+
+		CHECK(b->w == PL_ICON_GRID && b->h == PL_ICON_GRID, "icons are 12x12");
+		for (int r = 0; r < b->h; r++) {
+			ok &= (int)strlen(b->rows[r]) == b->w;
+			for (int x = 0; x < b->w; x++)
+				n += b->rows[r][x] == '#';
+		}
+		CHECK(ok, "every row of an icon is as wide as the icon");
+		ink[i] = n;
+		/* Top to bottom symmetric. */
+		int sym = 1;
+		for (int r = 0; r < b->h; r++)
+			sym &= !strcmp(b->rows[r], b->rows[b->h - 1 - r]);
+		CHECK(sym, "an icon is mirror symmetric top to bottom");
+	}
+	int lr = 1;
+	for (int r = 0; r < 12; r++)
+		for (int x = 0; x < 6; x++)
+			lr &= pl_ico_sun.rows[r][x] == pl_ico_sun.rows[r][11 - x];
+	CHECK(lr, "the sun is symmetric left to right too");
+	CHECK_STR(pl_ico_sun.rows[0], ".....##.....", "the sun's top ray is two pixels wide");
+	CHECK_STR(pl_ico_sun.rows[5], "##.######.##", "its middle row: rays and the disc");
+	CHECK(ink[3] > ink[2] && ink[2] > 0 && ink[1] > 0, "two waves have more ink than one");
+	CHECK(pl_ico_speaker[1].rows[5][0] == '.' && pl_ico_speaker[1].rows[5][1] == '#', "the speaker's box starts at x 1");
+	/* The speaker is in the same place in all three variants. */
+	int same = 1;
+	for (int v = 1; v < 3; v++)
+		for (int r = 0; r < 12; r++)
+			for (int x = 0; x < 7; x++)
+				same &= pl_ico_speaker[v].rows[r][x] == pl_ico_speaker[0].rows[r][x];
+	CHECK(same, "the speaker does not move between muted, one wave and two");
+
+	/* Drawn: exactly its set pixels, in one colour, at any whole scale. */
+	for (int sc = 1; sc <= 3; sc++) {
+		struct canvas_buf b;
+
+		canvas_init(&b, 12 * sc + 6, 12 * sc + 6, PL_FMT_XRGB8888);
+		pl_fill(&b.c, (struct pl_rect){ 0, 0, b.c.w, b.c.h }, PL_COL_BG, 255);
+		pl_crisp_bitmap(&b.c, &pl_ico_sun, sc, 3, 3, PL_COL_FG);
+		CHECK_EQ(count_color(&b, (struct pl_rect){ 0, 0, b.c.w, b.c.h }, PL_COL_FG), ink[0] * sc * sc,
+			"a scaled icon has the pixels of the bitmap times scale squared");
+		CHECK_EQ(count_not(&b, (struct pl_rect){ 0, 0, b.c.w, b.c.h }, pl_pixel(&b.c, PL_COL_BG, 255)),
+			ink[0] * sc * sc, "and nothing else");
+		/* Top ray of the sun, pixel column 5 and 6, row 0. */
+		CHECK_EQ(px(&b, 3 + 5 * sc, 3), pl_pixel(&b.c, PL_COL_FG, 255), "its first set pixel is at the grid's");
+		CHECK_EQ(px(&b, 3 + 5 * sc - 1, 3), pl_pixel(&b.c, PL_COL_BG, 255), "and the one before it is not set");
+		CHECK(guards_intact(&b), "icons stay in the buffer");
+		free(b.mem);
+	}
+	CHECK_EQ(pl_crisp_icon_scale(12), 1, "12 px box: scale 1");
+	CHECK_EQ(pl_crisp_icon_scale(16), 1, "16 px box: scale 1");
+	CHECK_EQ(pl_crisp_icon_scale(24), 2, "24 px box: scale 2");
+	CHECK_EQ(pl_crisp_icon_scale(28), 2, "28 px box: scale 2");
+	CHECK_EQ(pl_crisp_icon_scale(5), 1, "never less than 1");
+
+	/* In the bar and in the row. */
+	struct env e;
+	crisp_env_init(&e, true, BAR);
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+	struct pl_rect ri = e.l.row_icon;
+	CHECK_EQ(ri.w, 24, "the row icon box is 24 px");
+	CHECK_EQ(count_color(&e.b, ri, PL_COL_FG), ink[0] * 4, "the row's sun is the bitmap at scale 2");
+	struct pl_rect b0 = pl_button_rect(&e.l, 0);
+	CHECK_EQ(count_color(&e.b, b0, PL_COL_ACCENT), ink[0], "the open button's sun is the bitmap, in the accent colour");
+	e.st.vol_pct = 0;
+	pl_render_button(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT, PL_SLIDER_VOLUME);
+	CHECK_EQ(count_color(&e.b, pl_button_rect(&e.l, 1), PL_COL_FG), ink[1], "muted speaker");
+	e.st.vol_pct = 30;
+	pl_render_button(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT, PL_SLIDER_VOLUME);
+	CHECK_EQ(count_color(&e.b, pl_button_rect(&e.l, 1), PL_COL_FG), ink[2], "one wave");
+	e.st.vol_pct = 80;
+	pl_render_button(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT, PL_SLIDER_VOLUME);
+	CHECK_EQ(count_color(&e.b, pl_button_rect(&e.l, 1), PL_COL_FG), ink[3], "two waves");
+	env_free(&e);
+}
+
+static void test_crisp_shapes(void)
+{
+	struct canvas_buf b;
+	const struct pl_rect all = { 0, 0, 40, 30 };
+
+	canvas_init(&b, 40, 30, PL_FMT_XRGB8888);
+
+	/* The battery: a 1 px outline whose rows and columns are fully set, a nub,
+	 * a gap, and a fill of whole columns. */
+	pl_fill(&b.c, all, PL_COL_BG, 255);
+	pl_crisp_battery(&b.c, 4, 3, 16, 8, 50, PL_COL_BAT_FILL, false);
+	uint32_t fg = pl_pixel(&b.c, PL_COL_FG, 255), bg = pl_pixel(&b.c, PL_COL_BG, 255);
+	for (int x = 1; x <= 12; x++) {
+		CHECK_EQ(px(&b, 4 + x, 3), fg, "the outline's top row is set");
+		CHECK_EQ(px(&b, 4 + x, 3 + 7), fg, "and the bottom row");
+	}
+	for (int y = 1; y <= 6; y++) {
+		CHECK_EQ(px(&b, 4, 3 + y), fg, "the left column is set");
+		CHECK_EQ(px(&b, 4 + 13, 3 + y), fg, "and the right one");
+	}
+	CHECK_EQ(px(&b, 4, 3), bg, "the corners are cut");
+	CHECK_EQ(px(&b, 4 + 13, 3), bg, "all four");
+	CHECK_EQ(px(&b, 4, 3 + 7), bg, "of them");
+	CHECK_EQ(px(&b, 4 + 13, 3 + 7), bg, "yes");
+	for (int y = 2; y <= 5; y++)
+		CHECK_EQ(px(&b, 4 + 14, 3 + y), fg, "the nub is 4 rows");
+	CHECK_EQ(px(&b, 4 + 14, 3 + 1), bg, "starting at row 2");
+	CHECK_EQ(px(&b, 4 + 14, 3 + 6), bg, "and symmetric");
+	CHECK_EQ(px(&b, 4 + 15, 3 + 3), fg, "two columns wide");
+	CHECK_EQ(px(&b, 4 + 16, 3 + 3), bg, "no more than that");
+	CHECK_EQ(px(&b, 4 + 1, 3 + 3), bg, "the gap inside the outline is the ground, 1 px");
+	CHECK_EQ(px(&b, 4 + 2, 3 + 1), bg, "above the fill too");
+	int fillc = 0, empty = 0;
+	for (int x = 2; x <= 11; x++) {
+		uint32_t top = px(&b, 4 + x, 3 + 2);
+		for (int y = 2; y <= 5; y++)
+			CHECK_EQ(px(&b, 4 + x, 3 + y), top, "a column of the interior is one colour");
+		fillc += top == pl_pixel(&b.c, PL_COL_BAT_FILL, 255);
+		empty += top == pl_pixel(&b.c, PL_COL_BAT_EMPTY, 255);
+	}
+	CHECK_EQ(fillc, 5, "50 percent of 10 columns is 5 whole columns of fill");
+	CHECK_EQ(empty, 5, "and 5 of the empty colour");
+	CHECK_EQ(pl_crisp_battery_fill(10, 0), 0, "0 percent has no fill");
+	CHECK_EQ(pl_crisp_battery_fill(10, 1), 1, "1 percent shows a pixel");
+	CHECK_EQ(pl_crisp_battery_fill(10, 100), 10, "100 percent fills it");
+	CHECK_EQ(pl_crisp_battery_fill(10, 73), 7, "73 percent is 7 columns");
+	CHECK_EQ(pl_crisp_battery_fill(10, 95), 10, "95 percent is 10 columns by rounding");
+	CHECK_EQ(pl_crisp_battery_fill(10, 14), 1, "14 percent is one");
+	CHECK(guards_intact(&b), "the battery stays in the buffer");
+	/* The bolt over a charging battery stays inside the body's interior rows. */
+	pl_fill(&b.c, all, PL_COL_BG, 255);
+	pl_crisp_battery(&b.c, 4, 3, 16, 8, 50, PL_COL_BAT_CHARGING, true);
+	CHECK_EQ(count_color(&b, all, PL_COL_BOLT), 13, "the bolt is drawn with its 13 pixels");
+	for (int y = 0; y < 8; y++)
+		for (int x = 0; x < 14; x++)
+			if (px(&b, 4 + x, 3 + y) == pl_pixel(&b.c, PL_COL_BOLT, 255))
+				CHECK(x >= 1 && x <= 12 && y >= 1 && y <= 6, "the bolt stays inside the outline");
+
+	/* A pill: the corner pixels are missing, nothing else. */
+	pl_fill(&b.c, all, PL_COL_BG, 255);
+	pl_crisp_pill(&b.c, (struct pl_rect){ 3, 4, 20, 15 }, PL_COL_HL, 255, 100);
+	CHECK_EQ(count_color(&b, all, PL_COL_HL), 20 * 15 - 4, "a highlight is its rectangle without the 4 corner pixels");
+	CHECK_EQ(px(&b, 3, 4), bg, "top left");
+	CHECK_EQ(px(&b, 22, 4), bg, "top right");
+	CHECK_EQ(px(&b, 3, 18), bg, "bottom left");
+	CHECK_EQ(px(&b, 22, 18), bg, "bottom right");
+	CHECK_EQ(px(&b, 4, 4), pl_pixel(&b.c, PL_COL_HL, 255), "next to the corner is set");
+	CHECK_EQ(px(&b, 3, 5), pl_pixel(&b.c, PL_COL_HL, 255), "and below it");
+	/* Cut short at x_end: the end is straight. */
+	pl_fill(&b.c, all, PL_COL_BG, 255);
+	pl_crisp_pill(&b.c, (struct pl_rect){ 3, 4, 20, 5 }, PL_COL_ACCENT, 255, 13);
+	CHECK_EQ(count_color(&b, all, PL_COL_ACCENT), 10 * 5 - 2, "a fill that stops short has one rounded end only");
+	CHECK_EQ(px(&b, 12, 4), pl_pixel(&b.c, PL_COL_ACCENT, 255), "the straight end has its corners");
+	CHECK_EQ(px(&b, 13, 4), bg, "and ends at x_end");
+	pl_fill(&b.c, all, PL_COL_BG, 255);
+	pl_crisp_pill(&b.c, (struct pl_rect){ 3, 4, 20, 5 }, PL_COL_ACCENT, 255, 2);
+	CHECK_EQ(count_color(&b, all, PL_COL_ACCENT), 0, "nothing at or past an x_end left of the shape");
+	CHECK(guards_intact(&b), "pills stay in the buffer");
+	free(b.mem);
+
+	/* The thumb: odd diameter, a centre pixel, 1 px ring, symmetric. */
+	for (int d = 15; d <= 25; d += 2) {
+		struct canvas_buf t;
+		int r = d / 2;
+
+		canvas_init(&t, d + 4, d + 4, PL_FMT_XRGB8888);
+		pl_fill(&t.c, (struct pl_rect){ 0, 0, d + 4, d + 4 }, PL_COL_ROW, 255);
+		pl_crisp_thumb(&t.c, 2, 2, d, PL_COL_THUMB_RING, PL_COL_THUMB);
+		uint32_t ring = pl_pixel(&t.c, PL_COL_THUMB_RING, 255), fill = pl_pixel(&t.c, PL_COL_THUMB, 255);
+		CHECK_EQ(px(&t, 2 + r, 2 + r), fill, "the centre pixel is white");
+		CHECK_EQ(px(&t, 2 + r, 2), ring, "the ring on top");
+		CHECK_EQ(px(&t, 2 + r, 2 + d - 1), ring, "at the bottom");
+		CHECK_EQ(px(&t, 2, 2 + r), ring, "at the left");
+		CHECK_EQ(px(&t, 2 + d - 1, 2 + r), ring, "and at the right");
+		CHECK_EQ(px(&t, 2 + r, 3), fill, "white right inside the ring");
+		int sym = 1, rings = 0, fills = 0;
+		for (int y = 0; y < d; y++)
+			for (int x = 0; x < d; x++) {
+				uint32_t v = px(&t, 2 + x, 2 + y);
+				sym &= v == px(&t, 2 + d - 1 - x, 2 + y) && v == px(&t, 2 + x, 2 + d - 1 - y) &&
+					v == px(&t, 2 + y, 2 + x);
+				rings += v == ring;
+				fills += v == fill;
+			}
+		CHECK(sym, "the disc is symmetric left-right, top-bottom and on the diagonal");
+		/* The area is that of the circle, to a few percent. */
+		double area = 3.14159265 * (d / 2.0) * (d / 2.0);
+		CHECK(rings + fills > area * 0.93 && rings + fills < area * 1.10, "the disc is round enough: its area is a circle's");
+		CHECK(rings > 0 && fills > 0, "a ring and a fill");
+		CHECK_EQ(count_not(&t, (struct pl_rect){ 0, 0, d + 4, d + 4 }, pl_pixel(&t.c, PL_COL_ROW, 255)),
+			rings + fills, "and nothing but those two colours is drawn");
+		/* The ring is one pixel thick on the axes. */
+		CHECK_EQ(px(&t, 2 + 1, 2 + r), fill, "1 px thick at the left");
+		CHECK(guards_intact(&t), "the thumb stays in the buffer");
+		free(t.mem);
+	}
+	CHECK_EQ(pl_crisp_disc_hw(10, 0), 10, "the middle row of a 21 px disc is 21 wide");
+	CHECK_EQ(pl_crisp_disc_hw(10, 10), 3, "the top row is 7 wide");
+	CHECK_EQ(pl_crisp_disc_hw(10, 11), -1, "nothing past it");
+	CHECK_EQ(pl_crisp_disc_hw(10, -4), pl_crisp_disc_hw(10, 4), "symmetric");
+}
+
+static void test_crisp_row_geometry(void)
+{
+	/* The slider on the screen: the track is a bar of odd height with its fill
+	 * ending at the thumb's centre column, and the thumb is centred on the track. */
+	struct env e;
+
+	crisp_env_init(&e, true, BAR);
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+	const struct pl_slider *s = &e.l.slider;
+	struct pl_rect th = pl_slider_thumb(&e.l, 60);
+	int ty = e.l.row_in.y + (e.l.row_h - 1 - s->track_h) / 2;
+
+	CHECK_EQ(s->thumb_d, 21, "the thumb is 21 px");
+	CHECK_EQ(s->track_h, 5, "the track is 5 px");
+	CHECK_EQ(th.y + th.h / 2, ty + s->track_h / 2, "the thumb's centre pixel is on the track's centre row");
+	/* The track's rows: 5 high, its first and last row without the end pixels. */
+	uint32_t tr = pl_pixel(&e.b.c, PL_COL_TRACK, 255);
+	int xe = s->track.x + s->track.w - 1;
+	CHECK_EQ(px(&e.b, xe, ty), pl_pixel(&e.b.c, PL_COL_ROW, 255), "the track's end has a cut corner");
+	CHECK_EQ(px(&e.b, xe - 1, ty), tr, "after one pixel");
+	CHECK_EQ(px(&e.b, xe, ty + 2), tr, "the middle row reaches the end");
+	CHECK_EQ(px(&e.b, xe, ty + 4), pl_pixel(&e.b.c, PL_COL_ROW, 255), "the bottom corner is cut too");
+	CHECK_EQ(px(&e.b, xe, ty - 1), pl_pixel(&e.b.c, PL_COL_ROW, 255), "and nothing is above the track");
+	CHECK_EQ(px(&e.b, xe, ty + 5), pl_pixel(&e.b.c, PL_COL_ROW, 255), "or below");
+	int cx = th.x + th.w / 2;
+	uint32_t acc = pl_pixel(&e.b.c, PL_COL_ACCENT, 255);
+	CHECK_EQ(px(&e.b, th.x - 1, ty + 2), acc, "the fill runs to the thumb");
+	CHECK_EQ(px(&e.b, th.x + th.w, ty + 2), tr, "and the rest is the track");
+	CHECK_EQ(px(&e.b, s->track.x, ty), pl_pixel(&e.b.c, PL_COL_ROW, 255), "the fill's left end is cut as well");
+	CHECK_EQ(px(&e.b, cx, th.y + th.h / 2), pl_pixel(&e.b.c, PL_COL_THUMB, 255), "the thumb's centre pixel is white");
+	/* The highlight of the open button has cut corners. */
+	const struct pl_rect *h = &e.l.hl[0];
+	CHECK_EQ(px(&e.b, h->x, h->y), pl_pixel(&e.b.c, PL_COL_BG, 255), "the highlight's corner is cut");
+	CHECK_EQ(px(&e.b, h->x + 1, h->y), pl_pixel(&e.b.c, PL_COL_HL, 255), "and the pixel next to it is set");
+	CHECK_EQ(px(&e.b, h->x + h->w - 1, h->y + h->h - 1), pl_pixel(&e.b.c, PL_COL_BG, 255), "at the other end too");
+	env_free(&e);
+}
+
+/* The digits of a 17 px bar are centred: 4 rows above, 4 below. */
+static void test_crisp_centering(void)
+{
+	struct env e;
+
+	crisp_env_init(&e, false, BAR);
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_NONE);
+	uint32_t bg = pl_pixel(&e.b.c, PL_COL_BG, 255);
+	int top = -1, bottom = -1;
+
+	/* The first digit: the colon is a pixel row lower than the digits in this font. */
+	for (int y = 0; y < e.l.clock.h; y++)
+		if (count_not(&e.b, (struct pl_rect){ PL_MARGIN, y, 7, 1 }, bg) > 0) {
+			if (top < 0)
+				top = y;
+			bottom = y;
+		}
+	CHECK_EQ(top, 4, "the clock's digits start 4 rows below the top");
+	CHECK_EQ(e.l.clock.h - 1 - bottom, 4, "and end 4 rows above the line");
+	/* The first digit's left ink pixel is at the margin. */
+	int left = -1;
+	for (int x = 0; x < e.l.clock.w && left < 0; x++)
+		if (count_not(&e.b, (struct pl_rect){ x, 0, 1, e.l.clock.h }, bg) > 0)
+			left = x;
+	CHECK_EQ(left, PL_MARGIN, "the text starts at the margin");
+	/* The text rows: centred in the row. */
+	crisp_env_init(&e, true, BAR);
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_BTN_CLOCK);
+	uint32_t row = pl_pixel(&e.b.c, PL_COL_ROW, 255);
+	int t2 = -1, b2 = -1;
+
+	for (int y = e.l.row_in.y; y < e.l.row_in.y + e.l.row_in.h; y++)
+		if (count_not(&e.b, (struct pl_rect){ 0, y, 240, 1 }, row) > 0) {
+			if (t2 < 0)
+				t2 = y;
+			b2 = y;
+		}
+	/* "Monday 5 October 2026" has ascenders and a descender (y): the digits and
+	 * capitals are centred, the y hangs below. */
+	int space_above = t2 - e.l.row_in.y;
+	CHECK(space_above >= 8 && space_above <= 12, "the date is about centred in the row");
+	CHECK(b2 < e.l.row_in.y + e.l.row_in.h - 4, "and clear of the row's line");
+	env_free(&e);
+}
+
+/* Redrawing in the crisp style allocates nothing. */
+static void test_crisp_no_alloc(void)
+{
+#ifdef __GLIBC__
+	struct env e;
+
+	crisp_env_init(&e, true, BAR);
+	pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+	struct mallinfo2 m0 = mallinfo2();
+	for (int i = 0; i < 300; i++) {
+		e.st.bl_pct = i % 101;
+		e.st.min = i % 60;
+		pl_render_all(&e.b.c, &e.l, &e.a, &e.st, i % 4 - 1);
+		pl_render_row(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_VOLUME);
+		pl_render_row_value(&e.b.c, &e.l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
+		pl_render_battery(&e.b.c, &e.l, &e.a, &e.st, true);
+		pl_assets_prepare(&e.a, &e.l);
+	}
+	struct mallinfo2 m1 = mallinfo2();
+	CHECK_EQ((long long)m1.uordblks, (long long)m0.uordblks, "redrawing in the crisp style allocates nothing");
+	env_free(&e);
+#endif
+}
+
+static void test_crisp(void)
+{
+	test_crisp_wordings();
+	test_crisp_fit();
+	test_crisp_layout();
+	test_crisp_icons();
+	test_crisp_shapes();
+	test_crisp_row_geometry();
+	test_crisp_centering();
+	test_crisp_palette();
+	test_crisp_formats();
+	test_crisp_no_alloc();
+}
+
 /* ---- sysfs ---- */
 
 static void write_file(const char *dir, const char *name, const char *text)
@@ -2666,6 +3405,7 @@ int main(void)
 	test_masks();
 	test_font();
 	test_draw();
+	test_crisp();
 	test_subpixel_modes();
 	test_lcd_filter();
 	test_lcd_blend();

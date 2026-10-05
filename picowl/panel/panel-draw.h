@@ -35,6 +35,9 @@
 
 struct pl_assets {
 	struct pl_font font;
+	/* The crisp style: pixel fonts, bitmap icons and shapes of whole pixels,
+	 * no masks (panel-crisp.h). */
+	bool crisp;
 	int bar_alpha, popup_alpha;
 	/* Order of the colour stripes under the text, where its ground is opaque. */
 	enum pl_sub sub;
@@ -53,9 +56,12 @@ struct pl_assets {
  * Returns false if the built-in bitmap font is used instead of a font file. */
 bool pl_assets_init(struct pl_assets *a, const char *font_path, int font_px,
 	int bar_alpha, int popup_alpha);
+/* The crisp style for a bar of bar_h pixels: built-in pixel fonts, no font
+ * file. Never fails. */
+void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha);
 void pl_assets_free(struct pl_assets *a);
 
-/* Text widths for the layout. */
+/* Text widths for the layout, and whether the layout is for the crisp style. */
 void pl_assets_metrics(const struct pl_assets *a, struct pl_metrics *m);
 
 /* Builds the masks for the sizes in l, unless they exist already. False if an

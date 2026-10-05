@@ -167,11 +167,15 @@ static bool clip_rect(const struct pl_canvas *c, struct pl_rect r, const struct 
 
 void pl_fill(const struct pl_canvas *c, struct pl_rect r, uint32_t rgb, int alpha)
 {
+	pl_fill_px(c, r, pl_pixel(c, rgb, alpha));
+}
+
+void pl_fill_px(const struct pl_canvas *c, struct pl_rect r, uint32_t px)
+{
 	int x0, y0, x1, y1;
 
 	if (!clip_rect(c, r, NULL, &x0, &y0, &x1, &y1))
 		return;
-	uint32_t px = pl_pixel(c, rgb, alpha);
 	for (int y = y0; y < y1; y++) {
 		uint8_t *row = c->data + (size_t)y * c->stride;
 		if (c->fmt == PL_FMT_RGB565) {

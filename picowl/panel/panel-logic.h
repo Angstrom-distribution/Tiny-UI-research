@@ -247,6 +247,10 @@ struct pl_metrics {
 	int clock_w;		/* "88:88" */
 	int bat_text_w;		/* "100%" */
 	int pct_w;		/* "100%" in the slider row */
+	/* The crisp style draws a thumb and a track of odd sizes: they then have a
+	 * centre pixel and centre row, which is what keeps a disc and a bar
+	 * symmetric on whole pixels. */
+	bool crisp;
 };
 
 struct pl_slider {

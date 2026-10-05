@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include "panel-crisp.h"
 #include "panel-draw.h"
 
 /* ---- assets ---- */
@@ -14,6 +15,15 @@ bool pl_assets_init(struct pl_assets *a, const char *font_path, int font_px,
 	a->popup_alpha = pl_clamp_alpha(popup_alpha);
 	int small = font_px * 11 / 12;
 	return pl_font_load(&a->font, font_path, font_px, small < 8 ? 8 : small);
+}
+
+void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha)
+{
+	memset(a, 0, sizeof(*a));
+	a->crisp = true;
+	a->bar_alpha = pl_clamp_alpha(bar_alpha);
+	a->popup_alpha = pl_clamp_alpha(popup_alpha);
+	pl_font_load_crisp(&a->font, bar_h);
 }
 
 static void masks_free(struct pl_assets *a)
@@ -42,6 +52,7 @@ void pl_assets_metrics(const struct pl_assets *a, struct pl_metrics *m)
 	m->clock_w = pl_font_text_w(&a->font, 0, "88:88");
 	m->bat_text_w = pl_font_text_w(&a->font, 0, "100%");
 	m->pct_w = pl_font_text_w(&a->font, 1, "100%");
+	m->crisp = a->crisp;
 }
 
 /* All shapes are drawn in a box of 18 units and scaled to the icon size. */
@@ -178,6 +189,11 @@ static float rr_sd(const void *ctx, float x, float y)
 
 bool pl_assets_prepare(struct pl_assets *a, const struct pl_layout *l)
 {
+	/* The crisp style draws its shapes directly, there is nothing to build. */
+	if (a->crisp) {
+		a->built = true;
+		return true;
+	}
 	int key[13] = { l->bar_icon, l->row_icon.w, l->slider.thumb_d, l->slider.track.w,
 		l->slider.track_h, l->hl[0].w, l->hl[0].h, l->bat_icon_w, l->bat_icon_h,
 		l->hl[PL_BTN_CLOCK].w, l->hl[PL_BTN_CLOCK].h, l->hl[PL_BTN_BATTERY].w,
@@ -247,6 +263,17 @@ int pl_speaker_variant(int vol_pct)
 
 /* ---- widgets ---- */
 
+/* The highlight of an open button: the smooth style's rounded mask, or a flat
+ * rectangle with its corner pixels cut. */
+static void highlight(const struct pl_canvas *c, const struct pl_assets *a,
+	const struct pl_mask *m, struct pl_rect r)
+{
+	if (a->crisp)
+		pl_crisp_pill(c, r, PL_COL_HL, 255, r.x + r.w);
+	else
+		pl_blit(c, m, r.x, r.y, PL_COL_HL, 255, NULL);
+}
+
 struct pl_rect pl_button_rect(const struct pl_layout *l, int slider)
 {
 	struct pl_rect r = l->button[slider];
@@ -269,8 +296,7 @@ void pl_render_clock(const struct pl_canvas *c, const struct pl_layout *l,
 
 	pl_fill(c, l->clock, PL_COL_BG, a->bar_alpha);
 	if (open)
-		pl_blit(c, &a->hl_clock, l->hl[PL_BTN_CLOCK].x, l->hl[PL_BTN_CLOCK].y, PL_COL_HL,
-			255, NULL);
+		highlight(c, a, &a->hl_clock, l->hl[PL_BTN_CLOCK]);
 	pl_clock_text(buf, sizeof(buf), st->hour, st->min);
 	pl_font_draw(c, &a->font, 0, PL_MARGIN, l->clock.y, l->clock.h, buf, PL_COL_FG,
 		pl_text_sub(a->sub, a->bar_alpha));
@@ -286,8 +312,7 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 
 	pl_fill(c, l->battery, PL_COL_BG, a->bar_alpha);
 	if (open)
-		pl_blit(c, &a->hl_bat, l->hl[PL_BTN_BATTERY].x, l->hl[PL_BTN_BATTERY].y, PL_COL_HL,
-			255, NULL);
+		highlight(c, a, &a->hl_bat, l->hl[PL_BTN_BATTERY]);
 	pl_battery_text(buf, sizeof(buf), st->bat, st->bat_pct);
 	int tw = pl_font_text_w(&a->font, 0, buf);
 	int tx = l->battery.x + l->battery.w - PL_MARGIN - tw;
@@ -300,6 +325,15 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	bool charging = st->bat == PL_BAT_CHARGING;
 	int iw = l->bat_icon_w, ih = l->bat_icon_h;
 	int ix = tx - PL_GAP - iw, iy = l->battery.y + (dh - ih) / 2;
+	/* Low wins over charging: the bolt says it is charging, the red that it
+	 * is nearly empty. */
+	uint32_t col = pct <= PL_BAT_LOW_PCT ? PL_COL_BAT_LOW :
+		charging ? PL_COL_BAT_CHARGING : PL_COL_BAT_FILL;
+
+	if (a->crisp) {
+		pl_crisp_battery(c, ix, iy, iw, ih, pct, col, charging);
+		return;
+	}
 	/* The interior is inset by the outline and a gap of 1 px. */
 	int ol = ih * 12 / 100 + (ih * 12 % 100 >= 50);
 	int ins = (ol < 1 ? 1 : ol) + 1, inner_w = iw - 2 - 2 * ins;
@@ -307,10 +341,6 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	/* A sliver of 1 px is lost in the outline's anti-aliasing. */
 	if (fw < 2 && pct > 0)
 		fw = 2;
-	/* Low wins over charging: the bolt says it is charging, the red that it
-	 * is nearly empty. */
-	uint32_t col = pct <= PL_BAT_LOW_PCT ? PL_COL_BAT_LOW :
-		charging ? PL_COL_BAT_CHARGING : PL_COL_BAT_FILL;
 	struct pl_rect clip = { ix, iy, ins + fw, ih };
 
 	pl_blit(c, &a->bat_outline, ix, iy, PL_COL_FG, 255, NULL);
@@ -319,6 +349,19 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	if (charging)
 		pl_blit(c, &a->bolt, ix + (iw - 2 - a->bolt.w) / 2,
 			iy + (ih - a->bolt.h) / 2, PL_COL_BOLT, 255, NULL);
+}
+
+/* The icon is the largest whole multiple of its grid that fits in a box of
+ * `box` pixels, centred on cx, cy (the pixel at or after the middle, so a box
+ * with an odd number of rows has one more row below the icon than above). */
+static void draw_icon_crisp(const struct pl_canvas *c, int slider, int vol_pct, int box,
+	int cx, int cy, uint32_t ink)
+{
+	const struct pl_bitmap *b = slider == PL_SLIDER_BACKLIGHT ? &pl_ico_sun :
+		&pl_ico_speaker[pl_speaker_variant(vol_pct)];
+	int sc = pl_crisp_icon_scale(box);
+
+	pl_crisp_bitmap(c, b, sc, cx - b->w * sc / 2, cy - b->h * sc / 2, ink);
 }
 
 static const struct pl_mask *icon_mask(const struct pl_assets *a, int slider, int vol_pct,
@@ -334,11 +377,16 @@ void pl_render_button(const struct pl_canvas *c, const struct pl_layout *l,
 	struct pl_rect r = pl_button_rect(l, slider);
 	int pct = slider == PL_SLIDER_BACKLIGHT ? st->bl_pct : st->vol_pct;
 	uint32_t ink = pct < 0 ? PL_COL_DISABLED : open == slider ? PL_COL_ACCENT : PL_COL_FG;
-	const struct pl_mask *m = icon_mask(a, slider, pct, 0);
 
 	pl_fill(c, r, PL_COL_BG, a->bar_alpha);
 	if (open == slider)
-		pl_blit(c, &a->hl, l->hl[slider].x, l->hl[slider].y, PL_COL_HL, 255, NULL);
+		highlight(c, a, &a->hl, l->hl[slider]);
+	if (a->crisp) {
+		draw_icon_crisp(c, slider, pct, l->bar_icon, r.x + r.w / 2, r.y + r.h / 2, ink);
+		return;
+	}
+	const struct pl_mask *m = icon_mask(a, slider, pct, 0);
+
 	pl_blit(c, m, r.x + (r.w - m->w) / 2, r.y + (r.h - m->h) / 2, ink, 255, NULL);
 }
 
@@ -357,11 +405,19 @@ void pl_render_row_value(const struct pl_canvas *c, const struct pl_layout *l,
 	int cx = th.x + th.w / 2;
 	struct pl_rect left = { s->track.x, ty, cx - s->track.x, s->track_h };
 
-	pl_blit(c, &a->track, s->track.x, ty, PL_COL_TRACK, 255, NULL);
-	pl_blit(c, &a->track, s->track.x, ty, PL_COL_ACCENT, 255, &left);
-	/* The ring is the part that lets the window behind show through. */
-	pl_blit(c, &a->ring, th.x, th.y, PL_COL_THUMB_RING, a->popup_alpha, NULL);
-	pl_blit(c, &a->disc, th.x, th.y, PL_COL_THUMB, 255, NULL);
+	if (a->crisp) {
+		struct pl_rect tr = { s->track.x, ty, s->track.w, s->track_h };
+
+		pl_crisp_pill(c, tr, PL_COL_TRACK, 255, tr.x + tr.w);
+		pl_crisp_pill(c, tr, PL_COL_ACCENT, 255, cx);
+		pl_crisp_thumb(c, th.x, th.y, s->thumb_d, PL_COL_THUMB_RING, PL_COL_THUMB);
+	} else {
+		pl_blit(c, &a->track, s->track.x, ty, PL_COL_TRACK, 255, NULL);
+		pl_blit(c, &a->track, s->track.x, ty, PL_COL_ACCENT, 255, &left);
+		/* The ring is the part that lets the window behind show through. */
+		pl_blit(c, &a->ring, th.x, th.y, PL_COL_THUMB_RING, a->popup_alpha, NULL);
+		pl_blit(c, &a->disc, th.x, th.y, PL_COL_THUMB, 255, NULL);
+	}
 
 	pl_pct_text(buf, sizeof(buf), pct);
 	int tw = pl_font_text_w(&a->font, 1, buf);
@@ -418,9 +474,17 @@ void pl_render_row(const struct pl_canvas *c, const struct pl_layout *l,
 		return;
 	}
 	int pct = open == PL_SLIDER_BACKLIGHT ? st->bl_pct : st->vol_pct;
-	const struct pl_mask *m = icon_mask(a, open, pct, 1);
-	pl_blit(c, m, l->row_icon.x, l->row_icon.y, pct < 0 ? PL_COL_DISABLED : PL_COL_FG, 255,
-		NULL);
+	uint32_t ink = pct < 0 ? PL_COL_DISABLED : PL_COL_FG;
+
+	if (a->crisp) {
+		const struct pl_rect *ri = &l->row_icon;
+
+		draw_icon_crisp(c, open, pct, ri->w, ri->x + ri->w / 2, ri->y + ri->h / 2, ink);
+	} else {
+		const struct pl_mask *m = icon_mask(a, open, pct, 1);
+
+		pl_blit(c, m, l->row_icon.x, l->row_icon.y, ink, 255, NULL);
+	}
 	pl_render_row_value(c, l, a, st, open);
 }
 

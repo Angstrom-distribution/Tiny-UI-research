@@ -42,7 +42,9 @@ color = #101010
 # --font PATH and --font-size PX (the text is rasterized from a TrueType font,
 # by default the first Liberation Sans or DejaVu Sans file that exists, else a
 # built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
-# translucent), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
+# translucent), --style smooth|crisp (default smooth; crisp draws no anti-aliasing at
+# all, with built-in pixel fonts and icons on whole pixels, and ignores --font,
+# --font-size and --subpixel), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
 # (default auto: LCD text in the order [output] subpixel advertises, in
 # grayscale where the ground is translucent or the stripes do not run across)
 # and --battery-mah N (the battery's capacity, the last resort for the time left

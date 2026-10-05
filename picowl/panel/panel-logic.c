@@ -220,6 +220,12 @@ void pl_layout_compute(struct pl_layout *l, int w, int bar_h, bool row_shown,
 	if (s->thumb_d > tw / 2)
 		s->thumb_d = tw / 2 < 2 ? 2 : tw / 2;
 	s->track_h = clampi(l->row_h / 6, 4, 8);
+	if (m->crisp) {
+		if (s->thumb_d > 1 && !(s->thumb_d & 1))
+			s->thumb_d--;
+		if (!(s->track_h & 1))
+			s->track_h--;
+	}
 	s->track = (struct pl_rect){ tx, ry, tw, l->row_h };
 	/* Wide enough for a stylus to land on, short of the icon and the text. */
 	s->cell = (struct pl_rect){ tx - 6, ry, tw + 12, l->row_h };

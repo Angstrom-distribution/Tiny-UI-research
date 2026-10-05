@@ -66,6 +66,7 @@ struct panel {
 	int font_px;
 	int bar_alpha, popup_alpha;
 	enum pl_subopt subopt;
+	bool crisp;		/* --style crisp: pixel fonts and whole-pixel shapes */
 	int battery_mah;	/* capacity given by the user, 0 unknown */
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
@@ -826,7 +827,8 @@ static void sub_update(struct panel *p)
 	if (s == p->sub)
 		return;
 	p->sub = s;
-	if (p->assets_ready) {
+	/* Crisp text has no colour fringes whatever the output says. */
+	if (p->assets_ready && !p->crisp) {
 		p->assets.sub = s;
 		p->dirty |= W_CLOCK | W_BATTERY | W_ROW;
 	}
@@ -1132,11 +1134,11 @@ static void dump_state(const struct panel *p, const char *why)
 		p->canvas.fmt == PL_FMT_RGB565 ? "RGB565" :
 		p->canvas.fmt == PL_FMT_ARGB8888 ? "ARGB8888" : "XRGB8888",
 		p->bottom ? "bottom" : "top", slider_name(p->pop.open));
-	printf("style font=%s%s%s size=%d small=%d bar_alpha=%d popup_alpha=%d\n",
-		p->font_ttf ? "ttf" : "bitmap", p->font_ttf ? ":" : "",
+	printf("style %s=%s%s%s size=%d small=%d bar_alpha=%d popup_alpha=%d\n",
+		p->crisp ? "crisp font" : "font",
+		p->crisp ? "pixel" : p->font_ttf ? "ttf" : "bitmap", p->font_ttf ? ":" : "",
 		p->font_ttf ? p->assets.font.path : "",
-		p->font_ttf ? p->assets.font.face[0].px : p->assets.font.scale[0] * 7,
-		p->font_ttf ? p->assets.font.face[1].px : p->assets.font.scale[1] * 7,
+		pl_font_face_px(&p->assets.font, 0), pl_font_face_px(&p->assets.font, 1),
 		p->bar_alpha, p->popup_alpha);
 	printf("text subpixel=%s\n", p->assets.sub == PL_SUB_RGB ? "rgb" :
 		p->assets.sub == PL_SUB_BGR ? "bgr" : "none");
@@ -1190,8 +1192,7 @@ static void dump_state(const struct panel *p, const char *why)
 		printf("row kind=%s", pl_row_kind_of(p->pop.open) == PL_ROW_DATE ? "date" : "estimate");
 		print_rect("rect", l->row);
 		printf(" size=%d width=%d avail=%d text=\"%s\"\n",
-			p->font_ttf ? p->assets.font.face[t.face].px : p->assets.font.scale[t.face] * 7,
-			t.w, l->text.w, t.text);
+			pl_font_face_px(&p->assets.font, t.face), t.w, l->text.w, t.text);
 	}
 	fflush(stdout);
 }
@@ -1204,6 +1205,10 @@ static void usage(FILE *out)
 		"usage: picowl-panel [options]\n"
 		"  --height N          height of the bar in pixels, %d..%d (default %d)\n"
 		"  --bottom            anchor at the bottom edge (default: top)\n"
+		"  --style STYLE       smooth (default) or crisp: crisp draws nothing\n"
+		"                      anti-aliased, with built-in pixel fonts and icons on\n"
+		"                      whole pixels, and ignores --font, --font-size and\n"
+		"                      --subpixel\n"
 		"  --font PATH         TrueType font file (default: the first of the\n"
 		"                      Liberation Sans and DejaVu Sans files that exist);\n"
 		"                      without a usable one the built-in bitmap font is used\n"
@@ -1297,6 +1302,16 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				p->subopt = PL_SUBOPT_NONE;
 			else {
 				say("--subpixel: '%s' is not auto, rgb, bgr or none", v);
+				return -1;
+			}
+		} else if (!strcmp(a, "--style") && i + 1 < argc) {
+			const char *v = argv[++i];
+			if (!strcmp(v, "smooth")) {
+				p->crisp = false;
+			} else if (!strcmp(v, "crisp")) {
+				p->crisp = true;
+			} else {
+				say("--style: '%s' is not smooth or crisp", v);
 				return -1;
 			}
 		} else if (!strcmp(a, "--font") && i + 1 < argc) {
@@ -1540,14 +1555,18 @@ int main(int argc, char **argv)
 
 	/* The font is read once, here: glyphs are rasterized into memory and the
 	 * file is let go. Without one the panel still works, in the bitmap font. */
-	int px = p.font_px ? p.font_px : pl_default_font_px(p.height);
-	p.font_ttf = pl_assets_init(&p.assets, p.font_path, px, p.bar_alpha, p.popup_alpha);
-	if (!p.font_ttf && p.font_path)
-		say("cannot use the font '%s', using the built-in bitmap font", p.font_path);
-	else if (!p.font_ttf)
-		say("no usable font file found, using the built-in bitmap font");
+	if (p.crisp) {
+		pl_assets_init_crisp(&p.assets, p.height, p.bar_alpha, p.popup_alpha);
+	} else {
+		int px = p.font_px ? p.font_px : pl_default_font_px(p.height);
+		p.font_ttf = pl_assets_init(&p.assets, p.font_path, px, p.bar_alpha, p.popup_alpha);
+		if (!p.font_ttf && p.font_path)
+			say("cannot use the font '%s', using the built-in bitmap font", p.font_path);
+		else if (!p.font_ttf)
+			say("no usable font file found, using the built-in bitmap font");
+		p.assets.sub = p.sub;
+	}
 	p.assets_ready = true;
-	p.assets.sub = p.sub;
 
 	p.st.hour = p.st.min = -1;
 	p.st.year = p.st.mon = p.st.mday = p.st.wday = -1;

@@ -96,6 +96,93 @@ static void rasterize_lcd(const stbtt_fontinfo *info, float sx, float sy, int cp
 	gl->lcd_xoff = p0;
 }
 
+/* ---- pixel fonts of the crisp style ---- */
+
+/* The rows of the digit 0 say how tall the digits are and where they sit on the
+ * baseline, which is what centres a line of text in a band. */
+static void pix_face_init(struct pl_face *fc, const struct pl_pixface *pf)
+{
+	const struct pl_pixfont *f = pf->f;
+	const uint8_t *g = pl_pixfont_glyph(f, '0');
+	int first = -1, last = -1;
+
+	for (int r = 0; r < f->h; r++)
+		for (int x = 0; x < f->w; x++)
+			if (pl_pixfont_bit(f, g, r, x)) {
+				if (first < 0)
+					first = r;
+				last = r;
+			}
+	fc->px = f->h * pf->scale;
+	fc->digit_h = (last - first + 1) * pf->scale;
+	fc->digit_top = (f->ascent - first) * pf->scale;
+}
+
+void pl_font_load_crisp(struct pl_font *f, int bar_h)
+{
+	/* The default bar has one scale, a bar twice as high gets glyphs twice as
+	 * big, and so on: a whole number, never a fraction. */
+	int sb = (bar_h + 2) / 20, sr = pl_row_height(bar_h) / 36;
+	static const struct pl_pixfont *const rows[PL_ROW_FACES] = {
+		&pl_pixfont_10x20, &pl_pixfont_9x15B, &pl_pixfont_7x14B, &pl_pixfont_6x10,
+	};
+
+	memset(f, 0, sizeof(*f));
+	f->crisp = true;
+	f->pix[PL_FACE_BAR] = (struct pl_pixface){ &pl_pixfont_7x13B, sb < 1 ? 1 : sb };
+	f->pix[PL_FACE_SMALL] = f->pix[PL_FACE_BAR];
+	for (int i = 0; i < PL_ROW_FACES; i++)
+		f->pix[PL_FACE_ROW + i] = (struct pl_pixface){ rows[i], sr < 1 ? 1 : sr };
+	for (int i = 0; i < PL_FACES; i++)
+		pix_face_init(&f->face[i], &f->pix[i]);
+}
+
+int pl_font_face_px(const struct pl_font *f, int face)
+{
+	return f->ttf || f->crisp ? f->face[face].px : f->scale[face] * 7;
+}
+
+static int pix_text_w(const struct pl_pixface *pf, const char *s)
+{
+	int n = 0;
+
+	for (; *s; s++)
+		n += *s >= PL_PIX_FIRST && *s <= PL_PIX_LAST;
+	return n * pf->f->w * pf->scale;
+}
+
+/* One row of a glyph, as runs of set pixels: each run is a rectangle of one
+ * flat pixel value, so there is no per-pixel work for the empty parts and no
+ * arithmetic on colours at all. */
+static void pix_draw(const struct pl_canvas *c, const struct pl_pixface *pf, int x, int top,
+	const char *s, uint32_t rgb)
+{
+	const struct pl_pixfont *f = pf->f;
+	uint32_t px = pl_pixel(c, rgb, 255);
+	int sc = pf->scale;
+
+	for (; *s; s++) {
+		const uint8_t *g = pl_pixfont_glyph(f, (unsigned char)*s);
+		if (!g)
+			continue;
+		for (int r = 0; r < f->h; r++) {
+			for (int col = 0; col < f->w;) {
+				if (!pl_pixfont_bit(f, g, r, col)) {
+					col++;
+					continue;
+				}
+				int run = 1;
+				while (col + run < f->w && pl_pixfont_bit(f, g, r, col + run))
+					run++;
+				pl_fill_px(c, (struct pl_rect){ x + col * sc, top + r * sc, run * sc, sc },
+					px);
+				col += run;
+			}
+		}
+		x += f->w * sc;
+	}
+}
+
 /* The font file is mapped, read and unmapped again: only the bitmaps stay. */
 static bool rasterize(struct pl_font *f, const char *path, const int px[PL_FACES])
 {
@@ -192,6 +279,7 @@ void pl_font_free(struct pl_font *f)
 {
 	faces_free(f);
 	f->ttf = false;
+	f->crisp = false;
 }
 
 static const struct pl_glyph *glyph_of(const struct pl_face *fc, char ch)
@@ -209,6 +297,8 @@ int pl_font_baseline(const struct pl_font *f, int face, int y, int h)
 
 int pl_font_text_w(const struct pl_font *f, int face, const char *s)
 {
+	if (f->crisp)
+		return pix_text_w(&f->pix[face], s);
 	if (!f->ttf)
 		return pl_text_width(s, f->scale[face]);
 	int w = 0;
@@ -223,6 +313,12 @@ int pl_font_text_w(const struct pl_font *f, int face, const char *s)
 void pl_font_draw(const struct pl_canvas *c, const struct pl_font *f, int face,
 	int x, int y, int h, const char *s, uint32_t rgb, enum pl_sub sub)
 {
+	if (f->crisp) {
+		pix_draw(c, &f->pix[face], x,
+			pl_font_baseline(f, face, y, h) - f->pix[face].f->ascent * f->pix[face].scale,
+			s, rgb);
+		return;
+	}
 	if (!f->ttf) {
 		int sc = f->scale[face], top = y + (h - 7 * sc) / 2;
 		for (; *s; s++, x += 6 * sc) {
