@@ -26,7 +26,7 @@ It enables once per focus, never per key. Hiding the keyboard with the toggle bu
 
 ## 0002: per-cell damage and an opaque region
 
-Before the patch every redraw sent `wl_surface.damage_buffer(0, 0, width, height)`, so one typed character made the compositor take in the whole frame again: 153,600 bytes at 240x320 RGB565, about 17 ms of bus on an iPAQ h2200. libtsm's cell ages cannot tell what changed, because libtsm stamps the whole screen on every erase, scroll, selection and colour change (its own "more sophisticated ageing" TODOs), which is exactly what editing a line at a prompt does.
+Before the patch every redraw sent `wl_surface.damage_buffer(0, 0, width, height)`, so one typed character made the compositor take in the whole frame again: 153,600 bytes at 240x320 RGB565, about 17 to 19 ms of bus on an iPAQ h2200 at the 7.9 to 9.1 MB/s the MediaQ copy path reaches (`doc/design/mediaq-c8.md`, bus limit). libtsm's cell ages cannot tell what changed, because libtsm stamps the whole screen on every erase, scroll, selection and colour change (its own "more sophisticated ageing" TODOs), which is exactly what editing a line at a prompt does.
 
 With the patch havoc reduces each cell to a key of what decides its pixels (symbol, width, and the two colours with the cursor, selection and inverse mode already applied) and keeps two sets of keys:
 
@@ -62,7 +62,7 @@ When the configured opacity is 255 (the code default, not the 230 of the sample 
 | scenario | commits before | bytes before | commits after | bytes after | reduction |
 |---|---:|---:|---:|---:|---:|
 | type 100 characters, one by one | 100 | 138,240,000 | 100 | 144,000 | 960x |
-| seq 1 3000 | 2 | 2,764,800 | 2 | 100,800 | 27x |
+| seq 1 3000 (the split into commits varies between runs: 2 to 3 commits, 16x to 27x) | 2 | 2,764,800 | 2 | 100,800 | 27x |
 | cursor blink, 10 cycles (hide, show) | 20 | 27,648,000 | 20 | 14,400 | 1,920x |
 | top-like refresh, 20 times | 40 | 55,296,000 | 40 | 3,774,240 | 15x |
 | scroll of one line | 1 | 1,382,400 | 1 | 1,002,240 | 1.4x |

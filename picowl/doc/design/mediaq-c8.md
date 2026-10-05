@@ -247,7 +247,7 @@ A custom per-terminal palette can do better for an unusual default pair. Entries
 
 | Change | Effect | Effort |
 |---|---|---|
-| Damage only the cells redrawn (`wl_surface_damage_buffer` per changed run of cells) instead of the whole surface | A keystroke uploads one cell (about 144 bytes) instead of 153,600 bytes: about 1,000 times fewer bytes, 17.5 ms of bus saved per keystroke; independent of C8 | small: havoc already knows which cells it draws (`draw_cell` skips by age); collect their rectangles |
+| Damage only the cells redrawn (`wl_surface_damage_buffer` per changed run of cells) instead of the whole surface | A keystroke uploads one cell (about 144 bytes if a cell is 6x12 pixels at RGB565 [est]) instead of 153,600 bytes: on the order of 1,000 times fewer bytes, 17.5 ms of bus saved per keystroke; independent of C8 | small: havoc already knows which cells it draws (`draw_cell` skips by age); collect their rectangles |
 | Set an opaque region when `opacity` is 255, or use XRGB8888 or RGB565 buffers | pixman copies instead of blending (no OVER per pixel); RGB565 buffers also halve havoc's memory (two 150 KiB buffers instead of two 300 KiB) and remove the ARGB8888-to-RGB565 conversion in the composite | small |
 | Render indices (stage 4): per (foreground, background) pair a 256-byte table from coverage to the nearest palette index, built lazily (256 nearest-colour searches over 256 entries, about 65 k distance tests, under 1 ms per new pair [est]) | glyph drawing becomes one table load per pixel, cheaper than today's three multiplies per channel; output is a C8 buffer | medium, and needs the palette protocol (section 8.4) |
 
@@ -255,7 +255,7 @@ A custom per-terminal palette can do better for an unusual default pair. Entries
 
 ### 7.3 Cursor, selection and inverse video
 
-havoc draws its text cursor and selection as inverse attributes in the cell grid [read: `tsm/tsm-render.c` lines 185-196 toggle `attr.inverse`, `main.c` `draw_cell` lines 714-733 swap the colours]; in a palette the inverse of an entry is generally not an entry, so the quantiser maps it to the nearest colour (for the default pair, inverse simply swaps the two solids) [inf]. The pointer cursor is a separate surface; picowl only draws its hold animation, and the hardware cursor plane takes its colours directly, not through the palette [datasheet\*].
+havoc draws its text cursor and selection as inverse attributes in the cell grid [read: `tsm/tsm-render.c` lines 185-196 toggle `attr.inverse`, `main.c` `draw_cell` lines 714-733 swap the colours; patch 0002 splits that function into `collect_cell` and `paint_cell`, same swap]; in a palette the inverse of an entry is generally not an entry, so the quantiser maps it to the nearest colour (for the default pair, inverse simply swaps the two solids) [inf]. The pointer cursor is a separate surface; picowl only draws its hold animation, and the hardware cursor plane takes its colours directly, not through the palette [datasheet\*].
 
 ### 7.4 Scrolling
 
