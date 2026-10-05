@@ -33,6 +33,11 @@
 #     with current_avg and one with power_now and energy_now; the wording, the
 #     rounding and the hint for the first two minutes; the same shared open,
 #     switch, close and 3 s auto-close; nothing is ever set by a tap.
+#  U: --style crisp: over a bare desktop, a window of one colour and a patterned
+#     window the pixels of the bar and of every kind of row are exactly the
+#     colours of the theme (no anti-aliasing, no subpixel text, no colour of any
+#     other kind), the smooth style has hundreds, the 1 px lines of the battery
+#     are whole rows and columns, --font, --font-size and --subpixel are ignored.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -1166,6 +1171,144 @@ W=$(sed -n 's/^row kind=estimate .* width=\([0-9]*\) avail=\([0-9]*\) .*/\1 \2/p
 export PICOWL_SYSFS_ROOT=$SYS
 stop_picowl
 echo "panel-e2e: K ok"
+
+# ---- U: the crisp style ----
+# --style crisp draws nothing anti-aliased: over a bare desktop, over a window of
+# one colour and over a patterned one, the pixels of the panel are exactly the
+# flat colours of its theme and no others, and the 1 px lines of the icons are
+# whole rows and columns. The smooth style over the same scene has hundreds of
+# colours. The ground is opaque (--popup-alpha 255), so that the window cannot
+# show through and the set of colours is exact.
+start_picowl
+echo 600 >"$BL/brightness"
+printf 'volume 8\nswitch 0\n' >"$CTL"
+# The colour of a theme colour once it has been through an RGB565 buffer, which
+# is what an opaque panel draws in.
+q565() {
+	v=$((0x$1))
+	r=$(( ((v >> 16) & 255) * 31 + 127 )); r=$((r / 255))
+	g=$(( ((v >> 8) & 255) * 63 + 127 )); g=$((g / 255))
+	b=$(( (v & 255) * 31 + 127 )); b=$((b / 255))
+	printf '%02x%02x%02x\n' $(( (r << 3) | (r >> 2) )) $(( (g << 2) | (g >> 4) )) $(( (b << 3) | (b >> 2) ))
+}
+C_BG=1c1f24 C_LINE=363b44 C_ROW=252930 C_ROWLINE=3d434d C_FG=e8eaed C_ACCENT=4c8dff
+C_HL=2b3a57 C_TRACK=454b55 C_THUMB=ffffff C_RING=aeb4be C_FILL=c9cdd3 C_EMPTY=30353c
+C_LOW=e5484d C_CHARGING=3fb950
+u_want() { for c in "$@"; do q565 "$c"; done | sort -u; }
+u_got() { sed -n 's/^pw-capture-client: colour \([0-9a-f]*\) .*/\1/p' "$1" | sort -u; }
+# u_bat PCT STATUS
+u_bat() { echo "$1" >"$BAT/capacity"; echo "$2" >"$BAT/status"; }
+# u_scene NAME HEIGHT PCT STATUS INJECT WINARGS COLOURS...: the panel's pixels
+# (the top HEIGHT rows of the capture) are exactly these colours.
+u_scene() {
+	name=$1; uh=$2; pct=$3; st=$4; inj=$5; win=$6; shift 6
+	u_bat "$pct" "$st"
+	CLIENTPID=
+	if [ -n "$win" ]; then
+		"$CLIENT" $win --linger 30 >"$DIR/client.out" 2>&1 &
+		CLIENTPID=$!
+		wait_for "$DIR/client.out" 'mapped' 5 "U client"
+	fi
+	start_panel u --style crisp --popup-alpha 255 --inject "$inj"
+	[ "$uh" -gt 18 ] && wait_for "$DIR/u.out" '^row ' 5 "U $name row open"
+	sleep 0.3
+	"$CAPTURE" --palette "0,0,240,$uh" --dump "0,0,240,$uh" >"$DIR/u.cap" 2>&1 || fail "U $name: capture failed: $(head -c 300 "$DIR/u.cap")"
+	stop_panel U
+	[ -n "$CLIENTPID" ] && { kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=; }
+	u_want "$@" >"$DIR/u.want"
+	u_got "$DIR/u.cap" >"$DIR/u.got"
+	if ! cmp -s "$DIR/u.want" "$DIR/u.got"; then
+		echo "U $name: wanted"; cat "$DIR/u.want"; echo "got"; cat "$DIR/u.got"
+		fail "U $name: the colours of the panel are not exactly its palette (window: ${win:-none})"
+	fi
+	echo "panel-e2e: U $name (window: ${win:-none}): $(wc -l <"$DIR/u.got") colours, exactly the palette"
+}
+# One scene per kind of row, each over the three grounds.
+for WIN in "" "--color 00ff00" "--pattern"; do
+	u_scene "closed bar" 18 73 Discharging "w1" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL
+	u_scene "backlight row" 54 73 Charging "ibl" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_CHARGING \
+		$C_HL $C_ACCENT $C_ROW $C_ROWLINE $C_TRACK $C_THUMB $C_RING
+	u_scene "volume row" 54 10 Discharging "ivol" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_LOW \
+		$C_HL $C_ACCENT $C_ROW $C_ROWLINE $C_TRACK $C_THUMB $C_RING
+	u_scene "date row" 54 73 Discharging "icl" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL \
+		$C_HL $C_ROW $C_ROWLINE
+	u_scene "battery row" 54 10 Charging "ibat" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_LOW \
+		$C_THUMB $C_HL $C_ROW $C_ROWLINE
+done
+
+# The same scene in the smooth style has intermediate colours all over.
+u_bat 73 Charging
+start_panel u --style smooth --subpixel none --popup-alpha 255 --inject "ibl"
+wait_for "$DIR/u.out" '^row ' 5 "U smooth row open"
+sleep 0.3
+"$CAPTURE" --palette "0,0,240,54" >"$DIR/u.cap" 2>&1 || fail "U: capture failed"
+SMOOTH_N=$(sed -n 's/.*palette \([0-9]*\)$/\1/p' "$DIR/u.cap")
+stop_panel U
+[ "${SMOOTH_N:-0}" -gt 30 ] || fail "U: the smooth style has only ${SMOOTH_N:-0} colours, the contrast with crisp is lost"
+echo "panel-e2e: U the smooth style has $SMOOTH_N colours where the crisp one has 12"
+
+# The 1 px lines of the battery are whole rows and columns: its outline is a
+# 16x8 box of which the first and last rows and the first and last columns are
+# set but for the corner pixels, with a nub of 2 columns and 4 rows.
+u_bat 50 Discharging
+start_panel u --style crisp --popup-alpha 255
+sleep 0.3
+BR=$(val "$DIR/u.out" battery rect)
+BX=$(comp "$BR" 1); BW=$(comp "$BR" 3); BY=$(comp "$BR" 2)
+IX=$((BX + BW - 8 - 21 - 4 - 16)); IY=$((BY + 4))
+"$CAPTURE" --dump "$IX,$IY,16,8" >"$DIR/u.cap" 2>&1 || fail "U: capture failed"
+stop_panel U
+# bp X Y: the colour at x, y of the icon
+bp() { awk -v y=$((IY + $2)) -v x=$(($1 + 1)) '$3 == y { print $(3 + x) }' "$DIR/u.cap"; }
+FGQ=$(q565 $C_FG); BGQ=$(q565 $C_BG)
+for x in 1 2 3 4 5 6 7 8 9 10 11 12; do
+	[ "$(bp $x 0)" = "$FGQ" ] || fail "U: the battery's top row is not set at x=$x ($(bp $x 0), wanted $FGQ)"
+	[ "$(bp $x 7)" = "$FGQ" ] || fail "U: the battery's bottom row is not set at x=$x"
+done
+for y in 1 2 3 4 5 6; do
+	[ "$(bp 0 $y)" = "$FGQ" ] || fail "U: the battery's left column is not set at y=$y"
+	[ "$(bp 13 $y)" = "$FGQ" ] || fail "U: the battery's right column is not set at y=$y"
+done
+for corner in "0 0" "13 0" "0 7" "13 7"; do
+	[ "$(bp $corner)" = "$BGQ" ] || fail "U: the battery's corner $corner is not cut"
+done
+for y in 2 3 4 5; do
+	[ "$(bp 14 $y)" = "$FGQ" ] && [ "$(bp 15 $y)" = "$FGQ" ] || fail "U: the battery's nub is not 2x4"
+done
+[ "$(bp 14 1)" = "$BGQ" ] && [ "$(bp 15 6)" = "$BGQ" ] || fail "U: the battery's nub is longer than 4 rows"
+# 50 percent of 10 columns: 5 whole columns of fill, each as high as the interior.
+FILLQ=$(q565 $C_FILL); EMPTYQ=$(q565 $C_EMPTY)
+for x in 2 3 4 5 6; do
+	for y in 2 3 4 5; do
+		[ "$(bp $x $y)" = "$FILLQ" ] || fail "U: the fill is not whole at $x,$y"
+	done
+done
+for x in 7 8 9 10 11; do
+	for y in 2 3 4 5; do
+		[ "$(bp $x $y)" = "$EMPTYQ" ] || fail "U: the empty part is not whole at $x,$y"
+	done
+done
+echo "panel-e2e: U the battery's outline, nub and fill are whole pixels"
+
+# What the style asks for: the pixel fonts, no subpixel text whatever the output
+# advertises, --font and --font-size ignored without a word, and the odd thumb.
+stop_picowl
+h_picowl horizontal_rgb
+dump u.out --style crisp --subpixel rgb --font /nonexistent/font.ttf --font-size 30 --inject "ibl"
+has "$DIR/u.out" '^style crisp font=pixel size=13 small=13 ' "U the style line"
+has "$DIR/u.out" '^text subpixel=none$' "U crisp text is never subpixel text"
+[ ! -s "$DIR/u.out.err" ] || fail "U: --font and --font-size are ignored with a message: $(cat "$DIR/u.out.err")"
+TH=$(val "$DIR/u.out" row thumb)
+[ "$(comp "$TH" 3)" -eq 21 ] && [ "$(comp "$TH" 4)" -eq 21 ] || fail "U: the thumb is $TH, wanted 21 px"
+dump u.out --style crisp --inject "icl"
+has "$DIR/u.out" '^row kind=date .* size=20 ' "U the date is in the 20 px font"
+dump u.out --style smooth
+has "$DIR/u.out" '^style font=' "U --style smooth is the default style"
+"$PANEL" --style fancy --dump-state >"$DIR/u.out" 2>"$DIR/u.err"
+[ $? -eq 2 ] || fail "U: --style fancy is not an error"
+has "$DIR/u.err" "is not smooth or crisp" "U the message for a bad style"
+stop_picowl
+echo "panel-e2e: U ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

@@ -8,7 +8,11 @@
  * 0 when the compositor does not advertise zwlr_screencopy_manager_v1.
  * --at X,Y also prints "pw-capture-client: at X,Y rgb=RRGGBB" (the pixel
  * converted to 8 bits per channel), --distinct X,Y,W,H prints
- * "pw-capture-client: distinct N" for the rectangle. --spread X,Y,W,H with
+ * "pw-capture-client: distinct N" for the rectangle. --palette X,Y,W,H prints
+ * "pw-capture-client: palette N" and one "pw-capture-client: colour RRGGBB COUNT"
+ * line for each colour of the rectangle (up to 4096; more is "palette 4097"),
+ * --dump X,Y,W,H one "pw-capture-client: row Y RRGGBB RRGGBB ..." line for each
+ * row of it. --spread X,Y,W,H with
  * --bg RRGGBB and --fg RRGGBB prints "pw-capture-client: spread max=F ink=N":
  * for each pixel of the rectangle that is not the ground, the coverage of the
  * text colour is worked out per channel in linear light, and F is the largest
@@ -145,12 +149,18 @@ int main(int argc, char **argv)
 {
 	int at_x = -1, at_y = -1, dx = -1, dy = 0, dw = 0, dh = 0;
 	int sx = -1, sy = 0, sw = 0, sh = 0;
+	int px0 = -1, py0 = 0, pw0 = 0, ph0 = 0;
+	int ux = -1, uy = 0, uw = 0, uh = 0;
 	uint32_t bg = 0, fg = 0xffffff;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--at") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d", &at_x, &at_y);
 		else if (!strcmp(argv[i], "--distinct") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d,%d,%d", &dx, &dy, &dw, &dh);
+		else if (!strcmp(argv[i], "--palette") && i + 1 < argc)
+			sscanf(argv[++i], "%d,%d,%d,%d", &px0, &py0, &pw0, &ph0);
+		else if (!strcmp(argv[i], "--dump") && i + 1 < argc)
+			sscanf(argv[++i], "%d,%d,%d,%d", &ux, &uy, &uw, &uh);
 		else if (!strcmp(argv[i], "--spread") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d,%d,%d", &sx, &sy, &sw, &sh);
 		else if (!strcmp(argv[i], "--bg") && i + 1 < argc)
@@ -222,6 +232,37 @@ int main(int argc, char **argv)
 			}
 		printf("pw-capture-client: distinct %d\n", n);
 	}
+	if (px0 >= 0) {
+		static uint32_t col[4096];
+		static int cnt[4096];
+		int n = 0;
+		for (int y = py0; y < py0 + ph0 && (uint32_t)y < height; y++)
+			for (int x = px0; x < px0 + pw0 && (uint32_t)x < width; x++) {
+				uint32_t v = rgb_at(x, y, bpp);
+				int k = 0;
+				while (k < n && col[k] != v)
+					k++;
+				if (k == n && n < 4096) {
+					col[n] = v;
+					cnt[n++] = 0;
+				} else if (k == n) {
+					n = 4097;
+					goto palette_done;
+				}
+				cnt[k]++;
+			}
+palette_done:
+		printf("pw-capture-client: palette %d\n", n);
+		for (int k = 0; k < n && k < 4096; k++)
+			printf("pw-capture-client: colour %06x %d\n", col[k], cnt[k]);
+	}
+	if (ux >= 0)
+		for (int y = uy; y < uy + uh && (uint32_t)y < height; y++) {
+			printf("pw-capture-client: row %d", y);
+			for (int x = ux; x < ux + uw && (uint32_t)x < width; x++)
+				printf(" %06x", rgb_at(x, y, bpp));
+			printf("\n");
+		}
 	if (sx >= 0) {
 		double max = 0;
 		int ink = 0;
