@@ -20,6 +20,27 @@ const char *const pl_font_search[] = {
 	NULL,
 };
 
+void pl_row_face_px(int px_bar, int px[PL_ROW_FACES])
+{
+	/* Taller than this and the line would touch the edges of the 36 px row. */
+	int top = px_bar * 4 / 3;
+
+	if (top > 26)
+		top = 26;
+	if (top < 8)
+		top = 8;
+	px[0] = top;
+	px[1] = top * 7 / 8;
+	px[2] = top * 3 / 4;
+	px[3] = top * 5 / 8;
+	for (int i = 1; i < PL_ROW_FACES; i++) {
+		if (px[i] < 8)
+			px[i] = 8;
+		if (px[i] > px[i - 1])
+			px[i] = px[i - 1];
+	}
+}
+
 static void faces_free(struct pl_font *f)
 {
 	for (int i = 0; i < PL_FACES; i++) {
@@ -143,6 +164,7 @@ bool pl_font_load(struct pl_font *f, const char *path, int px_bar, int px_small)
 {
 	int px[PL_FACES] = { px_bar, px_small };
 
+	pl_row_face_px(px_bar, px + PL_FACE_ROW);
 	memset(f, 0, sizeof(*f));
 	for (int i = 0; i < PL_FACES; i++)
 		f->scale[i] = px[i] >= 11 ? 2 : 1;
@@ -204,7 +226,8 @@ void pl_font_draw(const struct pl_canvas *c, const struct pl_font *f, int face,
 	if (!f->ttf) {
 		int sc = f->scale[face], top = y + (h - 7 * sc) / 2;
 		for (; *s; s++, x += 6 * sc) {
-			const uint8_t *g = pl_font_glyph(*s);
+			/* The bitmap font has capitals only. */
+			const uint8_t *g = pl_font_glyph(*s >= 'a' && *s <= 'z' ? *s - 32 : *s);
 			if (!g)
 				continue;
 			for (int row = 0; row < 7; row++)

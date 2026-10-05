@@ -721,6 +721,8 @@ static void test_masks(void)
 
 /* ---- the font ---- */
 
+#define NOFONT_PATH "/nonexistent/none.ttf"
+
 static void test_font(void)
 {
 	const char *need = "0123456789:%-ACD ";
@@ -738,6 +740,33 @@ static void test_font(void)
 		CHECK(ok, "glyph rows use 5 bits");
 	}
 	CHECK(pl_font_glyph('z') == NULL, "no glyph for z");
+	/* The text rows: every capital, the comma and the full stop. */
+	int caps_ok = 1, caps_distinct = 1;
+	for (char a = 'A'; a <= 'Z'; a++) {
+		const uint8_t *g = pl_font_glyph(a);
+		if (!g)
+			caps_ok = 0;
+		for (char b = a + 1; g && b <= 'Z'; b++)
+			if (pl_font_glyph(b) && !memcmp(g, pl_font_glyph(b), 7))
+				caps_distinct = 0;
+	}
+	CHECK(caps_ok, "the bitmap font has every capital");
+	CHECK(caps_distinct, "and they all differ");
+	CHECK(pl_font_glyph(',') && pl_font_glyph('.'), "the bitmap font has a comma and a full stop");
+	CHECK(memcmp(pl_font_glyph(','), pl_font_glyph('.'), 7), "which differ");
+	{
+		int px[PL_ROW_FACES];
+		pl_row_face_px(11, px);
+		CHECK_EQ(px[0], 14, "text rows: 4/3 of the 11 px bar text");
+		CHECK(px[1] < px[0] && px[2] < px[1] && px[3] < px[2], "the steps get smaller");
+		CHECK(px[3] >= 8, "and stay legible");
+		pl_row_face_px(48, px);
+		CHECK_EQ(px[0], 26, "a huge bar text is capped to fit the row");
+		pl_row_face_px(1, px);
+		CHECK(px[0] == 8 && px[1] == 8 && px[3] == 8, "a tiny one is floored at 8");
+		for (int i = 1; i < PL_ROW_FACES; i++)
+			CHECK(px[i] <= px[i - 1], "steps never grow");
+	}
 	int distinct = 1;
 	for (char a = '0'; a <= '9'; a++)
 		for (char b = a + 1; b <= '9'; b++)
@@ -788,6 +817,20 @@ static void test_font(void)
 		CHECK(pl_font_text_w(&f, 0, "11") == 2 * f.face[0].g[1].adv, "the advance is per glyph");
 		CHECK(pl_font_text_w(&f, 0, "1:") == f.face[0].g[1].adv + f.face[0].g[10].adv,
 			"the colon has an advance too");
+		/* The text rows: letters exist, and each step is narrower. */
+		const char *line = "Wednesday 30 September 2026";
+		int prev = 100000;
+		for (int fc = PL_FACE_ROW; fc < PL_FACES; fc++) {
+			int w = pl_font_text_w(&f, fc, line);
+			CHECK(w > 0 && w < prev, "a text row face is narrower than the one before");
+			prev = w;
+		}
+		CHECK(pl_font_text_w(&f, PL_FACE_ROW, "g") > 0 && pl_font_text_w(&f, PL_FACE_ROW, ",.") > 0,
+			"lower case letters and punctuation have advances");
+		CHECK(pl_font_text_w(&f, PL_FACE_ROW, "ab") ==
+			pl_font_text_w(&f, PL_FACE_ROW, "a") + pl_font_text_w(&f, PL_FACE_ROW, "b"),
+			"text width is the sum of the advances");
+		CHECK(f.face[PL_FACE_ROW].g[40].m.a != NULL, "a lower case glyph has a coverage mask");
 		/* The same text twice at another size. */
 		struct pl_font g;
 		if (pl_font_load(&g, f.path, 22, 18)) {
@@ -799,6 +842,11 @@ static void test_font(void)
 		printf("test-panel: no default font file, the real font checks are skipped\n");
 	}
 	CHECK(!pl_font_load(&f, "/dev/null", 15, 12), "an empty file is not a font");
+	/* Bitmap rows: the scale steps down from 2 to 1, lower case is drawn. */
+	pl_font_load(&f, NOFONT_PATH, 11, 10);
+	CHECK(pl_font_text_w(&f, PL_FACE_ROW, "Monday") > pl_font_text_w(&f, PL_FACES - 1, "Monday"),
+		"bitmap text rows shrink from scale 2 to 1");
+	pl_font_free(&f);
 }
 
 /* ---- drawing ---- */

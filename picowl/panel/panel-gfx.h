@@ -79,7 +79,14 @@ float pl_sd_arc(float px, float py, float cx, float cy, float r, float t, float 
 
 /* ---- text ---- */
 
-#define PL_FACES 2		/* 0: bar text, 1: the value in the slider row */
+/* 0: bar text, 1: the value in the slider row, 2..5: the text rows (date and
+ * battery estimate) from the largest to the smallest, so that a long line can
+ * shrink stepwise instead of being clipped. */
+#define PL_FACE_BAR 0
+#define PL_FACE_SMALL 1
+#define PL_FACE_ROW 2
+#define PL_ROW_FACES 4
+#define PL_FACES (PL_FACE_ROW + PL_ROW_FACES)
 
 /* Colour stripes of the panel along the horizontal axis, left to right. */
 enum pl_sub { PL_SUB_NONE, PL_SUB_RGB, PL_SUB_BGR };
@@ -118,8 +125,11 @@ struct pl_glyph {
 	int lcd_xoff;
 };
 
-#define PL_FONT_CHARS "0123456789:%-AC "
-#define PL_FONT_NCHARS 16
+/* The digits and the clock and battery symbols come first: tests and the
+ * widgets address those by index. The rest is for the text rows. */
+#define PL_FONT_CHARS "0123456789:%-AC " \
+	"BDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz" ",."
+#define PL_FONT_NCHARS 68
 
 struct pl_face {
 	int px;
@@ -138,9 +148,14 @@ struct pl_font {
 /* Default font files, tried in this order; NULL ends the list. */
 extern const char *const pl_font_search[];
 
+/* Sizes of the text-row faces for a bar text size: 4/3 of it, capped so that
+ * the glyphs fit the 36 px row, then three steps down to no smaller than 8. */
+void pl_row_face_px(int px_bar, int px[PL_ROW_FACES]);
+
 /* Loads path, or the first of pl_font_search when path is NULL, and rasterizes
- * the glyphs of the panel at px_bar and px_small. Returns false and uses the
- * built-in bitmap font when there is no usable font file. */
+ * the glyphs of the panel at px_bar and px_small, and of the text rows at the
+ * sizes of pl_row_face_px. Returns false and uses the built-in bitmap font when
+ * there is no usable font file. */
 bool pl_font_load(struct pl_font *f, const char *path, int px_bar, int px_small);
 void pl_font_free(struct pl_font *f);
 
