@@ -46,6 +46,30 @@ static int read_int(const char *dir, const char *attr)
 	return (int)v;
 }
 
+/* A signed attribute, PL_ABSENT if it is missing or not a number. */
+static int64_t read_s64(const char *dir, const char *attr)
+{
+	char buf[32];
+
+	if (!read_attr(dir, attr, buf, sizeof(buf)))
+		return PL_ABSENT;
+	char *end;
+	errno = 0;
+	long long v = strtoll(buf, &end, 10);
+	/* Nothing in a battery is anywhere near 10^13: that is garbage. */
+	if (end == buf || errno || v > 10000000000000LL || v < -10000000000000LL)
+		return PL_ABSENT;
+	return v;
+}
+
+/* A charge, energy or time: negative is garbage. */
+static int64_t read_pos(const char *dir, const char *attr)
+{
+	int64_t v = read_s64(dir, attr);
+
+	return v < 0 ? PL_ABSENT : v;
+}
+
 bool pl_backlight_find(struct pl_backlight *bl, const char *root)
 {
 	char class_dir[300];
@@ -113,12 +137,21 @@ bool pl_backlight_write(const struct pl_backlight *bl, int raw)
 
 void pl_battery_read(const char *root, enum pl_bat_status *st, int *pct)
 {
+	struct pl_batt_raw r;
+
+	pl_battery_read_raw(root, &r);
+	*st = r.st;
+	*pct = r.pct;
+}
+
+void pl_battery_read_raw(const char *root, struct pl_batt_raw *r)
+{
 	char dir[300];
 	char bat[256] = "";
 	char ac[256] = "";
+	int chargers = 0;
 
-	*st = PL_BAT_NONE;
-	*pct = -1;
+	pl_batt_raw_clear(r);
 	if (!root)
 		root = pl_sysfs_root();
 	snprintf(dir, sizeof(dir), "%s/class/power_supply", root);
@@ -143,6 +176,7 @@ void pl_battery_read(const char *root, enum pl_bat_status *st, int *pct)
 			if (!bat[0] || strcmp(e->d_name, bat) < 0)
 				snprintf(bat, sizeof(bat), "%s", e->d_name);
 		} else if (!strcmp(type, "Mains") || !strncmp(type, "USB", 3)) {
+			chargers++;
 			if (read_int(sup, "online") == 1 &&
 					(!ac[0] || strcmp(e->d_name, ac) < 0))
 				snprintf(ac, sizeof(ac), "%s", e->d_name);
@@ -154,15 +188,30 @@ void pl_battery_read(const char *root, enum pl_bat_status *st, int *pct)
 		char sup[560], status[32];
 		snprintf(sup, sizeof(sup), "%s/%s", dir, bat);
 		int v = read_int(sup, "capacity");
-		*pct = v > 100 ? 100 : v;
-		*st = PL_BAT_DISCHARGING;
+		r->pct = v > 100 ? 100 : v;
+		r->st = PL_BAT_DISCHARGING;
 		if (read_attr(sup, "status", status, sizeof(status))) {
 			if (!strcmp(status, "Charging"))
-				*st = PL_BAT_CHARGING;
+				r->st = PL_BAT_CHARGING;
 			else if (!strcmp(status, "Full"))
-				*st = PL_BAT_FULL;
+				r->st = PL_BAT_FULL;
+			else if (!strcmp(status, "Not charging"))
+				r->not_charging = true;
 		}
+		r->charge_now = read_pos(sup, "charge_now");
+		r->charge_full = read_pos(sup, "charge_full");
+		r->charge_full_design = read_pos(sup, "charge_full_design");
+		r->charge_empty = read_pos(sup, "charge_empty");
+		r->energy_now = read_pos(sup, "energy_now");
+		r->energy_full = read_pos(sup, "energy_full");
+		r->energy_full_design = read_pos(sup, "energy_full_design");
+		r->current_now = read_s64(sup, "current_now");
+		r->current_avg = read_s64(sup, "current_avg");
+		r->power_now = read_s64(sup, "power_now");
+		r->time_to_empty_now = read_pos(sup, "time_to_empty_now");
 	} else if (ac[0]) {
-		*st = PL_BAT_AC;
+		r->st = PL_BAT_AC;
 	}
+	if (chargers)
+		r->charger = ac[0] ? 1 : 0;
 }

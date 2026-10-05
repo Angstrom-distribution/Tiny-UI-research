@@ -31,4 +31,9 @@ bool pl_backlight_write(const struct pl_backlight *bl, int raw);
  * PL_BAT_NONE. *pct is -1 without a battery. */
 void pl_battery_read(const char *root, enum pl_bat_status *st, int *pct);
 
+/* The same, and every attribute the time estimate can use (see struct
+ * pl_batt_raw; what the battery does not have is PL_ABSENT) and the state of
+ * the charger. */
+void pl_battery_read_raw(const char *root, struct pl_batt_raw *r);
+
 #endif

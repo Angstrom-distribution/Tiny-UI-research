@@ -614,6 +614,12 @@ static void test_text_buttons(void)
 			CHECK_EQ(w.button[PL_BTN_CLOCK].h, bars[j], "and the whole bar height");
 		}
 
+	/* A clock narrower than a stylus still gets a 36 px button. */
+	struct pl_metrics thin = { 5, 5, 5 };
+	struct pl_layout tl;
+	pl_layout_compute(&tl, 240, BAR, false, false, &thin);
+	CHECK(tl.clock.w < 36 && tl.button[PL_BTN_CLOCK].w == 36, "the clock button is widened to 36 px");
+
 	/* Hits and taps. */
 	struct pl_hit h = pl_hit_test(&l, 3, 0);
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_CLOCK, "the corner of the clock button");
@@ -737,6 +743,614 @@ static void test_text_buttons(void)
 	CHECK(c == 0 && face == 3, "no candidates: no crash");
 	c = pl_fit_choose(many, 3, 0, 100, fake_width, NULL, &face);
 	CHECK(c == 2 && face == 0, "no faces: no crash");
+}
+
+
+/* ---- the battery estimate ---- */
+
+#define SEC30 30000
+
+static struct pl_batt_raw raw_of(enum pl_bat_status st, int pct, int charger)
+{
+	struct pl_batt_raw r;
+
+	pl_batt_raw_clear(&r);
+	r.st = st;
+	r.pct = pct;
+	r.charger = charger;
+	return r;
+}
+
+/* n samples of r, 30 s apart, starting at t. Returns the time of the next. */
+static int64_t feed(struct pl_est *e, const struct pl_batt_raw *r, int n, int64_t t)
+{
+	for (int i = 0; i < n; i++, t += SEC30)
+		pl_est_add(e, r, t);
+	return t;
+}
+
+static void est_text_is(const struct pl_estimate *e, int pct, int variant, const char *want,
+	const char *msg)
+{
+	char buf[48];
+
+	pl_est_text(buf, sizeof(buf), e, pct, variant);
+	CHECK_STR(buf, want, msg);
+}
+
+static void test_estimator(void)
+{
+	struct pl_batt_raw r;
+	struct pl_est e;
+	struct pl_estimate o;
+
+	/* The constants are named and the ones the wording depends on are what
+	 * the design says. */
+	CHECK_EQ(PL_EST_IDLE_UA, 10000, "idle floor 10 mA");
+	CHECK_EQ(PL_EST_MAX_UA, 3000000, "ceiling 3 A");
+	CHECK_EQ(PL_EST_WARM, 4, "four samples to warm up");
+	CHECK_EQ(PL_EST_EMA_K, 8, "weight 1/8");
+	CHECK_EQ(PL_EST_SKIP, 2, "two samples skipped after a change of direction");
+	CHECK_EQ(PL_EST_GAP_MS, 600000, "a gap of 600 s starts again");
+
+	pl_batt_raw_clear(&r);
+	CHECK(r.st == PL_BAT_NONE && r.pct == -1 && r.charger == -1 && !r.not_charging, "clear: nothing");
+	CHECK(r.charge_now == PL_ABSENT && r.charge_full == PL_ABSENT && r.charge_full_design == PL_ABSENT &&
+		r.charge_empty == PL_ABSENT && r.energy_now == PL_ABSENT && r.energy_full == PL_ABSENT &&
+		r.energy_full_design == PL_ABSENT && r.current_now == PL_ABSENT &&
+		r.current_avg == PL_ABSENT && r.power_now == PL_ABSENT &&
+		r.time_to_empty_now == PL_ABSENT, "clear: every attribute absent");
+
+	/* ---- direction ---- */
+	r = raw_of(PL_BAT_NONE, -1, -1);
+	CHECK_EQ(pl_batt_dir(&r, PL_ABSENT), PL_DIR_NONE, "no battery: no direction");
+	r.st = PL_BAT_AC;
+	CHECK_EQ(pl_batt_dir(&r, 500000), PL_DIR_NONE, "AC only: none");
+	r = raw_of(PL_BAT_FULL, 100, 1);
+	CHECK_EQ(pl_batt_dir(&r, 500000), PL_DIR_FULL, "status Full is full, whatever the current");
+	r = raw_of(PL_BAT_DISCHARGING, 50, 1);
+	r.not_charging = true;
+	CHECK_EQ(pl_batt_dir(&r, -500000), PL_DIR_NOTCHARGING, "status Not charging is that");
+	r = raw_of(PL_BAT_CHARGING, 50, 1);
+	r.not_charging = true;
+	CHECK_EQ(pl_batt_dir(&r, 500000), PL_DIR_NOTCHARGING, "Not charging wins over a charging current");
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.not_charging = true;
+	CHECK_EQ(pl_batt_dir(&r, PL_ABSENT), PL_DIR_NOTCHARGING, "and over an offline charger");
+	r = raw_of(PL_BAT_CHARGING, 50, 0);
+	CHECK_EQ(pl_batt_dir(&r, 500000), PL_DIR_DISCHARGING, "no charger online: discharging, whatever status says");
+	r = raw_of(PL_BAT_DISCHARGING, 50, 1);
+	CHECK_EQ(pl_batt_dir(&r, 10001), PL_DIR_CHARGING, "charger online and above +10 mA: charging");
+	CHECK_EQ(pl_batt_dir(&r, 10000), PL_DIR_NOTCHARGING, "exactly +10 mA is not above it: status decides");
+	CHECK_EQ(pl_batt_dir(&r, -5001), PL_DIR_NOTCHARGING, "charger online and below -5 mA: not charging");
+	CHECK_EQ(pl_batt_dir(&r, 0), PL_DIR_NOTCHARGING, "in between with status Discharging: not charging");
+	r.st = PL_BAT_CHARGING;
+	CHECK_EQ(pl_batt_dir(&r, 0), PL_DIR_CHARGING, "in between with status Charging: charging");
+	CHECK_EQ(pl_batt_dir(&r, -5000), PL_DIR_CHARGING, "exactly -5 mA is in between");
+	CHECK_EQ(pl_batt_dir(&r, -6000), PL_DIR_NOTCHARGING, "the current wins over a lagging status");
+	CHECK_EQ(pl_batt_dir(&r, PL_ABSENT), PL_DIR_CHARGING, "no current: the status");
+	r.st = PL_BAT_DISCHARGING;
+	CHECK_EQ(pl_batt_dir(&r, PL_ABSENT), PL_DIR_NOTCHARGING, "online, no current, not charging: not charging");
+	r.charger = -1;
+	CHECK_EQ(pl_batt_dir(&r, 900000), PL_DIR_DISCHARGING, "no charger supply at all: the status");
+	r.st = PL_BAT_CHARGING;
+	CHECK_EQ(pl_batt_dir(&r, -900000), PL_DIR_CHARGING, "and the sign of the current means nothing");
+
+	/* ---- the filter ---- */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -100000;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.n == 1 && e.ema == -100000 && e.dir == PL_DIR_DISCHARGING && e.kind == 1,
+		"the first sample is the average");
+	r.current_now = -200000;
+	pl_est_add(&e, &r, SEC30);
+	CHECK(e.n == 2 && e.ema == -150000, "the second: a running mean, signed");
+	r.current_now = -300000;
+	pl_est_add(&e, &r, 2 * SEC30);
+	CHECK_EQ(e.ema, -200000, "the third: still the mean");
+	pl_est_init(&e);
+	r.current_now = -100000;
+	feed(&e, &r, 8, 0);
+	CHECK(e.n == 8 && e.ema == -100000, "eight of the same");
+	r.current_now = -900000;
+	pl_est_add(&e, &r, 8 * SEC30);
+	CHECK_EQ(e.ema, -200000, "the ninth moves it by 1/8 of the difference");
+	pl_est_add(&e, &r, 9 * SEC30);
+	CHECK_EQ(e.ema, -200000 + (-900000 + 200000) / 8, "and so on, with weight 1/8 and no more");
+	pl_est_init(&e);
+	r.current_now = -99999;
+	pl_est_add(&e, &r, 0);
+	r.current_now = -100002;
+	pl_est_add(&e, &r, SEC30);
+	CHECK_EQ(e.ema, -99999 + (-3) / 2, "signed division truncates toward zero");
+
+	/* current_avg is preferred, then current_now, then power_now. */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -100000;
+	r.current_avg = -300000;
+	r.power_now = 1000000;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.ema == -300000 && e.kind == 1, "current_avg first");
+	pl_est_init(&e);
+	r.current_avg = PL_ABSENT;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.ema == -100000 && e.kind == 1, "then current_now");
+	pl_est_init(&e);
+	r.current_now = PL_ABSENT;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.ema == 1000000 && e.kind == 2, "then power_now");
+	pl_est_init(&e);
+	r.power_now = PL_ABSENT;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.n == 0 && e.kind == 0, "no rate attribute: nothing to filter");
+	pl_est_add(&e, &r, SEC30);
+	CHECK(e.n == 0, "and still nothing");
+
+	/* Idle and glitch samples are not counted and do not move the average. */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -200000;
+	pl_est_add(&e, &r, 0);
+	r.current_now = -9999;
+	pl_est_add(&e, &r, SEC30);
+	CHECK(e.n == 1 && e.ema == -200000, "9.999 mA is idle");
+	r.current_now = 9999;
+	pl_est_add(&e, &r, 2 * SEC30);
+	CHECK(e.n == 1, "so is a positive one");
+	r.current_now = 0;
+	pl_est_add(&e, &r, 3 * SEC30);
+	CHECK(e.n == 1, "so is zero");
+	r.current_now = -10000;
+	pl_est_add(&e, &r, 4 * SEC30);
+	CHECK(e.n == 2, "exactly 10 mA counts");
+	r.current_now = -3000001;
+	pl_est_add(&e, &r, 5 * SEC30);
+	CHECK(e.n == 2, "above 3 A is a glitch");
+	r.current_now = -3000000;
+	pl_est_add(&e, &r, 6 * SEC30);
+	CHECK(e.n == 3, "exactly 3 A counts");
+	pl_est_init(&e);
+	r.current_now = PL_ABSENT;
+	r.power_now = 39999;
+	pl_est_add(&e, &r, 0);
+	CHECK(e.n == 0, "a power below 40 mW is idle");
+	r.power_now = 40000;
+	pl_est_add(&e, &r, SEC30);
+	CHECK(e.n == 1, "40 mW counts");
+	r.power_now = 15000001;
+	pl_est_add(&e, &r, 2 * SEC30);
+	CHECK(e.n == 1, "a power above 15 W is a glitch");
+
+	/* A change of direction starts again and ignores the next two samples. */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -300000;
+	int64_t t = feed(&e, &r, 3, 0);
+	CHECK(e.n == 3 && e.dir == PL_DIR_DISCHARGING, "three samples discharging");
+	r = raw_of(PL_BAT_CHARGING, 50, 1);
+	r.current_now = 500000;
+	pl_est_add(&e, &r, t);
+	CHECK(e.n == 1 && e.ema == 500000 && e.dir == PL_DIR_CHARGING && e.skip == 2,
+		"plugged in: a new run that starts with this sample");
+	r.current_now = 900000;
+	pl_est_add(&e, &r, t + SEC30);
+	pl_est_add(&e, &r, t + 2 * SEC30);
+	CHECK(e.n == 1 && e.ema == 500000 && e.skip == 0, "the next two are ignored");
+	pl_est_add(&e, &r, t + 3 * SEC30);
+	CHECK(e.n == 2 && e.ema == 700000, "the third counts");
+	r.current_now = 5000;
+	pl_est_add(&e, &r, t + 4 * SEC30);
+	CHECK(e.n == 2, "an idle sample is no change of direction");
+	/* Not charging and full leave the run alone. */
+	r = raw_of(PL_BAT_FULL, 100, 1);
+	r.current_now = 500000;
+	pl_est_add(&e, &r, t + 5 * SEC30);
+	CHECK(e.n == 2 && e.dir == PL_DIR_CHARGING, "a full battery adds nothing");
+	r = raw_of(PL_BAT_CHARGING, 50, 1);
+	r.current_now = -100000;
+	pl_est_add(&e, &r, t + 6 * SEC30);
+	CHECK(e.n == 2, "nor does a battery that is not charging");
+
+	/* A gap starts again; exactly 600 s does not. */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -300000;
+	pl_est_add(&e, &r, 1000);
+	pl_est_add(&e, &r, 1000 + 600000);
+	CHECK_EQ(e.n, 2, "600 s apart is one run");
+	pl_est_add(&e, &r, 1000 + 600000 + 600001);
+	CHECK_EQ(e.n, 1, "600.001 s apart is not");
+	pl_est_add(&e, &r, 10);
+	CHECK_EQ(e.n, 1, "a clock that went back starts again too");
+	r.current_now = -1000;
+	pl_est_add(&e, &r, 10 + 700000);
+	CHECK_EQ(e.n, 0, "an idle sample after a gap leaves nothing");
+	/* A battery that changes the rate attribute it has. */
+	pl_est_init(&e);
+	r = raw_of(PL_BAT_DISCHARGING, 50, 0);
+	r.current_now = -300000;
+	feed(&e, &r, 3, 0);
+	r.current_now = PL_ABSENT;
+	r.power_now = 2000000;
+	pl_est_add(&e, &r, 3 * SEC30);
+	CHECK(e.n == 1 && e.kind == 2 && e.ema == 2000000, "from a current to a power: starts again");
+	/* No battery adds nothing. */
+	r = raw_of(PL_BAT_NONE, -1, -1);
+	pl_est_add(&e, &r, 4 * SEC30);
+	r = raw_of(PL_BAT_AC, -1, 1);
+	r.current_now = -300000;
+	pl_est_add(&e, &r, 5 * SEC30);
+	CHECK_EQ(e.n, 1, "AC and none add nothing");
+
+	/* ---- the estimate ---- */
+	r = raw_of(PL_BAT_NONE, -1, -1);
+	pl_est_init(&e);
+	CHECK_EQ(pl_est_compute(&e, &r, 0).kind, PL_EST_NONE, "no battery: --");
+	r = raw_of(PL_BAT_AC, -1, 1);
+	CHECK_EQ(pl_est_compute(&e, &r, 0).kind, PL_EST_AC, "mains and no battery: AC");
+
+	/* The DS2760: charge in uAh with a reserve below charge_empty, current in
+	 * uA negative while discharging, no current_avg, a time_to_empty_now. */
+	struct pl_batt_raw ds = raw_of(PL_BAT_DISCHARGING, 94, 0);
+	ds.charge_now = 950000;
+	ds.charge_empty = 50000;
+	ds.charge_full = 1000000;
+	ds.charge_full_design = 1000000;
+	ds.current_now = -600000;
+	ds.time_to_empty_now = 5400;
+	pl_est_init(&e);
+	t = feed(&e, &ds, 1, 0);
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.hint && o.minutes == 90, "cold start: the kernel's seconds as a hint, 5400 s are 90 min");
+	feed(&e, &ds, 2, t);
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.hint, "three samples: still the hint");
+	t = feed(&e, &ds, 1, t + 2 * SEC30);
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && !o.hint && o.minutes == 90,
+		"four samples: our own number, (950000 - 50000) uAh at 600 mA is 90 min");
+	ds.charge_empty = PL_ABSENT;
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.minutes == 95, "without charge_empty nothing is subtracted: 95 min");
+	ds.charge_empty = 0;
+	CHECK_EQ(pl_est_compute(&e, &ds, 0).minutes, 95, "charge_empty 0 is the same");
+	ds.charge_empty = 960000;
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_ESTIMATING, "charge_now below charge_empty: nothing usable left, never 0 min");
+	ds.charge_empty = 50000;
+	ds.time_to_empty_now = PL_ABSENT;
+	ds.charge_now = PL_ABSENT;
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.minutes == 94 * 1000000 / 100 * 60 / 600000,
+		"no charge_now: capacity times charge_full (94 percent of 1000000 uAh is 94 min)");
+	ds.charge_full = PL_ABSENT;
+	CHECK_EQ(pl_est_compute(&e, &ds, 0).minutes, 94, "then charge_full_design");
+	ds.charge_full_design = PL_ABSENT;
+	CHECK_EQ(pl_est_compute(&e, &ds, 0).kind, PL_EST_ESTIMATING, "no charge at all and no --battery-mah: unknown");
+	o = pl_est_compute(&e, &ds, 1000);
+	CHECK(o.kind == PL_EST_LEFT && o.minutes == 94, "--battery-mah 1000 is the last resort: 94 percent of 1000 mAh");
+	o = pl_est_compute(&e, &ds, 2000);
+	CHECK_EQ(o.minutes, 188, "and it scales");
+	ds.pct = -1;
+	CHECK_EQ(pl_est_compute(&e, &ds, 2000).kind, PL_EST_ESTIMATING, "no capacity either: unknown");
+	ds.pct = 94;
+	ds.charge_now = 950000;
+	ds.time_to_empty_now = PL_ABSENT;
+	o = pl_est_compute(&e, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && !o.hint && o.minutes == 90, "back to charge_now: no hint without time_to_empty_now");
+
+	/* Hints: seconds, positive, under 24 h and at least a minute. */
+	struct pl_est cold;
+	pl_est_init(&cold);
+	ds.time_to_empty_now = 0;
+	CHECK_EQ(pl_est_compute(&cold, &ds, 0).kind, PL_EST_ESTIMATING, "time_to_empty_now 0 is unknown");
+	ds.time_to_empty_now = 59;
+	CHECK_EQ(pl_est_compute(&cold, &ds, 0).kind, PL_EST_ESTIMATING, "under a minute is not shown");
+	ds.time_to_empty_now = 60;
+	o = pl_est_compute(&cold, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.hint && o.minutes == 1, "a minute is");
+	ds.time_to_empty_now = 86399;
+	CHECK_EQ(pl_est_compute(&cold, &ds, 0).minutes, 1439, "just under 24 h is");
+	ds.time_to_empty_now = 86400;
+	CHECK_EQ(pl_est_compute(&cold, &ds, 0).kind, PL_EST_ESTIMATING, "24 h is not");
+	ds.time_to_empty_now = 5400;
+	ds.st = PL_BAT_CHARGING;
+	ds.charger = 1;
+	ds.current_now = 400000;
+	ds.pct = 50;
+	CHECK_EQ(pl_est_compute(&cold, &ds, 0).kind, PL_EST_ESTIMATING, "no hint while charging: it is a time to empty");
+	ds.pct = 94;
+	ds.st = PL_BAT_DISCHARGING;
+	ds.charger = 0;
+	ds.current_now = -600000;
+	ds.time_to_empty_now = PL_ABSENT;
+
+	/* The rate decides: more current, less time. */
+	struct pl_est fast;
+	pl_est_init(&fast);
+	ds.current_now = -1200000;
+	feed(&fast, &ds, 4, 0);
+	CHECK_EQ(pl_est_compute(&fast, &ds, 0).minutes, 45, "at 1.2 A: 900000 uAh is 45 min");
+	ds.current_now = -600000;
+	/* Idle: no current to speak of, so no number. */
+	struct pl_est idle;
+	pl_est_init(&idle);
+	ds.current_now = -5000;
+	feed(&idle, &ds, 6, 0);
+	CHECK_EQ(pl_est_compute(&idle, &ds, 0).kind, PL_EST_ESTIMATING, "idle: estimating, not a fake number");
+	ds.current_now = PL_ABSENT;
+	pl_est_init(&idle);
+	feed(&idle, &ds, 6, 0);
+	CHECK_EQ(pl_est_compute(&idle, &ds, 0).kind, PL_EST_ESTIMATING, "no current attribute: estimating");
+	ds.time_to_empty_now = 5400;
+	o = pl_est_compute(&idle, &ds, 0);
+	CHECK(o.kind == PL_EST_LEFT && o.hint, "with the kernel's time as the only source it stays a hint");
+	ds.time_to_empty_now = PL_ABSENT;
+	ds.current_now = -600000;
+
+	/* A run that is not the direction the battery has now. */
+	struct pl_batt_raw chg = ds;
+	chg.st = PL_BAT_CHARGING;
+	chg.charger = 1;
+	chg.current_now = 400000;
+	chg.pct = 50;
+	chg.charge_now = 500000;
+	chg.charge_full = 1000000;
+	chg.charge_full_design = 1000000;
+	struct pl_batt_raw chg2 = chg;
+	chg2.charger = -1;
+	pl_est_init(&e);
+	feed(&e, &ds, 5, 0);
+	CHECK_EQ(pl_est_compute(&e, &chg2, 0).kind, PL_EST_ESTIMATING, "a discharging run says nothing about charging");
+
+	/* Charging: time to full from charge_full - charge_now. */
+	struct pl_est ce;
+	pl_est_init(&ce);
+	t = feed(&ce, &chg, 3, 0);
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).kind, PL_EST_ESTIMATING, "charging: three samples are not enough");
+	feed(&ce, &chg, 1, t);
+	o = pl_est_compute(&ce, &chg, 0);
+	CHECK(o.kind == PL_EST_TOFULL && o.minutes == 75, "500000 uAh to go at 400 mA is 75 min");
+	chg.pct = 89;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).kind, PL_EST_TOFULL, "89 percent still has a time");
+	chg.pct = 90;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).kind, PL_EST_CHARGING, "90 percent: just Charging, the taper makes the time optimistic");
+	chg.pct = 100;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).kind, PL_EST_CHARGING, "100 percent and still charging: Charging");
+	chg.pct = 50;
+	chg.charge_now = PL_ABSENT;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).minutes, 75, "no charge_now: the percentage of charge_full");
+	chg.charge_full = PL_ABSENT;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).minutes, 75, "then charge_full_design");
+	chg.charge_full_design = PL_ABSENT;
+	CHECK_EQ(pl_est_compute(&ce, &chg, 0).kind, PL_EST_ESTIMATING, "no full: unknown");
+	CHECK_EQ(pl_est_compute(&ce, &chg, 1000).minutes, 75, "--battery-mah 1000: half of it to go, 75 min");
+	chg.charge_now = 1500000;
+	chg.charge_full = 1000000;
+	o = pl_est_compute(&ce, &chg, 0);
+	CHECK(o.kind == PL_EST_ESTIMATING, "charge_now past charge_full at 50 percent: nothing to go, never 0 min");
+	chg.charge_now = 500000;
+	chg.charge_full = 1000000;
+	chg.current_now = 400000;
+	/* The charger is on and the battery gives current: not charging. */
+	struct pl_batt_raw nc = chg;
+	nc.current_now = -300000;
+	struct pl_est ne;
+	pl_est_init(&ne);
+	feed(&ne, &nc, 5, 0);
+	CHECK_EQ(pl_est_compute(&ne, &nc, 0).kind, PL_EST_NOTCHARGING, "on the charger and giving current: Not charging, no time");
+	nc.current_now = 400000;
+	nc.not_charging = true;
+	CHECK_EQ(pl_est_compute(&ne, &nc, 0).kind, PL_EST_NOTCHARGING, "status Not charging");
+	nc.not_charging = false;
+	nc.st = PL_BAT_FULL;
+	pl_est_init(&ne);
+	CHECK_EQ(pl_est_compute(&ne, &nc, 0).kind, PL_EST_FULL, "status Full is Fully charged without any sample");
+
+	/* A generic battery: current_avg and energy. */
+	struct pl_batt_raw gen = raw_of(PL_BAT_DISCHARGING, 60, 0);
+	struct pl_est ge;
+	pl_est_init(&ge);
+	gen.current_avg = -300000;
+	gen.current_now = -900000;
+	gen.charge_now = 900000;
+	feed(&ge, &gen, 4, 0);
+	CHECK_EQ(pl_est_compute(&ge, &gen, 0).minutes, 180, "current_avg is the rate: 900000 uAh at 300 mA is 180 min");
+	gen.current_avg = PL_ABSENT;
+	gen.current_now = PL_ABSENT;
+	gen.power_now = 2000000;
+	gen.charge_now = PL_ABSENT;
+	gen.energy_now = 6000000;
+	pl_est_init(&ge);
+	feed(&ge, &gen, 4, 0);
+	CHECK_EQ(pl_est_compute(&ge, &gen, 0).minutes, 180, "power_now and energy_now: 6 Wh at 2 W is 180 min");
+	gen.energy_now = PL_ABSENT;
+	gen.energy_full = 10000000;
+	CHECK_EQ(pl_est_compute(&ge, &gen, 0).minutes, 180, "no energy_now: 60 percent of energy_full");
+	gen.energy_full = PL_ABSENT;
+	gen.energy_full_design = 10000000;
+	CHECK_EQ(pl_est_compute(&ge, &gen, 0).minutes, 180, "then energy_full_design");
+	gen.energy_full_design = PL_ABSENT;
+	gen.charge_full = 1000000;
+	CHECK_EQ(pl_est_compute(&ge, &gen, 1000).kind, PL_EST_ESTIMATING,
+		"charge cannot be divided by a power: unknown, not a wrong number");
+
+	/* Over 24 h; under a minute. */
+	struct pl_batt_raw big = raw_of(PL_BAT_DISCHARGING, 90, 0);
+	struct pl_est be;
+	pl_est_init(&be);
+	big.current_now = -10000;
+	big.charge_now = 3000000;
+	feed(&be, &big, 4, 0);
+	CHECK_EQ(pl_est_compute(&be, &big, 0).kind, PL_EST_OVER_LEFT, "3000 mAh at 10 mA is over 24 h");
+	big.charge_now = 240000;
+	CHECK_EQ(pl_est_compute(&be, &big, 0).minutes, 1440, "exactly 24 h is still a time");
+	big.charge_now = 240001;
+	CHECK_EQ(pl_est_compute(&be, &big, 0).minutes, 1440, "and a minute's fraction does not tip it");
+	big.charge_now = 241000;
+	CHECK_EQ(pl_est_compute(&be, &big, 0).kind, PL_EST_OVER_LEFT, "above it does");
+	big.charge_now = 100;
+	CHECK_EQ(pl_est_compute(&be, &big, 0).kind, PL_EST_ESTIMATING, "under a minute is never shown as 0");
+	big.charge_now = 10000;
+	CHECK_EQ(pl_est_compute(&be, &big, 0).minutes, 60, "10 mA for 10 mAh is an hour");
+	struct pl_batt_raw bigc = big;
+	bigc.st = PL_BAT_CHARGING;
+	bigc.charger = 1;
+	bigc.current_now = 10000;
+	bigc.pct = 10;
+	bigc.charge_now = 100000;
+	bigc.charge_full = 3000000;
+	pl_est_init(&be);
+	feed(&be, &bigc, 4, 0);
+	CHECK_EQ(pl_est_compute(&be, &bigc, 0).kind, PL_EST_OVER_FULL, "a charge that takes more than 24 h");
+
+	/* Garbage: nothing crashes or prints nonsense. */
+	struct pl_batt_raw junk = raw_of(PL_BAT_DISCHARGING, 500, 7);
+	junk.charge_now = INT64_MAX / 100;
+	junk.current_now = -3000000;
+	junk.charge_full = 5;
+	pl_est_init(&e);
+	feed(&e, &junk, 5, 0);
+	o = pl_est_compute(&e, &junk, 0);
+	CHECK(o.kind == PL_EST_OVER_LEFT || o.kind == PL_EST_LEFT || o.kind == PL_EST_ESTIMATING,
+		"absurd charge: some answer");
+	est_text_is(&o, junk.pct, 0, "100%  > 24 h left", "a capacity of 500 is shown as 100 and a huge time as > 24 h");
+	junk.pct = -50;
+	junk.charge_now = -5;
+	o = pl_est_compute(&e, &junk, 0);
+	CHECK(o.kind != PL_EST_LEFT || o.minutes >= 1, "negative values: no negative or zero time");
+	junk.charge_now = PL_ABSENT;
+	o = pl_est_compute(&e, &junk, 100000);
+	CHECK(o.kind == PL_EST_ESTIMATING, "a negative capacity is not a percentage");
+	junk.current_now = 3000001;
+	pl_est_init(&e);
+	feed(&e, &junk, 5, 0);
+	CHECK_EQ(e.n, 0, "a 3.000001 A sample of either sign is dropped");
+
+	/* Every subset of the attributes gives some answer. */
+	int bad = 0;
+	for (unsigned mask = 0; mask < (1u << 12); mask++) {
+		struct pl_batt_raw m = raw_of(mask & 1 ? PL_BAT_CHARGING : PL_BAT_DISCHARGING, mask & 2 ? 70 : -1,
+			(int)((mask >> 2) % 3) - 1);
+		int64_t *f[] = { &m.charge_now, &m.charge_full, &m.charge_full_design, &m.charge_empty,
+			&m.energy_now, &m.current_now, &m.current_avg, &m.power_now, &m.time_to_empty_now };
+		static const int64_t val[] = { 800000, 1000000, 1100000, 50000, 5000000, -500000, -400000,
+			1500000, 3600 };
+		for (int i = 0; i < 9; i++)
+			if ((mask >> 3) >> i & 1)
+				*f[i] = val[i];
+		struct pl_est me;
+		pl_est_init(&me);
+		feed(&me, &m, 6, 0);
+		struct pl_estimate mo = pl_est_compute(&me, &m, mask & 4 ? 1000 : 0);
+		char tb[48];
+		for (int v = 0; v < PL_EST_VARIANTS; v++) {
+			pl_est_text(tb, sizeof(tb), &mo, m.pct, v);
+			if (!tb[0])
+				bad++;
+		}
+		if ((mo.kind == PL_EST_LEFT || mo.kind == PL_EST_TOFULL) && mo.minutes < 1)
+			bad++;
+	}
+	CHECK_EQ(bad, 0, "every subset of the attributes: a sensible answer");
+
+	/* ---- rounding and hysteresis ---- */
+	CHECK_EQ(pl_est_round_min(-4), 0, "rounding: negative is 0");
+	CHECK_EQ(pl_est_round_min(0), 0, "0");
+	CHECK_EQ(pl_est_round_min(1), 1, "to the minute below 10: 1");
+	CHECK_EQ(pl_est_round_min(9), 9, "9");
+	CHECK_EQ(pl_est_round_min(10), 10, "10");
+	CHECK_EQ(pl_est_round_min(12), 10, "to 5 min from 10: 12 is 10");
+	CHECK_EQ(pl_est_round_min(13), 15, "13 is 15");
+	CHECK_EQ(pl_est_round_min(59), 60, "59 is 60");
+	CHECK_EQ(pl_est_round_min(90), 90, "90");
+	CHECK_EQ(pl_est_round_min(297), 295, "297 is 295");
+	CHECK_EQ(pl_est_round_min(298), 300, "298 is 300");
+	CHECK_EQ(pl_est_round_min(299), 300, "299 is 300");
+	CHECK_EQ(pl_est_round_min(300), 300, "300 (5 h)");
+	CHECK_EQ(pl_est_round_min(307), 300, "to 15 min from 5 h: 307 is 300");
+	CHECK_EQ(pl_est_round_min(308), 315, "308 is 315");
+	CHECK_EQ(pl_est_round_min(1440), 1440, "1440");
+	CHECK_EQ(pl_est_hysteresis(0, 77), 77, "nothing shown yet: the new value");
+	CHECK_EQ(pl_est_hysteresis(100, 112), 100, "100 min shown: 12 away stays (limit 12)");
+	CHECK_EQ(pl_est_hysteresis(100, 113), 113, "13 away moves");
+	CHECK_EQ(pl_est_hysteresis(100, 88), 100, "12 below stays");
+	CHECK_EQ(pl_est_hysteresis(100, 87), 87, "13 below moves");
+	CHECK_EQ(pl_est_hysteresis(20, 23), 20, "20 min: limit is 3, 3 away stays");
+	CHECK_EQ(pl_est_hysteresis(20, 24), 24, "4 away moves");
+	CHECK_EQ(pl_est_hysteresis(10, 13), 10, "10 min: 3 away stays");
+	CHECK_EQ(pl_est_hysteresis(10, 14), 14, "4 away moves");
+	CHECK_EQ(pl_est_hysteresis(9, 10), 9, "under 10 min: 1 away stays");
+	CHECK_EQ(pl_est_hysteresis(9, 11), 11, "2 away moves");
+	CHECK_EQ(pl_est_hysteresis(5, 4), 5, "downwards too");
+	CHECK_EQ(pl_est_hysteresis(5, 3), 3, "2 below moves");
+
+	/* ---- the text ---- */
+	struct pl_estimate l90 = { PL_EST_LEFT, 90, false };
+	est_text_is(&l90, 73, 0, "73%  1 h 30 min left", "text: discharging with the percentage");
+	est_text_is(&l90, 73, 1, "1 h 30 min left", "without it");
+	est_text_is(&l90, 73, 2, "73%  1 h 30 min", "shortened");
+	est_text_is(&l90, 73, 3, "1 h 30 min", "both");
+	est_text_is(&l90, -1, 0, "1 h 30 min left", "no percentage to show");
+	struct pl_estimate e45 = { PL_EST_LEFT, 45, false };
+	est_text_is(&e45, 73, 0, "73%  45 min left", "under an hour: minutes only");
+	struct pl_estimate e185 = { PL_EST_LEFT, 185, false };
+	est_text_is(&e185, 5, 0, "5%  3 h 05 min left", "the minutes are zero-padded");
+	struct pl_estimate e180 = { PL_EST_LEFT, 180, false };
+	est_text_is(&e180, 5, 0, "5%  3 h 00 min left", "even when they are 00");
+	struct pl_estimate e301 = { PL_EST_LEFT, 301, false };
+	est_text_is(&e301, 5, 0, "5%  5 h 00 min left", "rounded to 15 min above 5 h");
+	struct pl_estimate e59 = { PL_EST_LEFT, 59, false };
+	est_text_is(&e59, 5, 0, "5%  1 h 00 min left", "59 min rounds up to an hour and is shown as one");
+	struct pl_estimate e5 = { PL_EST_LEFT, 5, false };
+	est_text_is(&e5, 50, 0, "50%  5 min left", "5 min");
+	struct pl_estimate e1 = { PL_EST_LEFT, 1, false };
+	est_text_is(&e1, 50, 0, "50%  1 min left", "1 min is the least");
+	struct pl_estimate hint = { PL_EST_LEFT, 80, true };
+	est_text_is(&hint, 73, 0, "73%  ~1 h 20 min left", "a hint has a tilde");
+	est_text_is(&hint, 73, 3, "~1 h 20 min", "also shortened");
+	struct pl_estimate tf = { PL_EST_TOFULL, 75, false };
+	est_text_is(&tf, 47, 0, "47%  1 h 15 min to full", "charging");
+	est_text_is(&tf, 47, 3, "1 h 15 min", "charging, shortened");
+	struct pl_estimate tf20 = { PL_EST_TOFULL, 20, false };
+	est_text_is(&tf20, 47, 1, "20 min to full", "20 min to full");
+	struct pl_estimate ch = { PL_EST_CHARGING, 0, false };
+	est_text_is(&ch, 95, 0, "95%  Charging", "charging above the taper");
+	struct pl_estimate fu = { PL_EST_FULL, 0, false };
+	est_text_is(&fu, 100, 0, "100%  Fully charged", "full");
+	struct pl_estimate nc2 = { PL_EST_NOTCHARGING, 0, false };
+	est_text_is(&nc2, 80, 0, "80%  Not charging", "not charging");
+	struct pl_estimate es = { PL_EST_ESTIMATING, 0, false };
+	est_text_is(&es, 73, 0, "73%  Estimating...", "estimating");
+	est_text_is(&es, 73, 3, "Estimating...", "estimating, shortest");
+	struct pl_estimate no = { PL_EST_NONE, 0, false };
+	est_text_is(&no, -1, 0, "--", "no data");
+	est_text_is(&no, 50, 0, "--", "no data has no percentage");
+	struct pl_estimate ac = { PL_EST_AC, 0, false };
+	est_text_is(&ac, -1, 0, "On AC power", "mains");
+	est_text_is(&ac, 50, 0, "On AC power", "mains has no percentage");
+	struct pl_estimate ovl = { PL_EST_OVER_LEFT, 0, false };
+	est_text_is(&ovl, 73, 0, "73%  > 24 h left", "over a day");
+	est_text_is(&ovl, 73, 3, "> 24 h", "shortened");
+	struct pl_estimate ovf = { PL_EST_OVER_FULL, 0, false };
+	est_text_is(&ovf, 10, 0, "10%  > 24 h to full", "over a day to full");
+	est_text_is(&es, 250, 0, "100%  Estimating...", "a percentage is clamped to 100");
+	est_text_is(&es, -9, 0, "Estimating...", "a negative one is not shown");
+	struct pl_estimate neg = { PL_EST_LEFT, -30, false };
+	est_text_is(&neg, 50, 3, "0 min", "garbage minutes print as 0, not a negative time");
+	char tiny[6];
+	pl_est_text(tiny, sizeof(tiny), &l90, 73, 0);
+	CHECK_EQ(strlen(tiny), 5, "a small buffer is cut, not overrun");
+	for (int k = PL_EST_NONE; k <= PL_EST_OVER_FULL; k++) {
+		struct pl_estimate any = { k, 125, k % 2 };
+		for (int v = 0; v < PL_EST_VARIANTS; v++) {
+			char b[48];
+			pl_est_text(b, sizeof(b), &any, 55, v);
+			CHECK(b[0] && strlen(b) < 40, "every kind and variant has a line that fits the buffer");
+		}
+	}
 }
 
 /* ---- blending ---- */
@@ -1969,6 +2583,70 @@ static void test_sys(void)
 	pl_battery_read(root, &st, &pct);
 	CHECK(st == PL_BAT_NONE, "other supply types are not AC");
 
+
+	/* The attributes the estimate uses, as a DS2760 has them: signed current,
+	 * charge with a reserve, a time in seconds, and no current_avg. */
+	snprintf(root, sizeof(root), "%s/ps3", base);
+	struct pl_batt_raw raw;
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.st == PL_BAT_NONE && raw.charger == -1, "raw: no power_supply directory");
+	supply(root, "ds2760-battery.0", "Battery\n", "capacity", "94\n", "Discharging\n");
+	snprintf(dev, sizeof(dev), "%s/class/power_supply/ds2760-battery.0", root);
+	write_file(dev, "current_now", "-600000\n");
+	write_file(dev, "charge_now", "950000\n");
+	write_file(dev, "charge_empty", "50000\n");
+	write_file(dev, "charge_full", "1000000\n");
+	write_file(dev, "charge_full_design", "1100000\n");
+	write_file(dev, "time_to_empty_now", "5400\n");
+	write_file(dev, "voltage_now", "3900000\n");
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.st == PL_BAT_DISCHARGING && raw.pct == 94 && raw.charger == -1 && !raw.not_charging,
+		"raw: the battery and no charger supply");
+	CHECK(raw.current_now == -600000 && raw.charge_now == 950000 && raw.charge_empty == 50000 &&
+		raw.charge_full == 1000000 && raw.charge_full_design == 1100000 &&
+		raw.time_to_empty_now == 5400, "raw: the attributes, the current signed");
+	CHECK(raw.current_avg == PL_ABSENT && raw.energy_now == PL_ABSENT && raw.power_now == PL_ABSENT &&
+		raw.energy_full == PL_ABSENT && raw.energy_full_design == PL_ABSENT,
+		"raw: what the battery does not have is absent");
+	supply(root, "ac", "Mains\n", "online", "0\n", NULL);
+	pl_battery_read_raw(root, &raw);
+	CHECK_EQ(raw.charger, 0, "raw: a charger that is offline");
+	supply(root, "ac", "Mains\n", "online", "1\n", NULL);
+	pl_battery_read_raw(root, &raw);
+	CHECK_EQ(raw.charger, 1, "raw: online");
+	supply(root, "usb", "USB\n", "online", "0\n", NULL);
+	pl_battery_read_raw(root, &raw);
+	CHECK_EQ(raw.charger, 1, "raw: one of two online is online");
+	write_file(dev, "status", "Not charging\n");
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.not_charging && raw.st == PL_BAT_DISCHARGING, "raw: Not charging is its own flag");
+	write_file(dev, "status", "Charging\n");
+	write_file(dev, "current_now", "400000\n");
+	write_file(dev, "current_avg", "350000\n");
+	write_file(dev, "energy_now", "6000000\n");
+	write_file(dev, "energy_full", "10000000\n");
+	write_file(dev, "energy_full_design", "11000000\n");
+	write_file(dev, "power_now", "2000000\n");
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.st == PL_BAT_CHARGING && raw.current_now == 400000 && raw.current_avg == 350000 &&
+		raw.energy_now == 6000000 && raw.energy_full == 10000000 &&
+		raw.energy_full_design == 11000000 && raw.power_now == 2000000, "raw: a generic battery's attributes");
+	write_file(dev, "charge_now", "garbage\n");
+	write_file(dev, "charge_full", "-5\n");
+	write_file(dev, "charge_empty", "\n");
+	write_file(dev, "current_now", "99999999999999999999\n");
+	write_file(dev, "time_to_empty_now", "-1\n");
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.charge_now == PL_ABSENT && raw.charge_full == PL_ABSENT && raw.charge_empty == PL_ABSENT &&
+		raw.current_now == PL_ABSENT && raw.time_to_empty_now == PL_ABSENT,
+		"raw: garbage, negative charge and overflow are absent");
+	pl_battery_read(root, &st, &pct);
+	CHECK(st == PL_BAT_CHARGING && pct == 94, "pl_battery_read still gives status and percent");
+	snprintf(root, sizeof(root), "%s/ps4", base);
+	supply(root, "ac", "Mains\n", "online", "1\n", NULL);
+	pl_battery_read_raw(root, &raw);
+	CHECK(raw.st == PL_BAT_AC && raw.charger == 1 && raw.pct == -1, "raw: mains without a battery");
+
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", base);
 	if (system(cmd) != 0)
 		exit(2);
@@ -1983,6 +2661,7 @@ int main(void)
 	test_touch();
 	test_popup();
 	test_text_buttons();
+	test_estimator();
 	test_blend();
 	test_masks();
 	test_font();

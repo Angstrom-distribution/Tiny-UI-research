@@ -88,10 +88,154 @@ struct pl_rect {
 	int x, y, w, h;
 };
 
+/* ---- the battery's time estimate ---- */
+
+/* Everything below is integer arithmetic (the h2200 has no FPU) and the
+ * constants are a synthesis from how the kernel's power_supply attributes are
+ * documented to behave and from what other programs do; none of them has been
+ * tuned on a real battery. They are named so that they are easy to change. */
+
+/* One sample of the battery per 30 s (the panel's poll); a sample whose current
+ * is below the idle floor says nothing about the rate and is skipped, one above
+ * the ceiling is a glitch and is dropped. In uA, or in uW for a battery that
+ * only has power_now. */
+#define PL_EST_IDLE_UA 10000
+#define PL_EST_MAX_UA 3000000
+#define PL_EST_IDLE_UW 40000
+#define PL_EST_MAX_UW 15000000
+/* A number is shown after this many valid samples (2 min); until then the
+ * filter is a running mean of what it has, and the row says it is estimating. */
+#define PL_EST_WARM 4
+/* The filter is a running mean for the first samples and then an exponential
+ * moving average with weight 1/PL_EST_EMA_K. */
+#define PL_EST_EMA_K 8
+/* After a change between charging and discharging the filter starts again and
+ * ignores this many samples: the current settles after a plug event. */
+#define PL_EST_SKIP 2
+/* Samples further apart than this are not one run (the panel was stopped, the
+ * clock jumped): the filter starts again. */
+#define PL_EST_GAP_MS 600000
+/* With a charger online the battery is charging above this (uA, signed, > 0 is
+ * into the battery) and not charging below the negative of the second. */
+#define PL_EST_CHG_ON_UA 10000
+#define PL_EST_NOTCHG_UA 5000
+/* Above this percent the current-based time to full is optimistic (the
+ * constant-voltage taper), so it is not shown. */
+#define PL_EST_TAPER_PCT 90
+/* The kernel's time_to_empty_now (seconds) is used as a hint, with a '~', until
+ * the filter is warm, if it is in this range. */
+#define PL_EST_HINT_MAX_S 86400
+/* More than this is shown as '> 24 h'. */
+#define PL_EST_OVER_MIN 1440
+/* Rounding of the minutes shown: to the minute below RND1, to PL_EST_STEP1
+ * below RND2, to PL_EST_STEP2 from there on. */
+#define PL_EST_RND1_MIN 10
+#define PL_EST_RND2_MIN 300
+#define PL_EST_STEP1 5
+#define PL_EST_STEP2 15
+/* While discharging the minutes shown change only if the new value is more
+ * than max(HYST_MIN, shown / HYST_DIV) away, and by more than 1 below
+ * HYST_SMALL minutes. */
+#define PL_EST_HYST_MIN 3
+#define PL_EST_HYST_DIV 8
+#define PL_EST_HYST_SMALL 10
+
+/* An attribute that is not there (or is garbage). */
+#define PL_ABSENT INT64_MIN
+
+/* What the sysfs reader found; every attribute is PL_ABSENT if missing. Charge
+ * is in uAh, energy in uWh, current in uA (signed, > 0 into the battery), power
+ * in uW, time_to_empty_now in seconds. */
+struct pl_batt_raw {
+	enum pl_bat_status st;
+	bool not_charging;	/* status says "Not charging" */
+	int pct;		/* capacity, -1 if none */
+	int charger;		/* a Mains or USB supply: 1 online, 0 offline, -1 none */
+	int64_t charge_now, charge_full, charge_full_design, charge_empty;
+	int64_t energy_now, energy_full, energy_full_design;
+	int64_t current_now, current_avg, power_now;
+	int64_t time_to_empty_now;
+};
+
+void pl_batt_raw_clear(struct pl_batt_raw *r);
+
+enum pl_dir {
+	PL_DIR_NONE,
+	PL_DIR_DISCHARGING,
+	PL_DIR_CHARGING,
+	PL_DIR_NOTCHARGING,	/* on a charger, but not charging */
+	PL_DIR_FULL,
+};
+
+/* The direction the battery is going: status Full is full, "Not charging" is
+ * that; with no charger it is discharging; with one it is charging if the
+ * current (smoothed, PL_ABSENT if unknown) is above +10 mA, not charging if
+ * it is below -5 mA, and between, what the status says. smoothed is only
+ * used if the rate is a current. */
+enum pl_dir pl_batt_dir(const struct pl_batt_raw *r, int64_t smoothed);
+
+/* The filter that smooths the rate over the samples. */
+struct pl_est {
+	int kind;		/* 0 none yet, 1 current (uA), 2 power (uW) */
+	int64_t ema;		/* signed */
+	int n;			/* valid samples since the last reset */
+	int skip;		/* samples still to ignore */
+	int64_t last_v;		/* the last sample that was not idle or a glitch */
+	bool have_v;
+	enum pl_dir dir;	/* of the run */
+	int64_t last_ms;
+	bool have_last;
+};
+
+void pl_est_init(struct pl_est *e);
+/* One sample at now_ms (any epoch, monotonic). The rate is current_avg if the
+ * battery has it, else current_now, else power_now. */
+void pl_est_add(struct pl_est *e, const struct pl_batt_raw *r, int64_t now_ms);
+
+enum pl_est_kind {
+	PL_EST_NONE,		/* no battery data: "--" */
+	PL_EST_AC,		/* mains and no battery */
+	PL_EST_FULL,
+	PL_EST_NOTCHARGING,
+	PL_EST_CHARGING,	/* charging, no time (above the taper) */
+	PL_EST_ESTIMATING,	/* warming up, idle or no rate */
+	PL_EST_LEFT,		/* minutes left */
+	PL_EST_TOFULL,		/* minutes to full */
+	PL_EST_OVER_LEFT,	/* more than 24 h left */
+	PL_EST_OVER_FULL,
+};
+
+struct pl_estimate {
+	enum pl_est_kind kind;
+	int minutes;		/* exact, for LEFT and TOFULL */
+	bool hint;		/* from the kernel's time_to_empty_now: shown with '~' */
+};
+
+/* What to show for a battery with the filter e. battery_mah is the capacity
+ * the user gave as a last resort for the charge (0: unknown). */
+struct pl_estimate pl_est_compute(const struct pl_est *e, const struct pl_batt_raw *r,
+	int battery_mah);
+
+/* The minutes as shown: to the minute below 10, to 5 min below 5 h, to 15 min
+ * above. */
+int pl_est_round_min(int minutes);
+
+/* The minutes to show when fresh replaces shown (discharging): shown stays
+ * unless fresh is further away than the hysteresis. */
+int pl_est_hysteresis(int shown, int fresh);
+
+/* Candidates for the text of the row, from the most to the least informative:
+ * variant 0 has the percentage and the whole wording, 1 drops the percentage,
+ * 2 shortens the wording ("1 h 30 min" for "1 h 30 min left") and 3 does both.
+ * pct < 0 has no percentage. buf needs 48 bytes. */
+#define PL_EST_VARIANTS 4
+void pl_est_text(char *buf, size_t len, const struct pl_estimate *e, int pct, int variant);
+
 /* What is shown. -1 in bl_pct and vol_pct: not available, drawn greyed out. */
 struct pl_state {
 	int hour, min;
 	int year, mon, mday, wday;	/* local date: mon 0..11, wday 0 is Sunday */
+	struct pl_estimate est;		/* what the battery row says */
 	enum pl_bat_status bat;
 	int bat_pct;		/* 0..100, only with a battery status */
 	int bl_pct;

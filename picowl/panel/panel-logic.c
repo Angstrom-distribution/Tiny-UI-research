@@ -384,6 +384,328 @@ bool pl_popup_expire(struct pl_popup *p, int64_t now_ms, bool touching)
 	return true;
 }
 
+/* ---- the battery's time estimate ---- */
+
+void pl_batt_raw_clear(struct pl_batt_raw *r)
+{
+	*r = (struct pl_batt_raw){ .st = PL_BAT_NONE, .pct = -1, .charger = -1,
+		.charge_now = PL_ABSENT, .charge_full = PL_ABSENT,
+		.charge_full_design = PL_ABSENT, .charge_empty = PL_ABSENT,
+		.energy_now = PL_ABSENT, .energy_full = PL_ABSENT,
+		.energy_full_design = PL_ABSENT, .current_now = PL_ABSENT,
+		.current_avg = PL_ABSENT, .power_now = PL_ABSENT,
+		.time_to_empty_now = PL_ABSENT };
+}
+
+enum { RATE_NONE, RATE_CURRENT, RATE_POWER };
+
+static int64_t abs64(int64_t v)
+{
+	return v < 0 ? -v : v;
+}
+
+/* The rate attribute to use, in the order of preference. */
+static int rate_of(const struct pl_batt_raw *r, int64_t *v)
+{
+	if (r->current_avg != PL_ABSENT) {
+		*v = r->current_avg;
+		return RATE_CURRENT;
+	}
+	if (r->current_now != PL_ABSENT) {
+		*v = r->current_now;
+		return RATE_CURRENT;
+	}
+	if (r->power_now != PL_ABSENT) {
+		*v = r->power_now;
+		return RATE_POWER;
+	}
+	return RATE_NONE;
+}
+
+enum pl_dir pl_batt_dir(const struct pl_batt_raw *r, int64_t smoothed)
+{
+	if (r->st == PL_BAT_NONE || r->st == PL_BAT_AC)
+		return PL_DIR_NONE;
+	if (r->st == PL_BAT_FULL)
+		return PL_DIR_FULL;
+	if (r->not_charging)
+		return PL_DIR_NOTCHARGING;
+	bool chg = r->st == PL_BAT_CHARGING;
+
+	if (r->charger == 0)
+		return PL_DIR_DISCHARGING;
+	if (r->charger == 1) {
+		if (smoothed != PL_ABSENT && smoothed > PL_EST_CHG_ON_UA)
+			return PL_DIR_CHARGING;
+		if (smoothed != PL_ABSENT && smoothed < -PL_EST_NOTCHG_UA)
+			return PL_DIR_NOTCHARGING;
+		return chg ? PL_DIR_CHARGING : PL_DIR_NOTCHARGING;
+	}
+	return chg ? PL_DIR_CHARGING : PL_DIR_DISCHARGING;
+}
+
+void pl_est_init(struct pl_est *e)
+{
+	memset(e, 0, sizeof(*e));
+}
+
+static void est_reset(struct pl_est *e)
+{
+	e->ema = 0;
+	e->n = 0;
+	e->skip = 0;
+	e->dir = PL_DIR_NONE;
+}
+
+void pl_est_add(struct pl_est *e, const struct pl_batt_raw *r, int64_t now_ms)
+{
+	int64_t v = 0;
+
+	if (e->have_last && (now_ms - e->last_ms > PL_EST_GAP_MS || now_ms < e->last_ms)) {
+		est_reset(e);
+		e->have_v = false;
+	}
+	e->last_ms = now_ms;
+	e->have_last = true;
+	if (r->st != PL_BAT_DISCHARGING && r->st != PL_BAT_CHARGING && r->st != PL_BAT_FULL)
+		return;
+	int kind = rate_of(r, &v);
+	if (kind == RATE_NONE)
+		return;
+	if (e->kind != kind) {
+		est_reset(e);
+		e->have_v = false;
+		e->kind = kind;
+	}
+	int64_t mag = abs64(v);
+	int64_t idle = kind == RATE_CURRENT ? PL_EST_IDLE_UA : PL_EST_IDLE_UW;
+	int64_t max = kind == RATE_CURRENT ? PL_EST_MAX_UA : PL_EST_MAX_UW;
+
+	/* Idle: the old average stays, and the sample is not counted. */
+	if (mag < idle || mag > max)
+		return;
+	/* What the direction is judged by when nothing is averaged yet, or the
+	 * sample is of a direction that is not averaged (not charging). */
+	e->last_v = v;
+	e->have_v = true;
+	enum pl_dir d = pl_batt_dir(r, kind == RATE_CURRENT ? v : PL_ABSENT);
+	if (d != PL_DIR_DISCHARGING && d != PL_DIR_CHARGING)
+		return;
+	bool changed = e->dir != PL_DIR_NONE && d != e->dir;
+	if (changed)
+		est_reset(e);
+	e->dir = d;
+	if (e->skip > 0) {
+		e->skip--;
+		return;
+	}
+	int k = e->n + 1 < PL_EST_EMA_K ? e->n + 1 : PL_EST_EMA_K;
+	e->ema += (v - e->ema) / k;
+	e->n++;
+	if (changed)
+		e->skip = PL_EST_SKIP;
+}
+
+/* Usable charge (uAh) or energy (uWh) left, in the unit of the rate. */
+static int64_t remaining(const struct pl_batt_raw *r, int kind, int mah)
+{
+	int pct = r->pct;
+
+	if (kind == RATE_CURRENT) {
+		/* charge_now counts the reserve below charge_empty too. */
+		if (r->charge_now != PL_ABSENT) {
+			int64_t empty = r->charge_empty != PL_ABSENT && r->charge_empty > 0 ?
+				r->charge_empty : 0;
+			return r->charge_now > empty ? r->charge_now - empty : 0;
+		}
+		if (pct < 0)
+			return PL_ABSENT;
+		if (r->charge_full != PL_ABSENT)
+			return r->charge_full * pct / 100;
+		if (r->charge_full_design != PL_ABSENT)
+			return r->charge_full_design * pct / 100;
+		if (mah > 0)
+			return (int64_t)mah * 1000 * pct / 100;
+		return PL_ABSENT;
+	}
+	if (r->energy_now != PL_ABSENT)
+		return r->energy_now;
+	if (pct < 0)
+		return PL_ABSENT;
+	if (r->energy_full != PL_ABSENT)
+		return r->energy_full * pct / 100;
+	if (r->energy_full_design != PL_ABSENT)
+		return r->energy_full_design * pct / 100;
+	return PL_ABSENT;
+}
+
+/* Charge or energy still to go to full. */
+static int64_t to_full(const struct pl_batt_raw *r, int kind, int mah)
+{
+	int pct = r->pct;
+	int64_t full, now;
+
+	if (kind == RATE_CURRENT) {
+		full = r->charge_full != PL_ABSENT ? r->charge_full :
+			r->charge_full_design != PL_ABSENT ? r->charge_full_design :
+			mah > 0 ? (int64_t)mah * 1000 : PL_ABSENT;
+		now = r->charge_now;
+	} else {
+		full = r->energy_full != PL_ABSENT ? r->energy_full : r->energy_full_design;
+		now = r->energy_now;
+	}
+	if (full == PL_ABSENT)
+		return PL_ABSENT;
+	if (now == PL_ABSENT) {
+		if (pct < 0)
+			return PL_ABSENT;
+		return full * (100 - pct) / 100;
+	}
+	return full > now ? full - now : 0;
+}
+
+static struct pl_estimate unsure(const struct pl_batt_raw *r, enum pl_dir d)
+{
+	struct pl_estimate out = { PL_EST_ESTIMATING, 0, false };
+
+	if (d == PL_DIR_DISCHARGING && r->time_to_empty_now != PL_ABSENT &&
+			r->time_to_empty_now > 0 && r->time_to_empty_now < PL_EST_HINT_MAX_S &&
+			r->time_to_empty_now >= 60)
+		out = (struct pl_estimate){ PL_EST_LEFT, (int)(r->time_to_empty_now / 60), true };
+	return out;
+}
+
+struct pl_estimate pl_est_compute(const struct pl_est *e, const struct pl_batt_raw *r,
+	int battery_mah)
+{
+	struct pl_estimate out = { PL_EST_NONE, 0, false };
+	int64_t v = 0;
+	int kind = rate_of(r, &v);
+
+	if (r->st == PL_BAT_AC) {
+		out.kind = PL_EST_AC;
+		return out;
+	}
+	if (r->st == PL_BAT_NONE)
+		return out;
+	int64_t smoothed = e->kind != RATE_CURRENT ? PL_ABSENT : e->n > 0 ? e->ema :
+		e->have_v ? e->last_v : PL_ABSENT;
+	enum pl_dir d = pl_batt_dir(r, smoothed);
+
+	if (d == PL_DIR_FULL) {
+		out.kind = PL_EST_FULL;
+		return out;
+	}
+	if (d == PL_DIR_NOTCHARGING) {
+		out.kind = PL_EST_NOTCHARGING;
+		return out;
+	}
+	if (d == PL_DIR_CHARGING && r->pct >= PL_EST_TAPER_PCT) {
+		out.kind = PL_EST_CHARGING;
+		return out;
+	}
+	/* Warm, and the run is the one that is going on now. */
+	if (e->n < PL_EST_WARM || e->dir != d || e->kind != kind || kind == RATE_NONE)
+		return unsure(r, d);
+	int64_t rate = abs64(e->ema);
+	int64_t amount = d == PL_DIR_CHARGING ? to_full(r, kind, battery_mah) :
+		remaining(r, kind, battery_mah);
+
+	if (rate <= 0 || amount == PL_ABSENT)
+		return unsure(r, d);
+	int64_t minutes = amount * 60 / rate;
+
+	if (minutes < 1)
+		return (struct pl_estimate){ PL_EST_ESTIMATING, 0, false };
+	if (minutes > PL_EST_OVER_MIN) {
+		out.kind = d == PL_DIR_CHARGING ? PL_EST_OVER_FULL : PL_EST_OVER_LEFT;
+		return out;
+	}
+	out.kind = d == PL_DIR_CHARGING ? PL_EST_TOFULL : PL_EST_LEFT;
+	out.minutes = (int)minutes;
+	return out;
+}
+
+int pl_est_round_min(int m)
+{
+	if (m <= 0)
+		return 0;
+	if (m < PL_EST_RND1_MIN)
+		return m;
+	if (m < PL_EST_RND2_MIN)
+		return (m + PL_EST_STEP1 / 2) / PL_EST_STEP1 * PL_EST_STEP1;
+	return (m + PL_EST_STEP2 / 2) / PL_EST_STEP2 * PL_EST_STEP2;
+}
+
+int pl_est_hysteresis(int shown, int fresh)
+{
+	if (shown <= 0)
+		return fresh;
+	int limit = shown / PL_EST_HYST_DIV;
+	int d = fresh > shown ? fresh - shown : shown - fresh;
+
+	if (shown < PL_EST_HYST_SMALL)
+		limit = 1;
+	else if (limit < PL_EST_HYST_MIN)
+		limit = PL_EST_HYST_MIN;
+	return d > limit ? fresh : shown;
+}
+
+void pl_est_text(char *buf, size_t len, const struct pl_estimate *e, int pct, int variant)
+{
+	char dur[24] = "", body[40];
+	bool nopct = variant & 1, brief = variant & 2;
+	const char *tail = "";
+	const char *tilde = e->hint ? "~" : "";
+
+	if (e->kind == PL_EST_LEFT || e->kind == PL_EST_TOFULL) {
+		int m = pl_est_round_min(e->minutes);
+		if (m >= 60)
+			snprintf(dur, sizeof(dur), "%d h %02d min", m / 60, m % 60);
+		else
+			snprintf(dur, sizeof(dur), "%d min", m);
+	}
+	switch (e->kind) {
+	case PL_EST_LEFT:
+		tail = brief ? "" : " left";
+		snprintf(body, sizeof(body), "%s%s%s", tilde, dur, tail);
+		break;
+	case PL_EST_TOFULL:
+		tail = brief ? "" : " to full";
+		snprintf(body, sizeof(body), "%s%s", dur, tail);
+		break;
+	case PL_EST_OVER_LEFT:
+		snprintf(body, sizeof(body), "> 24 h%s", brief ? "" : " left");
+		break;
+	case PL_EST_OVER_FULL:
+		snprintf(body, sizeof(body), "> 24 h%s", brief ? "" : " to full");
+		break;
+	case PL_EST_FULL:
+		snprintf(body, sizeof(body), "Fully charged");
+		break;
+	case PL_EST_NOTCHARGING:
+		snprintf(body, sizeof(body), "Not charging");
+		break;
+	case PL_EST_CHARGING:
+		snprintf(body, sizeof(body), "Charging");
+		break;
+	case PL_EST_ESTIMATING:
+		snprintf(body, sizeof(body), "Estimating...");
+		break;
+	case PL_EST_AC:
+		snprintf(body, sizeof(body), "On AC power");
+		break;
+	default:
+		snprintf(body, sizeof(body), "--");
+		break;
+	}
+	bool show_pct = !nopct && pct >= 0 && e->kind != PL_EST_NONE && e->kind != PL_EST_AC;
+	if (show_pct)
+		snprintf(buf, len, "%d%%  %s", clampi(pct, 0, 100), body);
+	else
+		snprintf(buf, len, "%s", body);
+}
+
 /* ---- font ---- */
 
 static const struct {
