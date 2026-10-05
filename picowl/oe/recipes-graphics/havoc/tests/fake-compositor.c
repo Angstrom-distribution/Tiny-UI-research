@@ -12,7 +12,14 @@
  *  - the next enter enables again, once
  *  - the typed text reaches the shell in the terminal in every case
  *
- * With --no-text-input the same typing must still work. */
+ * With --no-text-input the same typing must still work.
+ *
+ * With --driver it is instead a test bench for havoc's damage reporting and is
+ * run by damage.py: it takes commands on stdin (see driver_line) and, besides
+ * serving the protocols, checks on every commit that the compositor's own
+ * idea of the window, kept by applying only the damage rectangles it was told,
+ * equals the committed buffer, that nothing writes to a buffer it still holds,
+ * and that a new buffer size comes with damage for all of it. */
 #define _GNU_SOURCE
 #include <stdarg.h>
 #include <stdbool.h>
@@ -24,11 +31,15 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include <wayland-server.h>
 #include <xkbcommon/xkbcommon.h>
 #include "xdg-shell-server.h"
 #include "text-input-unstable-v3-server.h"
+#include "viewporter-server.h"
+#include "fractional-scale-v1-server.h"
 
 #define PURPOSE_TERMINAL 13
 
@@ -72,44 +83,85 @@ static void fail(const char *fmt, ...)
 #define CHECK(c, ...) do { if (!(c)) fail(__VA_ARGS__); } while (0)
 
 /* wl_surface */
+struct rect {
+	int x, y, w, h;
+};
+
+#define MAX_RECTS 256
+#define MAX_REGION 8
+
+struct opaque {
+	bool set;
+	int n;
+	struct rect r[MAX_REGION];
+};
+
+struct region {
+	struct opaque o;
+};
+
+struct surf {
+	struct wl_resource *buf;	/* attached, not yet committed */
+	struct wl_resource *cb;
+	int ndmg;
+	struct rect dmg[MAX_RECTS];
+	bool dmg_overflow, legacy_damage;
+	bool opaque_pending;
+	struct opaque opaque;
+};
+
 static void s_nop(struct wl_client *c, struct wl_resource *r) {}
 static void s_attach(struct wl_client *c, struct wl_resource *r,
 		     struct wl_resource *buf, int32_t x, int32_t y)
 {
-	wl_resource_set_user_data(r, buf);
+	struct surf *s = wl_resource_get_user_data(r);
+
+	s->buf = buf;
 }
 static void s_damage(struct wl_client *c, struct wl_resource *r,
-		     int32_t x, int32_t y, int32_t w, int32_t h) {}
-static struct wl_resource *pending_cb;
+		     int32_t x, int32_t y, int32_t w, int32_t h)
+{
+	struct surf *s = wl_resource_get_user_data(r);
+
+	s->legacy_damage = true;
+}
 static void s_frame(struct wl_client *c, struct wl_resource *r, uint32_t id)
 {
-	pending_cb = wl_resource_create(c, &wl_callback_interface, 1, id);
-}
-static void s_region(struct wl_client *c, struct wl_resource *r,
-		     struct wl_resource *region) {}
-static void s_commit(struct wl_client *c, struct wl_resource *r)
-{
-	struct wl_resource *buf = wl_resource_get_user_data(r);
+	struct surf *s = wl_resource_get_user_data(r);
 
-	if (buf) {
-		wl_buffer_send_release(buf);
-		wl_resource_set_user_data(r, NULL);
-		C.mapped = true;
-	}
-	if (pending_cb) {
-		wl_callback_send_done(pending_cb, 0);
-		wl_resource_destroy(pending_cb);
-		pending_cb = NULL;
-	}
+	s->cb = wl_resource_create(c, &wl_callback_interface, 1, id);
 }
+static void s_opaque(struct wl_client *c, struct wl_resource *r,
+		     struct wl_resource *region)
+{
+	struct surf *s = wl_resource_get_user_data(r);
+
+	s->opaque_pending = true;
+	memset(&s->opaque, 0, sizeof s->opaque);
+	if (region)
+		s->opaque = ((struct region *)
+			     wl_resource_get_user_data(region))->o;
+}
+static void s_input_region(struct wl_client *c, struct wl_resource *r,
+			   struct wl_resource *region) {}
 static void s_int(struct wl_client *c, struct wl_resource *r, int32_t v) {}
 static void s_dmg_buf(struct wl_client *c, struct wl_resource *r,
-		      int32_t x, int32_t y, int32_t w, int32_t h) {}
+		      int32_t x, int32_t y, int32_t w, int32_t h)
+{
+	struct surf *s = wl_resource_get_user_data(r);
+
+	if (s->ndmg < MAX_RECTS)
+		s->dmg[s->ndmg++] = (struct rect){ x, y, w, h };
+	else
+		s->dmg_overflow = true;
+}
+
+static void s_commit(struct wl_client *c, struct wl_resource *r);
 
 static const struct wl_surface_interface surface_impl = {
 	.destroy = s_nop, .attach = s_attach, .damage = s_damage,
-	.frame = s_frame, .set_opaque_region = s_region,
-	.set_input_region = s_region, .commit = s_commit,
+	.frame = s_frame, .set_opaque_region = s_opaque,
+	.set_input_region = s_input_region, .commit = s_commit,
 	.set_buffer_transform = s_int, .set_buffer_scale = s_int,
 	.damage_buffer = s_dmg_buf,
 };
@@ -121,19 +173,328 @@ static void comp_create_surface(struct wl_client *c, struct wl_resource *r,
 						   wl_resource_get_version(r),
 						   id);
 
-	wl_resource_set_implementation(s, &surface_impl, NULL, NULL);
-	/* the first surface is havoc's window, the second its cursor surface */
-	if (!C.surface)
-		C.surface = s;
+	wl_resource_set_implementation(s, &surface_impl,
+				       calloc(1, sizeof(struct surf)), NULL);
 }
+
+/* wl_region, kept only as far as havoc's use of it goes: rectangles added */
+static void rg_destroy(struct wl_client *c, struct wl_resource *r)
+{
+	wl_resource_destroy(r);
+}
+static void rg_add(struct wl_client *c, struct wl_resource *r, int32_t x,
+		   int32_t y, int32_t w, int32_t h)
+{
+	struct region *g = wl_resource_get_user_data(r);
+
+	g->o.set = true;
+	if (g->o.n < MAX_REGION)
+		g->o.r[g->o.n++] = (struct rect){ x, y, w, h };
+}
+static void rg_sub(struct wl_client *c, struct wl_resource *r, int32_t x,
+		   int32_t y, int32_t w, int32_t h)
+{
+	fail("havoc subtracts from a region");
+}
+static const struct wl_region_interface region_impl = {
+	.destroy = rg_destroy, .add = rg_add, .subtract = rg_sub,
+};
 static void comp_create_region(struct wl_client *c, struct wl_resource *r,
 			       uint32_t id)
 {
+	struct wl_resource *g = wl_resource_create(c, &wl_region_interface,
+						   wl_resource_get_version(r),
+						   id);
+
+	wl_resource_set_implementation(g, &region_impl,
+				       calloc(1, sizeof(struct region)), NULL);
 }
 static const struct wl_compositor_interface comp_impl = {
 	.create_surface = comp_create_surface,
 	.create_region = comp_create_region,
 };
+
+/* What the compositor does with the window's commits. The compositor keeps its
+ * own copy of the window (img) and updates it from the committed buffer only
+ * where damage says it changed, which is all a compositor that composites from
+ * a copy, or uploads to a display, can do. If that copy ever differs from the
+ * committed buffer, damage was missing. */
+enum { REL_IMMEDIATE, REL_NEXT, REL_TIMER, REL_NEVER };
+
+#define MAX_LOG 512
+#define LOG_RECTS 64
+#define HOLD_MS 40
+
+struct tbuf {
+	struct wl_resource *res;
+	struct wl_listener destroy;
+	uint8_t *snap;
+	size_t size;
+	bool held;
+	long long since;
+	struct tbuf *next;
+};
+
+struct commit_rec {
+	int w, h;
+	uint32_t format;
+	int n;
+	struct rect r[LOG_RECTS];
+	long long union_px, sum_px;
+	bool full;
+};
+
+static struct {
+	bool driver;
+	int release;
+	struct tbuf *bufs;
+	struct wl_event_source *release_timer;
+
+	uint8_t *img;
+	int w, h;
+	uint32_t format;
+	struct opaque opaque;
+	int vp_w, vp_h;
+	struct wl_resource *pointer, *fs;
+
+	struct commit_rec log[MAX_LOG];
+	int nlog;
+	int commits, stale, held_writes, no_full, lost;
+
+	struct wl_event_source *wait_timer;
+	bool wait_pending;
+	int quiet_ms;
+} D;
+
+static long long now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
+}
+
+static void tbuf_gone(struct wl_listener *l, void *data)
+{
+	struct tbuf *t = wl_container_of(l, t, destroy), **p;
+
+	for (p = &D.bufs; *p; p = &(*p)->next)
+		if (*p == t) {
+			*p = t->next;
+			break;
+		}
+	free(t->snap);
+	free(t);
+}
+
+static struct tbuf *tbuf_get(struct wl_resource *res)
+{
+	struct tbuf *t;
+
+	for (t = D.bufs; t; t = t->next)
+		if (t->res == res)
+			return t;
+	t = calloc(1, sizeof *t);
+	t->res = res;
+	t->destroy.notify = tbuf_gone;
+	wl_resource_add_destroy_listener(res, &t->destroy);
+	t->next = D.bufs;
+	D.bufs = t;
+	return t;
+}
+
+/* whether what the compositor holds was left alone */
+static void tbuf_check(struct tbuf *t)
+{
+	struct wl_shm_buffer *shm = wl_shm_buffer_get(t->res);
+
+	if (!shm || !t->held)
+		return;
+	wl_shm_buffer_begin_access(shm);
+	if (memcmp(wl_shm_buffer_get_data(shm), t->snap, t->size)) {
+		fail("havoc wrote to a buffer the compositor still holds");
+		D.held_writes++;
+		memcpy(t->snap, wl_shm_buffer_get_data(shm), t->size);
+	}
+	wl_shm_buffer_end_access(shm);
+}
+
+static void tbuf_release(struct tbuf *t)
+{
+	tbuf_check(t);
+	t->held = false;
+	free(t->snap);
+	t->snap = NULL;
+	wl_buffer_send_release(t->res);
+}
+
+static int release_tick(void *data)
+{
+	struct tbuf *t;
+	long long n = now_ms();
+
+	wl_event_source_timer_update(D.release_timer, 10);
+	if (D.release != REL_TIMER)
+		return 0;
+	for (t = D.bufs; t; t = t->next)
+		if (t->held && n - t->since >= HOLD_MS) {
+			tbuf_release(t);
+			break;
+		}
+	return 0;
+}
+
+static void poke_wait(void)
+{
+	if (D.wait_pending)
+		wl_event_source_timer_update(D.wait_timer, D.quiet_ms);
+}
+
+static void main_commit(struct surf *s)
+{
+	struct commit_rec *lr;
+	struct wl_shm_buffer *shm;
+	struct tbuf *t, *o;
+	uint8_t *data, *mask;
+	int w, h, stride, i, x, y;
+	bool resized;
+
+	if (!s->buf)
+		return;
+	C.mapped = true;
+	shm = wl_shm_buffer_get(s->buf);
+	if (!shm) {
+		fail("the window's buffer is not a shm buffer");
+		return;
+	}
+	w = wl_shm_buffer_get_width(shm);
+	h = wl_shm_buffer_get_height(shm);
+	stride = wl_shm_buffer_get_stride(shm);
+	CHECK(stride == w * 4, "stride %d for width %d", stride, w);
+
+	t = tbuf_get(s->buf);
+	CHECK(!t->held, "havoc attached a buffer that was not released");
+	for (o = D.bufs; o; o = o->next)
+		if (o != t)
+			tbuf_check(o);
+
+	wl_shm_buffer_begin_access(shm);
+	data = wl_shm_buffer_get_data(shm);
+
+	/* the damage, as rectangles and as the pixels they cover */
+	mask = calloc(w * h, 1);
+	lr = &D.log[D.nlog < MAX_LOG ? D.nlog++ : MAX_LOG - 1];
+	memset(lr, 0, sizeof *lr);
+	lr->w = w;
+	lr->h = h;
+	lr->format = wl_shm_buffer_get_format(shm);
+	lr->n = s->ndmg;
+	CHECK(!s->dmg_overflow && !s->legacy_damage,
+	      "damage the harness cannot follow");
+	for (i = 0; i < s->ndmg; ++i) {
+		struct rect r = s->dmg[i];
+
+		if (i < LOG_RECTS)
+			lr->r[i] = r;
+		lr->sum_px += (long long)r.w * r.h;
+		CHECK(r.w > 0 && r.h > 0 && r.x >= 0 && r.y >= 0 &&
+		      r.x + r.w <= w && r.y + r.h <= h,
+		      "damage %d,%d %dx%d outside the %dx%d buffer",
+		      r.x, r.y, r.w, r.h, w, h);
+		for (y = r.y < 0 ? 0 : r.y; y < r.y + r.h && y < h; ++y)
+			for (x = r.x < 0 ? 0 : r.x; x < r.x + r.w && x < w; ++x)
+				mask[y * w + x] = 1;
+	}
+	for (i = 0; i < w * h; ++i)
+		lr->union_px += mask[i];
+	lr->full = lr->union_px == (long long)w * h;
+
+	resized = !D.img || D.w != w || D.h != h ||
+		  D.format != wl_shm_buffer_get_format(shm);
+	if (resized) {
+		if (!lr->full) {
+			fail("a %dx%d buffer after %dx%d came with damage for %lld of %d pixels",
+			     w, h, D.w, D.h, lr->union_px, w * h);
+			D.no_full++;
+		}
+		free(D.img);
+		D.img = malloc((size_t)stride * h);
+		memcpy(D.img, data, (size_t)stride * h);
+		D.w = w;
+		D.h = h;
+		D.format = lr->format;
+	} else {
+		int bad = 0, fx = -1, fy = -1;
+
+		for (y = 0; y < h; ++y)
+			for (x = 0; x < w; ++x)
+				if (mask[y * w + x])
+					memcpy(D.img + (size_t)y * stride + x * 4,
+					       data + (size_t)y * stride + x * 4,
+					       4);
+		for (y = 0; y < h; ++y)
+			for (x = 0; x < w; ++x)
+				if (memcmp(D.img + (size_t)y * stride + x * 4,
+					   data + (size_t)y * stride + x * 4,
+					   4)) {
+					if (!bad++) {
+						fx = x;
+						fy = y;
+					}
+				}
+		if (bad) {
+			fail("commit %d: %d pixels differ from the buffer outside the damage, the first at %d,%d",
+			     D.commits, bad, fx, fy);
+			D.stale++;
+			memcpy(D.img, data, (size_t)stride * h);
+		}
+	}
+	free(mask);
+
+	if (s->opaque_pending) {
+		D.opaque = s->opaque;
+		s->opaque_pending = false;
+	}
+	D.commits++;
+
+	if (D.release == REL_IMMEDIATE) {
+		wl_shm_buffer_end_access(shm);
+		wl_buffer_send_release(s->buf);
+	} else {
+		/* hold it, and what it had when we got it, until it is time */
+		t->size = (size_t)stride * h;
+		t->snap = malloc(t->size);
+		memcpy(t->snap, data, t->size);
+		t->held = true;
+		t->since = now_ms();
+		wl_shm_buffer_end_access(shm);
+		if (D.release == REL_NEXT)
+			for (o = D.bufs; o; o = o->next)
+				if (o != t && o->held)
+					tbuf_release(o);
+	}
+	s->ndmg = 0;
+	s->buf = NULL;
+	poke_wait();
+}
+
+static void s_commit(struct wl_client *c, struct wl_resource *r)
+{
+	struct surf *s = wl_resource_get_user_data(r);
+
+	if (r == C.surface) {
+		main_commit(s);
+	} else if (s->buf) {
+		wl_buffer_send_release(s->buf);
+		s->buf = NULL;
+	}
+	if (s->cb) {
+		wl_callback_send_done(s->cb, 0);
+		wl_resource_destroy(s->cb);
+		s->cb = NULL;
+	}
+}
+
 static void comp_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id)
 {
 	struct wl_resource *r = wl_resource_create(c, &wl_compositor_interface,
@@ -199,6 +560,8 @@ static void wm_create_positioner(struct wl_client *c, struct wl_resource *r,
 static void wm_get_xdg_surface(struct wl_client *c, struct wl_resource *r,
 			       uint32_t id, struct wl_resource *surf)
 {
+	/* the window is the surface that gets a role, not the cursor's */
+	C.surface = surf;
 	C.xdg_surface = wl_resource_create(c, &xdg_surface_interface,
 					   wl_resource_get_version(r), id);
 	wl_resource_set_implementation(C.xdg_surface, &xdg_surface_impl, NULL,
@@ -247,8 +610,25 @@ static void kbd_release(struct wl_client *c, struct wl_resource *r)
 }
 static const struct wl_keyboard_interface kbd_impl = { .release = kbd_release };
 
+static void ptr_set_cursor(struct wl_client *c, struct wl_resource *r,
+			   uint32_t serial, struct wl_resource *surf,
+			   int32_t x, int32_t y) {}
+static void ptr_release(struct wl_client *c, struct wl_resource *r)
+{
+	if (D.pointer == r)
+		D.pointer = NULL;
+	wl_resource_destroy(r);
+}
+static const struct wl_pointer_interface ptr_impl = {
+	.set_cursor = ptr_set_cursor, .release = ptr_release,
+};
 static void seat_get_pointer(struct wl_client *c, struct wl_resource *r,
-			     uint32_t id) {}
+			     uint32_t id)
+{
+	D.pointer = wl_resource_create(c, &wl_pointer_interface,
+				       wl_resource_get_version(r), id);
+	wl_resource_set_implementation(D.pointer, &ptr_impl, NULL, NULL);
+}
 static void seat_get_keyboard(struct wl_client *c, struct wl_resource *r,
 			      uint32_t id)
 {
@@ -274,7 +654,8 @@ static void seat_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id)
 	struct wl_resource *r = wl_resource_create(c, &wl_seat_interface, v, id);
 
 	wl_resource_set_implementation(r, &seat_impl, NULL, NULL);
-	wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_KEYBOARD);
+	wl_seat_send_capabilities(r, WL_SEAT_CAPABILITY_KEYBOARD |
+				 (D.driver ? WL_SEAT_CAPABILITY_POINTER : 0));
 	wl_seat_send_name(r, "seat0");
 }
 
@@ -379,6 +760,265 @@ static void type(uint32_t key)
 			     WL_KEYBOARD_KEY_STATE_RELEASED);
 }
 
+/* viewporter and fractional scale, enough for havoc to render at another
+ * scale: the scale is whatever the driver says and the viewport is recorded */
+static void vp_destroy(struct wl_client *c, struct wl_resource *r)
+{
+	wl_resource_destroy(r);
+}
+static void vp_source(struct wl_client *c, struct wl_resource *r,
+		      wl_fixed_t x, wl_fixed_t y, wl_fixed_t w, wl_fixed_t h) {}
+static void vp_dest(struct wl_client *c, struct wl_resource *r, int32_t w,
+		    int32_t h)
+{
+	D.vp_w = w;
+	D.vp_h = h;
+}
+static const struct wp_viewport_interface vp_impl = {
+	.destroy = vp_destroy, .set_source = vp_source,
+	.set_destination = vp_dest,
+};
+static void vpm_get(struct wl_client *c, struct wl_resource *r, uint32_t id,
+		    struct wl_resource *surf)
+{
+	struct wl_resource *v = wl_resource_create(c, &wp_viewport_interface,
+						   wl_resource_get_version(r),
+						   id);
+
+	wl_resource_set_implementation(v, &vp_impl, NULL, NULL);
+}
+static const struct wp_viewporter_interface vpm_impl = {
+	.destroy = vp_destroy, .get_viewport = vpm_get,
+};
+static void vpm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id)
+{
+	struct wl_resource *r = wl_resource_create(c, &wp_viewporter_interface,
+						   v, id);
+
+	wl_resource_set_implementation(r, &vpm_impl, NULL, NULL);
+}
+
+static const struct wp_fractional_scale_v1_interface fs_impl = {
+	.destroy = vp_destroy,
+};
+static void fsm_get(struct wl_client *c, struct wl_resource *r, uint32_t id,
+		    struct wl_resource *surf)
+{
+	D.fs = wl_resource_create(c, &wp_fractional_scale_v1_interface,
+				  wl_resource_get_version(r), id);
+	wl_resource_set_implementation(D.fs, &fs_impl, NULL, NULL);
+}
+static const struct wp_fractional_scale_manager_v1_interface fsm_impl = {
+	.destroy = vp_destroy, .get_fractional_scale = fsm_get,
+};
+static void fsm_bind(struct wl_client *c, void *d, uint32_t v, uint32_t id)
+{
+	struct wl_resource *r = wl_resource_create(c,
+		&wp_fractional_scale_manager_v1_interface, v, id);
+
+	wl_resource_set_implementation(r, &fsm_impl, NULL, NULL);
+}
+
+/* the commands of --driver, one per line on stdin, answered on stdout:
+ *
+ *   focus                      keyboard (and text input) focus into the window
+ *   feed HEX                   bytes the terminal gets as program output
+ *   key CODE                   press and release an evdev key
+ *   ptr enter|motion X Y       pointer at surface coordinates
+ *   ptr button 0|1             left button released or pressed
+ *   ptr axis N                 scroll by N / 3 lines (negative is up)
+ *   configure W H              xdg_toplevel configure with this size
+ *   scale N                    preferred fractional scale N / 120
+ *   wait                       answered once nothing happened for a while, with
+ *                              a line per commit since the last wait
+ *   snap PATH                  the compositor's copy of the window to PATH
+ *   stats                      totals, the checks' counters and the opaque region
+ *   quit
+ */
+static int ctl_fd = -1;
+
+static void reply(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf("\n");
+	fflush(stdout);
+}
+
+static int wait_done(void *data)
+{
+	int i, j;
+
+	for (i = 0; i < D.nlog; ++i) {
+		struct commit_rec *l = &D.log[i];
+
+		printf("C %d %d %u %d %lld %lld %d", l->w, l->h, l->format,
+		       l->n, l->union_px, l->sum_px, l->full);
+		for (j = 0; j < l->n && j < LOG_RECTS; ++j)
+			printf(" %d,%d,%d,%d", l->r[j].x, l->r[j].y, l->r[j].w,
+			       l->r[j].h);
+		printf("\n");
+	}
+	D.nlog = 0;
+	D.wait_pending = false;
+	reply("END");
+	return 0;
+}
+
+static int hexval(int c)
+{
+	return c >= '0' && c <= '9' ? c - '0' : (c | 32) - 'a' + 10;
+}
+
+static void driver_line(char *l)
+{
+	char *arg = strchr(l, ' ');
+	int a, b;
+	uint8_t buf[8192];
+
+	if (arg)
+		*arg++ = 0;
+	else
+		arg = "";
+
+	if (!strcmp(l, "focus")) {
+		focus(true);
+		reply("OK");
+	} else if (!strcmp(l, "feed")) {
+		size_t n = 0;
+
+		for (; arg[0] && arg[1] && n < sizeof buf; arg += 2)
+			buf[n++] = hexval(arg[0]) << 4 | hexval(arg[1]);
+		if (write(ctl_fd, buf, n) != (ssize_t)n)
+			fail("cannot feed the terminal");
+		reply("OK");
+	} else if (!strcmp(l, "key")) {
+		type(atoi(arg));
+		reply("OK");
+	} else if (!strcmp(l, "ptr")) {
+		char *w = strsep(&arg, " ");
+
+		if (!D.pointer) {
+			fail("no pointer");
+		} else if (sscanf(arg ? arg : "", "%d %d", &a, &b) == 2 &&
+			   !strcmp(w, "enter")) {
+			wl_pointer_send_enter(D.pointer, ++C.serial, C.surface,
+					      wl_fixed_from_int(a),
+					      wl_fixed_from_int(b));
+		} else if (sscanf(arg ? arg : "", "%d %d", &a, &b) == 2 &&
+			   !strcmp(w, "motion")) {
+			wl_pointer_send_motion(D.pointer, 0,
+					       wl_fixed_from_int(a),
+					       wl_fixed_from_int(b));
+		} else if (!strcmp(w, "axis")) {
+			wl_pointer_send_axis(D.pointer, 0,
+					     WL_POINTER_AXIS_VERTICAL_SCROLL,
+					     wl_fixed_from_int(atoi(arg)));
+		} else if (!strcmp(w, "button")) {
+			wl_pointer_send_button(D.pointer, ++C.serial, 0, 0x110,
+					       atoi(arg)
+					       ? WL_POINTER_BUTTON_STATE_PRESSED
+					       : WL_POINTER_BUTTON_STATE_RELEASED);
+		}
+		reply("OK");
+	} else if (!strcmp(l, "configure")) {
+		struct wl_array states;
+
+		wl_array_init(&states);
+		sscanf(arg, "%d %d", &a, &b);
+		xdg_toplevel_send_configure(C.toplevel, a, b, &states);
+		xdg_surface_send_configure(C.xdg_surface, ++C.serial);
+		wl_array_release(&states);
+		reply("OK");
+	} else if (!strcmp(l, "scale")) {
+		if (D.fs)
+			wp_fractional_scale_v1_send_preferred_scale(D.fs,
+								    atoi(arg));
+		else
+			fail("no fractional scale");
+		reply("OK");
+	} else if (!strcmp(l, "wait")) {
+		D.wait_pending = true;
+		wl_event_source_timer_update(D.wait_timer, D.quiet_ms);
+	} else if (!strcmp(l, "snap")) {
+		FILE *f = fopen(arg, "w");
+
+		if (f && D.img) {
+			fwrite(D.img, 4, (size_t)D.w * D.h, f);
+			fclose(f);
+			reply("SNAP %d %d", D.w, D.h);
+		} else {
+			reply("SNAP 0 0");
+		}
+	} else if (!strcmp(l, "stats")) {
+		struct opaque *o = &D.opaque;
+
+		reply("S commits=%d stale=%d held_writes=%d no_full=%d failed=%d w=%d h=%d format=%u vp=%dx%d opaque=%d,%d:%d,%d,%d,%d",
+		      D.commits, D.stale, D.held_writes, D.no_full, C.failed,
+		      D.w, D.h, D.format, D.vp_w, D.vp_h, o->set, o->n,
+		      o->n ? o->r[0].x : 0, o->n ? o->r[0].y : 0,
+		      o->n ? o->r[0].w : 0, o->n ? o->r[0].h : 0);
+		reply("END");
+	} else if (!strcmp(l, "quit")) {
+		kill(C.child, SIGTERM);
+		waitpid(C.child, NULL, 0);
+		exit(C.failed);
+	}
+}
+
+static int stdin_ready(int fd, uint32_t mask, void *data)
+{
+	static char line[16384];
+	static size_t n;
+	ssize_t r = read(fd, line + n, sizeof line - n - 1);
+	char *nl;
+
+	if (r <= 0) {
+		kill(C.child, SIGTERM);
+		exit(C.failed);
+	}
+	n += r;
+	while ((nl = memchr(line, '\n', n))) {
+		*nl = 0;
+		driver_line(line);
+		n -= nl + 1 - line;
+		memmove(line, nl + 1, n);
+	}
+	return 0;
+}
+
+static void driver_start(const char *havoc, const char *cfg, const char *dir)
+{
+	char path[512];
+
+	snprintf(path, sizeof path, "%s/ctl", dir);
+	unlink(path);
+	if (mkfifo(path, 0600) < 0 ||
+	    (ctl_fd = open(path, O_RDWR)) < 0) {
+		perror("fifo");
+		exit(2);
+	}
+	setenv("HAVOC_CTL", path, 1);
+	/* the terminal only echoes what is typed, everything else is what the
+	 * driver feeds through the fifo */
+	C.child = fork();
+	if (C.child == 0) {
+		execl(havoc, havoc, "-c", cfg, "/bin/sh", "-c",
+		      "exec cat \"$HAVOC_CTL\"", (char *)NULL);
+		_exit(127);
+	}
+	D.wait_timer = wl_event_loop_add_timer(C.loop, wait_done, NULL);
+	D.release_timer = wl_event_loop_add_timer(C.loop, release_tick, NULL);
+	wl_event_source_timer_update(D.release_timer, 10);
+	wl_event_loop_add_fd(C.loop, 0, WL_EVENT_READABLE, stdin_ready, NULL);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	signal(SIGALRM, SIG_DFL);
+	alarm(600);
+}
+
 static void finish(void)
 {
 	char buf[64] = "";
@@ -467,18 +1107,45 @@ int main(int argc, char *argv[])
 	const char *sock;
 	int i = 1;
 
+	bool fractional = false;
+
 	C.with_ti = true;
-	if (i < argc && !strcmp(argv[i], "--no-text-input")) {
-		C.with_ti = false;
-		i++;
+	D.quiet_ms = 150;
+	for (; i < argc && argv[i][0] == '-'; i++) {
+		if (!strcmp(argv[i], "--no-text-input")) {
+			C.with_ti = false;
+		} else if (!strcmp(argv[i], "--driver")) {
+			D.driver = true;
+		} else if (!strcmp(argv[i], "--fractional")) {
+			fractional = true;
+		} else if (!strcmp(argv[i], "--quiet") && i + 1 < argc) {
+			D.quiet_ms = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--release") && i + 1 < argc) {
+			const char *m = argv[++i];
+
+			D.release = !strcmp(m, "immediate") ? REL_IMMEDIATE :
+				    !strcmp(m, "next") ? REL_NEXT :
+				    !strcmp(m, "timer") ? REL_TIMER :
+				    !strcmp(m, "never") ? REL_NEVER : -1;
+			if (D.release < 0) {
+				fprintf(stderr, "unknown release policy %s\n", m);
+				return 2;
+			}
+		} else {
+			fprintf(stderr, "unknown option %s\n", argv[i]);
+			return 2;
+		}
 	}
 	if (argc - i != 2) {
-		fprintf(stderr, "usage: %s [--no-text-input] HAVOC OUTFILE\n",
-			argv[0]);
+		fprintf(stderr, "usage: %s [--no-text-input] HAVOC OUTFILE\n"
+			"       %s --driver [--release immediate|next|timer|never]"
+			" [--fractional] [--quiet MS] HAVOC CONFIG\n",
+			argv[0], argv[0]);
 		return 2;
 	}
 	C.outfile = argv[i + 1];
-	unlink(C.outfile);
+	if (!D.driver)
+		unlink(C.outfile);
 
 	C.display = wl_display_create();
 	C.loop = wl_display_get_event_loop(C.display);
@@ -493,9 +1160,23 @@ int main(int argc, char *argv[])
 				 &zwp_text_input_manager_v3_interface, 1, NULL,
 				 tim_bind);
 
+	if (fractional) {
+		wl_global_create(C.display, &wp_viewporter_interface, 1, NULL,
+				 vpm_bind);
+		wl_global_create(C.display,
+				 &wp_fractional_scale_manager_v1_interface, 1,
+				 NULL, fsm_bind);
+	}
+
+	setenv("WAYLAND_DISPLAY", sock, 1);
+	if (D.driver) {
+		driver_start(argv[i], C.outfile, getenv("XDG_RUNTIME_DIR"));
+		wl_display_run(C.display);
+		return 1;
+	}
+
 	C.child = fork();
 	if (C.child == 0) {
-		setenv("WAYLAND_DISPLAY", sock, 1);
 		setenv("HAVOC_OUT", C.outfile, 1);
 		/* -c "" skips the user's configuration */
 		execl(argv[i], argv[i], "-c", "", "/bin/sh", "-c",
