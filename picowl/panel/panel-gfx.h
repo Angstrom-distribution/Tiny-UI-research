@@ -133,8 +133,8 @@ struct pl_glyph {
 /* The digits and the clock and battery symbols come first: tests and the
  * widgets address those by index. The rest is for the text rows. */
 #define PL_FONT_CHARS "0123456789:%-AC " \
-	"BDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz" ",."
-#define PL_FONT_NCHARS 68
+	"BDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz" ",.>~"
+#define PL_FONT_NCHARS 70
 
 struct pl_face {
 	int px;

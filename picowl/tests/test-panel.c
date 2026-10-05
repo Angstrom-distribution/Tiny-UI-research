@@ -1555,6 +1555,8 @@ static void test_font(void)
 	CHECK(caps_ok, "the bitmap font has every capital");
 	CHECK(caps_distinct, "and they all differ");
 	CHECK(pl_font_glyph(',') && pl_font_glyph('.'), "the bitmap font has a comma and a full stop");
+	CHECK(pl_font_glyph('>') && pl_font_glyph('~'), "and the > of the over-24-h estimate and the ~ of the warm-up hint");
+	CHECK(memcmp(pl_font_glyph('>'), pl_font_glyph('~'), 7), "which differ");
 	CHECK(memcmp(pl_font_glyph(','), pl_font_glyph('.'), 7), "which differ");
 	{
 		int px[PL_ROW_FACES];
