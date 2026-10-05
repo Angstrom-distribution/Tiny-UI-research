@@ -35,8 +35,8 @@ color = #101010
 # One shell command per line, run once at startup.
 # The panel: a slim bar with clock, battery and backlight and volume buttons; a
 # tap on a button pops a row out under the bar (a slider for the backlight and
-# the volume, the weekday and date for the clock; it covers windows, it does
-# not move them) and closes it again 3 s after the last touch. It is hidden
+# the volume, the weekday and date for the clock, the time left for the battery;
+# it covers windows, it does not move them) and closes it again 3 s after the last touch. It is hidden
 # while an app has the focus, and with it the row, unless [zerocopy]
 # panel_autohide is false. Options: --height N (18..80, default 18), --bottom,
 # --font PATH and --font-size PX (the text is rasterized from a TrueType font,
@@ -44,9 +44,13 @@ color = #101010
 # built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
 # translucent), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
 # (default auto: LCD text in the order [output] subpixel advertises, in
-# grayscale where the ground is translucent or the stripes do not run across).
+# grayscale where the ground is translucent or the stripes do not run across)
+# and --battery-mah N (the battery's capacity, the last resort for the time left
+# when the driver exports neither charge_full nor charge_full_design).
 # cmd = picowl-panel
 # cmd = picowl-panel --bottom --height 24 --popup-alpha 255
+# with the capacity printed on the battery pack, for a gauge that does not report it:
+# cmd = picowl-panel --battery-mah 1000
 
 [osk]
 # The on-screen keyboard: picowl starts it, restarts it when it dies and shows or

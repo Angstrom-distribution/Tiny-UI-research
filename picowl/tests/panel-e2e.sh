@@ -26,6 +26,13 @@
 #     usable area of a second client unchanged, closed by the same tap, by the
 #     other buttons and after 3 s, a press in the row keeps it open and sets
 #     nothing, and the text fits the row.
+#  K: the battery is a button that opens a row with the time left: a fake
+#     DS2760 (exactly the attributes that driver exports, a charger supply and
+#     the current's sign as the driver has it) discharging, charging, full, not
+#     charging, idle, without a current and without a battery, a generic battery
+#     with current_avg and one with power_now and energy_now; the wording, the
+#     rounding and the hint for the first two minutes; the same shared open,
+#     switch, close and 3 s auto-close; nothing is ever set by a tap.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -950,6 +957,215 @@ R=$((0x$(echo "$RGB" | cut -c1-2)))
 stop_panel J
 stop_picowl
 echo "panel-e2e: J ok"
+
+# ---- K: the battery opens the estimate row ----
+start_picowl
+echo 600 >"$BL/brightness"
+printf 'volume 8\nswitch 0\n' >"$CTL"
+K=$DIR/sys-k
+mkdir -p "$K/class/backlight/bl0"
+echo 1023 >"$K/class/backlight/bl0/max_brightness"
+echo 600 >"$K/class/backlight/bl0/brightness"
+echo raw >"$K/class/backlight/bl0/type"
+KB=$K/class/power_supply/ds2760-battery.0
+KAC=$K/class/power_supply/ac
+# mk_ds2760 STATUS CAPACITY CURRENT CHARGE_NOW [TTE]: the attributes of the
+# DS2760 driver and no others (no current_avg, no time_to_full, no energy_*).
+# CURRENT is in uA and signed, negative while discharging, or "none".
+mk_ds2760() {
+	rm -rf "$KB"
+	mkdir -p "$KB"
+	echo Battery >"$KB/type"
+	echo "$1" >"$KB/status"
+	echo "$2" >"$KB/capacity"
+	echo 3900000 >"$KB/voltage_now"
+	echo 250 >"$KB/temp"
+	echo 1100000 >"$KB/charge_full_design"
+	echo 1000000 >"$KB/charge_full"
+	echo 50000 >"$KB/charge_empty"
+	echo "$4" >"$KB/charge_now"
+	[ "$3" = none ] || echo "$3" >"$KB/current_now"
+	[ -n "$5" ] && echo "$5" >"$KB/time_to_empty_now"
+	return 0
+}
+# mk_ac ONLINE: a mains supply, or none
+mk_ac() {
+	rm -rf "$KAC"
+	[ "$1" = none ] && return 0
+	mkdir -p "$KAC"
+	echo Mains >"$KAC/type"
+	echo "$1" >"$KAC/online"
+}
+# row_line FILE: the last text of the open battery row in a dump
+est_text() { sed -n 's/^row kind=estimate .* text="\(.*\)"$/\1/p' "$1" | tail -n1; }
+# k_dump NAME WANT: an immediate dump with the row open has this text
+k_dump() {
+	export PICOWL_SYSFS_ROOT=$K
+	dump k.out --inject "ibat"
+	export PICOWL_SYSFS_ROOT=$SYS
+	T=$(est_text "$DIR/k.out")
+	[ "$T" = "$2" ] || fail "K $1: the row says '$T', wanted '$2'"
+	echo "panel-e2e: K $1: '$T'"
+}
+# k_warm NAME WANT: after the filter has warmed up (a sample per second, four
+# of them), with the stylus held in the row so that it stays open
+k_warm() {
+	export PICOWL_SYSFS_ROOT=$K PICOWL_PANEL_BATTERY_POLL_S=1
+	start_panel k --inject "ibat;p$X,$Y"
+	i=0
+	while [ "$(est_text "$DIR/k.out")" != "$2" ]; do
+		i=$((i + 1)); [ $i -gt 200 ] && fail "K $1: the row says '$(est_text "$DIR/k.out")', wanted '$2' after 10 s"
+		sleep 0.05
+	done
+	echo "panel-e2e: K $1: '$2' after warm-up"
+	KW=$(grep -c . "$DIR/k.out")
+	stop_panel K
+	unset PICOWL_SYSFS_ROOT PICOWL_PANEL_BATTERY_POLL_S
+	export PICOWL_SYSFS_ROOT=$SYS
+}
+
+# Discharging at 600 mA with 950000 uAh in the counter, of which 50000 uAh are
+# the reserve below charge_empty: (950000 - 50000) uAh / 600000 uA = 1.5 h =
+# 90 min, rounded to 5 min (it is between 10 min and 5 h) is 90: 1 h 30 min.
+# The kernel's time_to_empty_now (5400 s, in seconds) is the hint until four
+# samples are in.
+mk_ac 0
+mk_ds2760 Discharging 94 -600000 950000 5400
+k_dump "cold start: the kernel's time as a hint" "94%  ~1 h 30 min left"
+has "$DIR/k.out" '^panel width=240 height=54 bar=18 row=36 format=ARGB8888 anchor=top popup=battery$' "K open: the battery opens the surface of bar and row"
+has "$DIR/k.out" '^surface exclusive=18 input=0,0,240,54$' "K open: the exclusive zone is the bar"
+has "$DIR/k.out" '^estimate kind=left minutes=90 hint=1 ' "K the hint is the kernel's 5400 s as 90 min"
+k_warm "discharging, warm" "94%  1 h 30 min left"
+# A different current: 900000 uAh at 1.2 A is 45 min (rounded to 5: 45).
+mk_ds2760 Discharging 94 -1200000 950000 5400
+k_warm "discharging at 1.2 A" "94%  45 min left"
+# Over 5 h the rounding is 15 min: 950000 - 50000 = 900000 uAh at 150 mA is 6 h.
+mk_ds2760 Discharging 94 -150000 950000
+k_warm "discharging at 150 mA, 6 h" "94%  6 h 00 min left"
+# Without time_to_empty_now and before warm-up there is nothing to show.
+mk_ds2760 Discharging 94 -600000 950000
+k_dump "no hint without time_to_empty_now" "94%  Estimating..."
+# No current attribute at all, or an idle one: no fake numbers, ever.
+mk_ds2760 Discharging 94 none 950000
+k_warm "no current_now" "94%  Estimating..."
+mk_ds2760 Discharging 94 -2000 950000
+k_warm "idle, 2 mA" "94%  Estimating..."
+mk_ds2760 Discharging 94 none 950000 5400
+k_warm "no current_now, the kernel's time as the only source" "94%  ~1 h 30 min left"
+# Charging: the charger is online and the current is positive. 1000000 -
+# 500000 = 500000 uAh to go at 400 mA is 75 min: 1 h 15 min.
+mk_ac 1
+mk_ds2760 Charging 47 400000 500000
+k_warm "charging" "47%  1 h 15 min to full"
+mk_ds2760 Charging 95 400000 950000
+k_dump "charging above the taper" "95%  Charging"
+mk_ds2760 Full 100 -1000 1000000
+k_dump "full" "100%  Fully charged"
+mk_ds2760 "Not charging" 80 -100000 800000
+k_dump "not charging, by the status" "80%  Not charging"
+# The status lags the current by up to a minute in the driver: a charger that is
+# online and a battery that gives current is not charging, whatever it says.
+mk_ds2760 Charging 80 -100000 800000
+k_warm "not charging, by the current" "80%  Not charging"
+# On the charger the sign of the current is what decides, not the status.
+mk_ds2760 Discharging 47 400000 500000
+k_warm "charging, by the current" "47%  1 h 15 min to full"
+# No battery: mains alone, or nothing.
+rm -rf "$KB"
+k_dump "mains and no battery" "On AC power"
+mk_ac none
+k_dump "no battery and no mains" "--"
+# A generic battery: current_avg is the rate (300 mA, not the 900 mA that
+# current_now says) and there is no charge_empty to subtract: 900000 uAh is 3 h.
+mk_ac 0
+rm -rf "$KB"
+mkdir -p "$KB"
+echo Battery >"$KB/type"; echo Discharging >"$KB/status"; echo 90 >"$KB/capacity"
+echo -900000 >"$KB/current_now"; echo -300000 >"$KB/current_avg"; echo 900000 >"$KB/charge_now"
+echo 1000000 >"$KB/charge_full"
+k_warm "generic battery, current_avg" "90%  3 h 00 min left"
+# power_now and energy_now: 6 Wh at 2 W is 3 h.
+rm -rf "$KB"
+mkdir -p "$KB"
+echo Battery >"$KB/type"; echo Discharging >"$KB/status"; echo 60 >"$KB/capacity"
+echo 2000000 >"$KB/power_now"; echo 6000000 >"$KB/energy_now"; echo 10000000 >"$KB/energy_full"
+k_warm "generic battery, power_now and energy_now" "60%  3 h 00 min left"
+# Only a capacity and the user's --battery-mah: 80 percent of 1000 mAh at 400 mA is 2 h.
+rm -rf "$KB"
+mkdir -p "$KB"
+echo Battery >"$KB/type"; echo Discharging >"$KB/status"; echo 80 >"$KB/capacity"; echo -400000 >"$KB/current_now"
+k_warm "capacity only, no battery size" "80%  Estimating..."
+export PICOWL_SYSFS_ROOT=$K PICOWL_PANEL_BATTERY_POLL_S=1
+start_panel k --battery-mah 1000 --inject "ibat;p$X,$Y"
+wait_for "$DIR/k.out" '^row kind=estimate .* text="80%  2 h 00 min left"$' 10 "K --battery-mah"
+stop_panel K
+unset PICOWL_SYSFS_ROOT PICOWL_PANEL_BATTERY_POLL_S
+export PICOWL_SYSFS_ROOT=$SYS
+echo "panel-e2e: K --battery-mah 1000: 2 h 00 min"
+"$PANEL" --battery-mah x >"$DIR/k.out" 2>"$DIR/k.err"
+[ $? -eq 2 ] || fail "K: a bad --battery-mah does not exit 2"
+"$PANEL" --help | grep -q -e --battery-mah || fail "K: --help does not list --battery-mah"
+
+# The row is a text row: a tap sets nothing and the layout is the shared one.
+mk_ac 0
+mk_ds2760 Discharging 94 -600000 950000 5400
+export PICOWL_SYSFS_ROOT=$K
+dump k.out --inject "ibat"
+has "$DIR/k.out" '^row kind=estimate rect=0,18,240,36 ' "K the estimate row is the row"
+W=$(sed -n 's/^row kind=estimate .* width=\([0-9]*\) avail=\([0-9]*\) .*/\1 \2/p' "$DIR/k.out")
+[ "${W% *}" -gt 0 ] && [ "${W% *}" -le "${W#* }" ] || fail "K: the estimate's text is $W px wide: it does not fit"
+has "$DIR/k.out" '^target battery rect=[0-9]*,0,[0-9]*,18 hl=[0-9]*,[0-9]*,[0-9]*,[0-9]* open=1$' "K the battery target is the whole bar high and open"
+BB=$(sed -n 's/^target battery rect=\([0-9,]*\) .*/\1/p' "$DIR/k.out")
+[ "$(comp "$BB" 3)" -ge 36 ] || fail "K: the battery button is only $(comp "$BB" 3) px wide"
+[ $(( $(comp "$BB" 1) + $(comp "$BB" 3) )) -eq 240 ] || fail "K: the battery button does not reach the edge: $BB"
+[ "$(cat "$K/class/backlight/bl0/brightness")" = 600 ] || fail "K: a tap on the battery wrote the brightness"
+grep -q '^volume 8$' "$CTL" && grep -q '^switch 0$' "$CTL" || fail "K: a tap on the battery reached the mixer"
+dump k.out --inject "ibat;ibat"
+has "$DIR/k.out" '^panel width=240 height=18 .*popup=none$' "K the same tap closes the row"
+dump k.out --inject "ibat;icl"
+has "$DIR/k.out" 'popup=clock$' "K the clock switches from the battery"
+dump k.out --inject "icl;ibat"
+has "$DIR/k.out" 'popup=battery$' "K the battery switches from the clock"
+has "$DIR/k.out" '^row kind=estimate ' "K to the estimate"
+dump k.out --inject "ibl;ibat;ivol"
+has "$DIR/k.out" 'popup=volume$' "K the speaker switches from the battery"
+dump k.out --inject "ibat;p$X,$Y;m$((X + 30)),$Y;r"
+has "$DIR/k.out" 'popup=battery$' "K a press and a drag in the row keep it open"
+[ "$(cat "$K/class/backlight/bl0/brightness")" = 600 ] || fail "K: a press in the row wrote the brightness"
+dump k.out --inject "ibat;w2500"
+has "$DIR/k.out" 'popup=battery$' "K still open after 2.5 s"
+dump k.out --inject "ibat;w2500;w800"
+has "$DIR/k.out" '^panel width=240 height=18 .*popup=none$' "K closed after 3.3 s"
+dump k.out --inject "ibat;w2000;p$X,$Y;r;w2000"
+has "$DIR/k.out" 'popup=battery$' "K a press in the row 2 s in keeps it open at 4 s"
+dump k.out --inject "ibat;w2000;p$X,$Y;r;w2000;w1300"
+has "$DIR/k.out" 'popup=none$' "K and it closes 3 s after that press"
+# The usable area of a second client does not change with the row open.
+start_panel k --inject "ibat;p$X,$Y"
+has "$DIR/k.out" 'popup=battery$' "K the row is open"
+M=$(mapped)
+[ "$M" = 240x302 ] || fail "K: with the estimate row open a toplevel is $M, wanted 240x302 as without"
+sleep 0.3
+HL=$(sed -n 's/^target battery .* hl=\([0-9,]*\) .*/\1/p' "$DIR/k.out" | tail -n1)
+HLX=$(comp "$HL" 1); HLY=$(comp "$HL" 2); HLH=$(comp "$HL" 4)
+"$CAPTURE" --at "$((HLX + 1)),$((HLY + HLH / 2))" >"$DIR/k.cap" 2>&1 || fail "K: capture failed"
+RGB=$(sed -n 's/.*rgb=\(.*\)/\1/p' "$DIR/k.cap" | head -n1)
+R=$((0x$(echo "$RGB" | cut -c1-2))); G=$((0x$(echo "$RGB" | cut -c3-4))); B=$((0x$(echo "$RGB" | cut -c5-6)))
+[ "$R" -ge 36 ] && [ "$R" -le 50 ] && [ "$G" -ge 52 ] && [ "$G" -le 64 ] && [ "$B" -ge 80 ] && [ "$B" -le 94 ] ||
+	fail "K: the open battery's highlight pixel is #$RGB, wanted about #2b3a57"
+RW=$(sed -n 's/^row kind=estimate rect=\([0-9,]*\) .*/\1/p' "$DIR/k.out" | tail -n1)
+"$CAPTURE" --distinct "0,$(comp "$RW" 2),240,36" >"$DIR/k.cap" 2>&1 || fail "K: capture failed"
+D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/k.cap")
+[ "${D:-0}" -ge 5 ] || fail "K: the estimate row has $D colours: no anti-aliased text"
+stop_panel K
+# A line that is too long for the largest size shrinks and still fits: at a bar
+# text size of 20 px the rows start at 26 px.
+dump k.out --font-size 20 --inject "ibat"
+W=$(sed -n 's/^row kind=estimate .* width=\([0-9]*\) avail=\([0-9]*\) .*/\1 \2/p' "$DIR/k.out")
+[ "${W% *}" -le "${W#* }" ] || fail "K: at font size 20 the estimate is $W px wide: it is clipped"
+export PICOWL_SYSFS_ROOT=$SYS
+stop_picowl
+echo "panel-e2e: K ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

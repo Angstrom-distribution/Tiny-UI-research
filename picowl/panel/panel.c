@@ -2,7 +2,8 @@
  * picowl-panel - a tiny layer-shell panel for picowl on 240x320 handhelds: a
  * slim bar with the clock, the battery and a backlight and a volume button.
  * Tapping a button pops a row out under the bar: a slider for the backlight and
- * the volume, the date for the clock. Drawn with wl_shm.
+ * the volume, the date for the clock, the time left for the battery. Drawn with
+ * wl_shm.
  *
  * One thread, one poll() loop. Nothing wakes it up without a reason: the
  * Wayland socket, the minute timer of the clock, a 30 s timer for the battery,
@@ -65,6 +66,7 @@ struct panel {
 	int font_px;
 	int bar_alpha, popup_alpha;
 	enum pl_subopt subopt;
+	int battery_mah;	/* capacity given by the user, 0 unknown */
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
 
@@ -110,6 +112,11 @@ struct panel {
 	struct pl_touch touch;
 	struct pl_popup pop;
 	int px, py;
+
+	/* the battery's rate filter, and the text of the estimate as last shown,
+	 * to see whether the open row has to be drawn again */
+	struct pl_est filter;
+	char est_text[48];
 
 	/* writes waiting for the throttle */
 	bool pending[PL_SLIDERS];
@@ -623,6 +630,7 @@ static void popup_disarm(struct panel *p)
 }
 
 static void clock_update(struct panel *p);
+static void battery_update(struct panel *p);
 
 /* The widget a button is drawn by. */
 static unsigned button_widget(int button)
@@ -640,6 +648,10 @@ static void popup_changed(struct panel *p, int prev)
 	p->dirty |= button_widget(prev) | button_widget(now);
 	if (now == PL_BTN_CLOCK)
 		clock_update(p);
+	/* The row opens on a fresh sample, so that it does not show what was
+	 * true up to 30 s ago, and the sample counts for the rate. */
+	if (now == PL_BTN_BATTERY)
+		battery_update(p);
 	if (now != PL_SLIDER_NONE)
 		p->dirty |= W_ROW;
 	if (now == PL_SLIDER_NONE)
@@ -674,8 +686,7 @@ static void popup_timer(struct panel *p)
 
 static void touch_press(struct panel *p)
 {
-	/* The battery's row has nothing to show yet. */
-	bool en[PL_BUTTONS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0, true, false };
+	bool en[PL_BUTTONS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0, true, true };
 	struct pl_touch_out o;
 
 	/* set_slider ignores a value equal to the shown one, which must not be
@@ -964,14 +975,29 @@ static void clock_update(struct panel *p)
 
 static void battery_update(struct panel *p)
 {
-	enum pl_bat_status st;
-	int pct;
+	struct pl_batt_raw raw;
 
-	pl_battery_read(NULL, &st, &pct);
-	if (st != p->st.bat || pct != p->st.bat_pct) {
-		p->st.bat = st;
-		p->st.bat_pct = pct;
+	pl_battery_read_raw(NULL, &raw);
+	pl_est_add(&p->filter, &raw, now_ms());
+	struct pl_estimate e = pl_est_compute(&p->filter, &raw, p->battery_mah);
+
+	/* While discharging the minutes move only when the estimate has really
+	 * moved, so that a row that is open does not flicker. */
+	if (e.kind == PL_EST_LEFT && !e.hint && p->st.est.kind == PL_EST_LEFT &&
+			!p->st.est.hint)
+		e.minutes = pl_est_hysteresis(p->st.est.minutes, e.minutes);
+	if (raw.st != p->st.bat || raw.pct != p->st.bat_pct) {
+		p->st.bat = raw.st;
+		p->st.bat_pct = raw.pct;
 		p->dirty |= W_BATTERY;
+	}
+	p->st.est = e;
+	char text[48];
+	pl_est_text(text, sizeof(text), &e, raw.pct, 0);
+	if (strcmp(text, p->est_text)) {
+		snprintf(p->est_text, sizeof(p->est_text), "%s", text);
+		if (p->pop.open == PL_BTN_BATTERY)
+			p->dirty |= W_ROW;
 	}
 }
 
@@ -1021,7 +1047,8 @@ static void tap_button(struct panel *p, int button)
 }
 
 /* "p X,Y" press, "m X,Y" motion, "e X,Y" pointer enter, "r" release,
- * "ibl", "ivol" and "icl" tap the backlight, volume or clock button, "w MS" run the
+ * "ibl", "ivol", "icl" and "ibat" tap the backlight, volume, clock or battery
+ * button, "w MS" run the
  * event loop for MS milliseconds (the auto-close, for one), separated by ; or
  * space: the same handlers as the wl_pointer events, for tests without a
  * pointer. "b RAW" writes the backlight as another process would. */
@@ -1047,6 +1074,8 @@ static void run_inject(struct panel *p)
 			tap_button(p, PL_SLIDER_VOLUME);
 		} else if (!strcmp(tok, "icl")) {
 			tap_button(p, PL_BTN_CLOCK);
+		} else if (!strcmp(tok, "ibat")) {
+			tap_button(p, PL_BTN_BATTERY);
 		} else if (tok[0] == 'w' && sscanf(tok + 1, "%d", &x) == 1) {
 			flush_redraw(p);
 			wait_ms(p, x);
@@ -1134,6 +1163,10 @@ static void dump_state(const struct panel *p, const char *why)
 		print_rect("button", l->button[s]);
 		printf("\n");
 	}
+	static const char *const est_names[] = { "none", "ac", "full", "notcharging", "charging",
+		"estimating", "left", "tofull", "over_left", "over_full" };
+	printf("estimate kind=%s minutes=%d hint=%d samples=%d\n", est_names[p->st.est.kind],
+		p->st.est.minutes, p->st.est.hint, p->filter.n);
 	/* The touch targets and the highlights of the open buttons. */
 	for (int i = 0; i < PL_BUTTONS; i++) {
 		printf("target %s", slider_name(i));
@@ -1184,6 +1217,9 @@ static void usage(FILE *out)
 		"                      compositor says about the output, and only when the\n"
 		"                      stripes run across the bar; rgb and bgr force one. Text\n"
 		"                      on a translucent ground is always grayscale\n"
+		"  --battery-mah N     capacity of the battery in mAh, 0..100000 (default 0, unknown),\n"
+		"                      the last resort for the time estimate when the battery\n"
+		"                      reports no charge_full or charge_full_design\n"
 		"  --dump-state        print the widget values and geometry after the first\n"
 		"                      frame and exit (for tests)\n"
 		"  --watch             test only: like --dump-state, and print the state again\n"
@@ -1191,8 +1227,8 @@ static void usage(FILE *out)
 		"  --exit-after-frame  exit after the first frame\n"
 		"  --inject SPEC       test only: feed pointer events after the first frame\n"
 		"                      (p X,Y press; m X,Y motion; e X,Y enter; r release;\n"
-		"                      ibl, ivol, icl tap the backlight, volume or clock\n"
-		"                      button; w MS wait; b RAW sets the\n"
+		"                      ibl, ivol, icl, ibat tap the backlight, volume, clock\n"
+		"                      or battery button; w MS wait; b RAW sets the\n"
 		"                      backlight), before the dump\n"
 		"  --help              this text\n",
 		PL_HEIGHT_MIN, PL_HEIGHT_MAX, PL_HEIGHT_DEFAULT,
@@ -1243,6 +1279,12 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				p->bar_alpha = pl_clamp_alpha(v);
 			else
 				p->popup_alpha = pl_clamp_alpha(v);
+		} else if (!strcmp(a, "--battery-mah") && i + 1 < argc) {
+			if (!parse_int(argv[++i], &v)) {
+				say("%s: '%s' is not a number", a, argv[i]);
+				return -1;
+			}
+			p->battery_mah = v < 0 ? 0 : v > 100000 ? 100000 : v;
 		} else if (!strcmp(a, "--subpixel") && i + 1 < argc) {
 			const char *v = argv[++i];
 			if (!strcmp(v, "auto"))

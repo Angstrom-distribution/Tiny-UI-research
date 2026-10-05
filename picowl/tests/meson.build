@@ -264,5 +264,5 @@ if panel_built
   test('panel-e2e', find_program('sh'),
     args: [files('panel-e2e.sh'), picowl_exe, picowl_panel_exe, pw_test_client,
            pw_key_client, pw_fake_ctl, pw_bare_server, pw_capture_client],
-    timeout: 120)
+    timeout: 400)
 endif

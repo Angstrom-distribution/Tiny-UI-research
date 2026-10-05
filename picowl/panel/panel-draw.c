@@ -377,19 +377,27 @@ static int row_width(void *ctx, int face, const char *s)
 void pl_row_text(const struct pl_layout *l, const struct pl_assets *a,
 	const struct pl_state *st, int open, struct pl_rowtext *out)
 {
-	const char *cand[1];
-	char date[40];
-	int face = 0;
+	char var[PL_EST_VARIANTS][48];
+	const char *cand[PL_EST_VARIANTS];
+	int face = 0, n = 0, pick;
 
 	out->text[0] = '\0';
 	out->face = PL_FACE_ROW;
 	out->w = 0;
-	if (pl_row_kind_of(open) != PL_ROW_DATE)
+	if (pl_row_kind_of(open) == PL_ROW_DATE) {
+		pl_date_text(var[0], sizeof(var[0]), st->year, st->mon, st->mday, st->wday);
+		cand[n++] = var[0];
+	} else if (pl_row_kind_of(open) == PL_ROW_ESTIMATE) {
+		for (int v = 0; v < PL_EST_VARIANTS; v++) {
+			pl_est_text(var[v], sizeof(var[v]), &st->est, st->bat_pct, v);
+			cand[n++] = var[v];
+		}
+	} else {
 		return;
-	pl_date_text(date, sizeof(date), st->year, st->mon, st->mday, st->wday);
-	cand[0] = date;
-	pl_fit_choose(cand, 1, PL_ROW_FACES, l->text.w, row_width, (void *)&a->font, &face);
-	snprintf(out->text, sizeof(out->text), "%s", cand[0]);
+	}
+	pick = pl_fit_choose(cand, n, PL_ROW_FACES, l->text.w, row_width, (void *)&a->font,
+		&face);
+	snprintf(out->text, sizeof(out->text), "%s", cand[pick]);
 	out->face = PL_FACE_ROW + face;
 	out->w = pl_font_text_w(&a->font, out->face, out->text);
 }
