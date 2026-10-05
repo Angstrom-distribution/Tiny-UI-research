@@ -364,8 +364,8 @@ static void test_touch(void)
 {
 	struct pl_layout l, c;
 	struct pl_touch t = { .slider = PL_SLIDER_NONE };
-	const bool both[PL_SLIDERS] = { true, true };
-	const bool no_vol[PL_SLIDERS] = { true, false };
+	const bool both[PL_BUTTONS] = { true, true, true, true };
+	const bool no_vol[PL_BUTTONS] = { true, false, true, true };
 	struct pl_touch_out o;
 
 	pl_layout_compute(&l, 240, BAR, true, false, &M15);
@@ -390,9 +390,9 @@ static void test_touch(void)
 	h = pl_hit_test(&l, b0->x + b0->w, 10);
 	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_SLIDER_VOLUME, "the buttons are side by side");
 	h = pl_hit_test(&l, 10, 10);
-	CHECK_EQ(h.kind, PL_HIT_NONE, "no hit on the clock");
+	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_CLOCK, "hit: the clock is a button");
 	h = pl_hit_test(&l, 232, 10);
-	CHECK_EQ(h.kind, PL_HIT_NONE, "no hit on the battery");
+	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_BATTERY, "hit: the battery is a button");
 	h = pl_hit_test(&l, 3, 30);
 	CHECK_EQ(h.kind, PL_HIT_NONE, "no hit in the row outside the touch area");
 	int mx = l.slider.track.x + l.slider.track.w / 2;
@@ -550,6 +550,193 @@ static void test_popup(void)
 	/* A clock that went back. */
 	pl_popup_tap(&p, PL_SLIDER_BACKLIGHT, 50000);
 	CHECK(pl_popup_wait_ms(&p, 10, false) <= PL_POPUP_MS, "never longer than 3 s, even if time went back");
+}
+
+/* ---- the clock and the battery as buttons, the text rows ---- */
+
+static int fake_width(void *ctx, int face, const char *s)
+{
+	/* A face is 10 px per character at 0, 8 at 1, 6 at 2 and 4 at 3. */
+	(void)ctx;
+	return (int)strlen(s) * (10 - 2 * face);
+}
+
+static void test_text_buttons(void)
+{
+	struct pl_layout l, o;
+	struct pl_touch t = { .slider = PL_SLIDER_NONE };
+	const bool all[PL_BUTTONS] = { true, true, true, true };
+	const bool no_vol[PL_BUTTONS] = { true, false, true, true };
+	struct pl_touch_out out;
+	struct pl_rect bar = { 0, 0, 240, BAR };
+
+	pl_layout_compute(&l, 240, BAR, false, false, &M15);
+	pl_layout_compute(&o, 240, BAR, true, false, &M15);
+	const struct pl_rect *cl = &l.button[PL_BTN_CLOCK], *bt = &l.button[PL_BTN_BATTERY];
+
+	CHECK_EQ(PL_BUTTONS, 4, "four buttons: backlight, volume, clock, battery");
+	CHECK(cl->w >= 36 && cl->h == BAR && cl->y == 0, "the clock button is 36 px wide and the whole bar high");
+	CHECK(bt->w >= 36 && bt->h == BAR && bt->y == 0, "so is the battery button");
+	CHECK(cl->x == 0 && cl->w >= l.clock.w, "the clock button covers the clock");
+	CHECK(bt->x <= l.battery.x && bt->x + bt->w == 240, "the battery button covers the battery to the edge");
+	CHECK(inside(*cl, bar) && inside(*bt, bar), "both are in the bar");
+	CHECK(!overlap(*cl, l.button[0]) && !overlap(*cl, l.button[1]), "the clock button touches no slider button");
+	CHECK(!overlap(*bt, l.button[0]) && !overlap(*bt, l.button[1]), "nor does the battery button");
+	CHECK(l.button[1].x + l.button[1].w <= bt->x, "the volume button ends where the battery begins");
+	CHECK(inside(l.hl[PL_BTN_CLOCK], *cl) && inside(l.hl[PL_BTN_BATTERY], *bt),
+		"the highlights are inside their buttons");
+	CHECK(inside(l.hl[PL_BTN_CLOCK], l.clock) && inside(l.hl[PL_BTN_BATTERY], l.battery),
+		"and inside the rectangles that are redrawn");
+	CHECK(l.hl[PL_BTN_CLOCK].x + l.hl[PL_BTN_CLOCK].w >= PL_MARGIN + M15.clock_w + PL_HL_PAD,
+		"the clock highlight has room around the text");
+	CHECK(l.hl[PL_BTN_CLOCK].x <= PL_MARGIN - PL_HL_PAD, "on the left too");
+	CHECK(l.hl[PL_BTN_BATTERY].x <= l.battery.x + l.battery.w - PL_MARGIN - M15.bat_text_w - PL_GAP -
+		l.bat_icon_w - PL_HL_PAD, "the battery highlight starts before the icon");
+	CHECK(l.hl[PL_BTN_BATTERY].x + l.hl[PL_BTN_BATTERY].w <= 240 - PL_HL_PAD + 0 &&
+		l.hl[PL_BTN_BATTERY].x + l.hl[PL_BTN_BATTERY].w >= 240 - PL_MARGIN + PL_HL_PAD,
+		"and ends after the text, short of the edge");
+	CHECK(memcmp(l.button, o.button, sizeof(l.button)) == 0 && memcmp(l.hl, o.hl, sizeof(l.hl)) == 0,
+		"opening the row moves none of the four");
+	CHECK(o.text.x == PL_MARGIN && o.text.w == 240 - 2 * PL_MARGIN && inside(o.text, o.row_in),
+		"the line of a text row is the row less its margins");
+
+	/* Every width and bar height: a button is at least 36 px, and the clock
+	 * button is never under another one. */
+	static const int widths[] = { 240, 320, 480, 640 };
+	static const int bars[] = { 18, 24, 40 };
+	for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++)
+		for (size_t j = 0; j < sizeof(bars) / sizeof(bars[0]); j++) {
+			struct pl_layout w;
+			pl_layout_compute(&w, widths[i], bars[j], false, false, &M15);
+			CHECK(w.button[PL_BTN_CLOCK].w >= 36 && w.button[PL_BTN_BATTERY].w >= 36 &&
+				w.button[PL_BTN_BATTERY].x + w.button[PL_BTN_BATTERY].w == widths[i],
+				"clock and battery buttons keep 36 px at every size");
+			CHECK_EQ(w.button[PL_BTN_CLOCK].h, bars[j], "and the whole bar height");
+		}
+
+	/* Hits and taps. */
+	struct pl_hit h = pl_hit_test(&l, 3, 0);
+	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_CLOCK, "the corner of the clock button");
+	h = pl_hit_test(&l, cl->w - 1, BAR - 1);
+	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_CLOCK, "its last pixel");
+	h = pl_hit_test(&l, cl->w, 5);
+	CHECK(h.kind != PL_HIT_BUTTON || h.slider != PL_BTN_CLOCK, "right of it is not the clock");
+	h = pl_hit_test(&l, 239, BAR - 1);
+	CHECK(h.kind == PL_HIT_BUTTON && h.slider == PL_BTN_BATTERY, "the last pixel of the battery button");
+	h = pl_hit_test(&l, bt->x - 1, 5);
+	CHECK(h.kind != PL_HIT_BUTTON || h.slider != PL_BTN_BATTERY, "left of it is not the battery");
+
+	pl_touch_press(&t, &l, PL_SLIDER_NONE, all, 10, 5, &out);
+	CHECK(out.tap == PL_BTN_CLOCK && out.slider == PL_SLIDER_NONE, "a press on the clock taps it and sets nothing");
+	CHECK_EQ(pl_touch_release(&t), PL_SLIDER_NONE, "and the release drags nothing");
+	pl_touch_press(&t, &l, PL_SLIDER_NONE, all, 230, 5, &out);
+	CHECK(out.tap == PL_BTN_BATTERY && out.slider == PL_SLIDER_NONE, "so does the battery");
+	pl_touch_release(&t);
+	pl_touch_press(&t, &l, PL_SLIDER_NONE, no_vol, 10, 5, &out);
+	CHECK_EQ(out.tap, PL_BTN_CLOCK, "a missing mixer does not disable the clock");
+	pl_touch_release(&t);
+
+	/* In a text row nothing is a slider: a press does not drag, wherever it is,
+	 * and the pointer moving over it does nothing either. */
+	int mx = o.slider.track.x + o.slider.track.w / 2;
+	for (int open = PL_BTN_CLOCK; open <= PL_BTN_BATTERY; open++) {
+		pl_touch_press(&t, &o, open, all, mx, 45, &out);
+		CHECK(out.slider == PL_SLIDER_NONE && out.tap == PL_SLIDER_NONE,
+			"a press in the middle of a text row sets nothing");
+		pl_touch_motion(&t, &o, mx + 20, &out);
+		CHECK_EQ(out.slider, PL_SLIDER_NONE, "nor does moving in it");
+		pl_touch_release(&t);
+		pl_touch_press(&t, &o, open, all, o.slider.cell.x, 45, &out);
+		CHECK_EQ(out.slider, PL_SLIDER_NONE, "nor does the edge of what would be the track");
+		pl_touch_release(&t);
+		pl_touch_press(&t, &o, open, all, 70, 10, &out);
+		CHECK_EQ(out.tap, PL_SLIDER_NONE, "a press in the bar away from the buttons does nothing");
+		pl_touch_release(&t);
+	}
+	pl_touch_press(&t, &o, PL_BTN_CLOCK, all, 10, 5, &out);
+	CHECK_EQ(out.tap, PL_BTN_CLOCK, "the open clock button is tapped again, to close it");
+	pl_touch_release(&t);
+
+	/* Which row a button opens, and the shared open, switch and close. */
+	CHECK_EQ(pl_row_kind_of(PL_SLIDER_BACKLIGHT), PL_ROW_SLIDER, "the sun opens a slider");
+	CHECK_EQ(pl_row_kind_of(PL_SLIDER_VOLUME), PL_ROW_SLIDER, "the speaker too");
+	CHECK_EQ(pl_row_kind_of(PL_BTN_CLOCK), PL_ROW_DATE, "the clock opens the date");
+	CHECK_EQ(pl_row_kind_of(PL_BTN_BATTERY), PL_ROW_ESTIMATE, "the battery opens the estimate");
+	CHECK_EQ(pl_row_kind_of(PL_SLIDER_NONE), PL_ROW_NONE, "none opens nothing");
+	CHECK_EQ(pl_row_kind_of(PL_BUTTONS), PL_ROW_NONE, "and neither does an id that does not exist");
+	CHECK_EQ(pl_row_kind_of(-7), PL_ROW_NONE, "or a negative one");
+
+	struct pl_popup p = { .open = PL_SLIDER_NONE };
+	CHECK_EQ(pl_popup_tap(&p, PL_BTN_CLOCK, 1000), PL_BTN_CLOCK, "a tap on the clock opens its row");
+	CHECK_EQ(pl_popup_wait_ms(&p, 1000, false), 3000, "which closes by itself after 3 s as well");
+	CHECK_EQ(pl_popup_tap(&p, PL_BTN_BATTERY, 1500), PL_BTN_BATTERY, "the battery switches it");
+	CHECK_EQ(pl_popup_tap(&p, PL_SLIDER_VOLUME, 1600), PL_SLIDER_VOLUME, "a slider switches it again");
+	CHECK_EQ(pl_popup_tap(&p, PL_BTN_CLOCK, 1700), PL_BTN_CLOCK, "and back to the clock");
+	CHECK_EQ(pl_popup_tap(&p, PL_BTN_CLOCK, 1800), PL_SLIDER_NONE, "the same button closes");
+	pl_popup_tap(&p, PL_BTN_BATTERY, 2000);
+	pl_popup_touch(&p, 4000);
+	CHECK(!pl_popup_expire(&p, 6999, false), "a touch in a text row keeps it open");
+	CHECK(pl_popup_expire(&p, 7000, false), "and it closes 3 s after that");
+
+	/* The date, from a table: no locale in it. */
+	char buf[64];
+	pl_date_text(buf, sizeof(buf), 2026, 9, 5, 1);
+	CHECK_STR(buf, "Monday 5 October 2026", "the date row's example");
+	pl_date_text(buf, sizeof(buf), 2023, 0, 1, 0);
+	CHECK_STR(buf, "Sunday 1 January 2023", "Sunday, January: the first of each table");
+	pl_date_text(buf, sizeof(buf), 2026, 11, 31, 6);
+	CHECK_STR(buf, "Saturday 31 December 2026", "Saturday, December: the last of each");
+	pl_date_text(buf, sizeof(buf), 2024, 1, 29, 4);
+	CHECK_STR(buf, "Thursday 29 February 2024", "a leap day");
+	pl_date_text(buf, sizeof(buf), 2026, 8, 30, 3);
+	CHECK_STR(buf, "Wednesday 30 September 2026", "the longest names together");
+	CHECK(strlen(buf) < 40, "and it fits the buffer the header promises");
+	pl_date_text(buf, sizeof(buf), 2026, 9, 5, 2);
+	CHECK_STR(buf, "Tuesday 5 October 2026", "a weekday is not mistaken for another");
+	pl_date_text(buf, sizeof(buf), 2026, 9, 5, 3);
+	CHECK_STR(buf, "Wednesday 5 October 2026", "Wednesday");
+	pl_date_text(buf, sizeof(buf), 2026, 9, 5, 5);
+	CHECK_STR(buf, "Friday 5 October 2026", "Friday");
+	pl_date_text(buf, sizeof(buf), 2026, 2, 7, 1);
+	CHECK_STR(buf, "Monday 7 March 2026", "March");
+	pl_date_text(buf, sizeof(buf), 2026, 4, 7, 1);
+	CHECK_STR(buf, "Monday 7 May 2026", "May");
+	pl_date_text(buf, sizeof(buf), -5, 99, 0, -3);
+	CHECK_STR(buf, "Sunday 1 December 1", "garbage is clamped, not printed");
+	pl_date_text(buf, sizeof(buf), 99999, -1, 99, 70);
+	CHECK_STR(buf, "Saturday 31 January 9999", "the other way");
+	pl_date_text(buf, 10, 2026, 8, 30, 3);
+	CHECK(strlen(buf) == 9, "a small buffer is cut, not overrun");
+	pl_date_text(buf, 0, 2026, 8, 30, 3);
+
+	/* Fitting: faces from the largest, candidates from the most informative. */
+	const char *const one[] = { "Monday 5 October 2026" };	/* 21 characters */
+	int face = -1;
+	CHECK_EQ(pl_fit_choose(one, 1, 4, 300, fake_width, NULL, &face), 0, "it fits: the one candidate");
+	CHECK_EQ(face, 0, "in the largest face");
+	pl_fit_choose(one, 1, 4, 200, fake_width, NULL, &face);
+	CHECK_EQ(face, 1, "too wide for the largest: the next one");
+	pl_fit_choose(one, 1, 4, 21 * 6, fake_width, NULL, &face);
+	CHECK_EQ(face, 2, "exactly the width is a fit");
+	pl_fit_choose(one, 1, 4, 21 * 6 - 1, fake_width, NULL, &face);
+	CHECK_EQ(face, 3, "a pixel less is not");
+	int c = pl_fit_choose(one, 1, 4, 10, fake_width, NULL, &face);
+	CHECK(c == 0 && face == 3, "nothing fits: the last candidate in the smallest face");
+	const char *const many[] = { "73%  About 3 h 20 min left", "About 3 h 20 min left", "3 h 20 min left" };
+	c = pl_fit_choose(many, 3, 4, 26 * 10, fake_width, NULL, &face);
+	CHECK(c == 0 && face == 0, "the most informative candidate in the largest face");
+	c = pl_fit_choose(many, 3, 4, 21 * 10, fake_width, NULL, &face);
+	CHECK(c == 1 && face == 0, "dropping information before shrinking the face");
+	c = pl_fit_choose(many, 3, 4, 15 * 10, fake_width, NULL, &face);
+	CHECK(c == 2 && face == 0, "down to the shortest in the largest face");
+	c = pl_fit_choose(many, 3, 4, 15 * 10 - 1, fake_width, NULL, &face);
+	CHECK(c == 2 && face == 1, "and only then a smaller face, where the longest that fits wins again");
+	c = pl_fit_choose(many, 3, 4, 26 * 8, fake_width, NULL, &face);
+	CHECK(c == 2 && face == 0, "never a smaller face while a candidate fits the larger");
+	c = pl_fit_choose(many, 0, 4, 100, fake_width, NULL, &face);
+	CHECK(c == 0 && face == 3, "no candidates: no crash");
+	c = pl_fit_choose(many, 3, 0, 100, fake_width, NULL, &face);
+	CHECK(c == 2 && face == 0, "no faces: no crash");
 }
 
 /* ---- blending ---- */
@@ -1018,13 +1205,13 @@ static void test_render(enum pl_fmt fmt, int bar_alpha, int popup_alpha)
 	const uint32_t sent = pl_pixel(c, 0x123456, 255);
 	struct pl_rect whole = { 0, 0, 240, l->h };
 	pl_fill(c, whole, 0x123456, 255);
-	pl_render_clock(c, l, &e.a, &e.st);
+	pl_render_clock(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_value(&e.b, l->battery, sent), l->battery.w * l->battery.h, "clock redraw leaves the battery alone");
 	CHECK_EQ(count_value(&e.b, b0, sent), b0.w * b0.h, "clock redraw leaves the buttons alone");
 	CHECK_EQ(count_value(&e.b, l->row, sent), l->row.w * l->row.h, "clock redraw leaves the row alone");
 	CHECK_EQ(count_value(&e.b, l->clock, sent), 0, "the clock redraw clears its background");
 	pl_fill(c, whole, 0x123456, 255);
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_value(&e.b, l->clock, sent), l->clock.w * l->clock.h, "battery redraw leaves the clock alone");
 	CHECK_EQ(count_value(&e.b, b1, sent), b1.w * b1.h, "battery redraw leaves the buttons alone");
 	CHECK_EQ(count_value(&e.b, l->battery, sent), 0, "the battery redraw clears its background");
@@ -1096,43 +1283,43 @@ static void test_battery_icon(void)
 	const struct pl_canvas *c = &e.b.c;
 
 	e.st.bat_pct = 100;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	int full = count_color(&e.b, l->battery, PL_COL_BAT_FILL);
 	e.st.bat_pct = 40;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	int mid = count_color(&e.b, l->battery, PL_COL_BAT_FILL);
 	e.st.bat_pct = 20;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	int low = count_color(&e.b, l->battery, PL_COL_BAT_FILL);
 	CHECK(full > mid && mid > low && low > 0, "the fill is proportional to the capacity");
 	CHECK(full > 30, "a full battery has a good amount of fill");
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_LOW), 0, "20 percent is not red");
 	CHECK(count_color(&e.b, l->battery, PL_COL_BAT_EMPTY) > 5, "the empty part has a ground of its own");
 	e.st.bat_pct = 15;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK(count_color(&e.b, l->battery, PL_COL_BAT_LOW) > 0, "15 percent is red");
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_FILL), 0, "and not grey");
 	e.st.bat_pct = 10;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK(count_color(&e.b, l->battery, PL_COL_BAT_LOW) > 0, "a nearly empty battery is red");
 	e.st.bat_pct = 0;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_LOW), 0, "an empty battery has no fill");
 	CHECK(count_color(&e.b, l->battery, PL_COL_FG) > 20, "but an outline and the text");
 	e.st.bat_pct = 73;
 	e.st.bat = PL_BAT_DISCHARGING;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BOLT), 0, "no charging marker while discharging");
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_CHARGING), 0, "and no green");
 	e.st.bat = PL_BAT_CHARGING;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK(mask_sum(&e.a.bolt) > 255 * 4, "the bolt has substance");
 	{
 		struct canvas_buf was;
 		canvas_init(&was, 240, l->h, PL_FMT_XRGB8888);
 		struct pl_state d = e.st;
 		d.bat = PL_BAT_DISCHARGING;
-		pl_render_battery(&was.c, l, &e.a, &d);
+		pl_render_battery(&was.c, l, &e.a, &d, false);
 		int diff = 0;
 		for (int y = 0; y < l->battery.h; y++)
 			for (int x = l->battery.x; x < l->battery.x + l->battery.w; x++)
@@ -1142,21 +1329,21 @@ static void test_battery_icon(void)
 	}
 	CHECK(count_color(&e.b, l->battery, PL_COL_BAT_CHARGING) > 10, "and a green fill");
 	e.st.bat_pct = 10;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK(count_color(&e.b, l->battery, PL_COL_BAT_LOW) > 0, "a nearly empty battery that charges is red");
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_CHARGING), 0, "and not green");
 	e.st.bat = PL_BAT_FULL;
 	e.st.bat_pct = 100;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BOLT), 0, "full is not charging");
 	e.st.bat = PL_BAT_AC;
 	e.st.bat_pct = -1;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK_EQ(count_color(&e.b, l->battery, PL_COL_BAT_EMPTY) + count_color(&e.b, l->battery, PL_COL_BAT_FILL), 0,
 		"AC has no battery icon");
 	CHECK(count_color(&e.b, l->battery, PL_COL_FG) > 10, "AC is written");
 	e.st.bat = PL_BAT_NONE;
-	pl_render_battery(c, l, &e.a, &e.st);
+	pl_render_battery(c, l, &e.a, &e.st, false);
 	CHECK(count_color(&e.b, l->battery, PL_COL_FG) > 5, "-- is written");
 	CHECK(guards_intact(&e.b), "the battery stays in the buffer");
 
@@ -1241,8 +1428,8 @@ static void test_no_alloc(void)
 		e.st.bl_pct = i % 101;
 		e.st.min = i % 60;
 		pl_render_all(&e.b.c, l, &e.a, &e.st, i & 1);
-		pl_render_clock(&e.b.c, l, &e.a, &e.st);
-		pl_render_battery(&e.b.c, l, &e.a, &e.st);
+		pl_render_clock(&e.b.c, l, &e.a, &e.st, false);
+		pl_render_battery(&e.b.c, l, &e.a, &e.st, false);
 		pl_render_button(&e.b.c, l, &e.a, &e.st, PL_SLIDER_BACKLIGHT, PL_SLIDER_BACKLIGHT);
 		pl_render_row_value(&e.b.c, l, &e.a, &e.st, PL_SLIDER_BACKLIGHT);
 		pl_render_row(&e.b.c, l, &e.a, &e.st, PL_SLIDER_VOLUME);
@@ -1795,6 +1982,7 @@ int main(void)
 	test_layout_bottom();
 	test_touch();
 	test_popup();
+	test_text_buttons();
 	test_blend();
 	test_masks();
 	test_font();

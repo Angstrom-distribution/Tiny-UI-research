@@ -1,5 +1,6 @@
 /* panel-draw.c - the look of picowl-panel. */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include "panel-draw.h"
 
@@ -18,7 +19,7 @@ bool pl_assets_init(struct pl_assets *a, const char *font_path, int font_px,
 static void masks_free(struct pl_assets *a)
 {
 	struct pl_mask *all[] = { &a->bat_outline, &a->bat_inner, &a->bolt, &a->hl,
-		&a->ring, &a->disc, &a->track };
+		&a->hl_clock, &a->hl_bat, &a->ring, &a->disc, &a->track };
 
 	for (int i = 0; i < 2; i++)
 		pl_mask_free(&a->sun[i]);
@@ -177,8 +178,10 @@ static float rr_sd(const void *ctx, float x, float y)
 
 bool pl_assets_prepare(struct pl_assets *a, const struct pl_layout *l)
 {
-	int key[9] = { l->bar_icon, l->row_icon.w, l->slider.thumb_d, l->slider.track.w,
-		l->slider.track_h, l->hl[0].w, l->hl[0].h, l->bat_icon_w, l->bat_icon_h };
+	int key[13] = { l->bar_icon, l->row_icon.w, l->slider.thumb_d, l->slider.track.w,
+		l->slider.track_h, l->hl[0].w, l->hl[0].h, l->bat_icon_w, l->bat_icon_h,
+		l->hl[PL_BTN_CLOCK].w, l->hl[PL_BTN_CLOCK].h, l->hl[PL_BTN_BATTERY].w,
+		l->hl[PL_BTN_BATTERY].h };
 
 	if (a->built && !memcmp(key, a->key, sizeof(key)))
 		return true;
@@ -205,6 +208,12 @@ bool pl_assets_prepare(struct pl_assets *a, const struct pl_layout *l)
 
 	struct rr hl = { (float)l->hl[0].w, (float)l->hl[0].h, l->hl[0].h / 3.0f };
 	a->hl = pl_mask_from_sdf(l->hl[0].w, l->hl[0].h, rr_sd, &hl);
+	struct rr hc = { (float)l->hl[PL_BTN_CLOCK].w, (float)l->hl[PL_BTN_CLOCK].h,
+		l->hl[PL_BTN_CLOCK].h / 3.0f };
+	a->hl_clock = pl_mask_from_sdf(l->hl[PL_BTN_CLOCK].w, l->hl[PL_BTN_CLOCK].h, rr_sd, &hc);
+	struct rr hb = { (float)l->hl[PL_BTN_BATTERY].w, (float)l->hl[PL_BTN_BATTERY].h,
+		l->hl[PL_BTN_BATTERY].h / 3.0f };
+	a->hl_bat = pl_mask_from_sdf(l->hl[PL_BTN_BATTERY].w, l->hl[PL_BTN_BATTERY].h, rr_sd, &hb);
 	int td = l->slider.thumb_d;
 	struct disc ring = { td / 2.0f, td / 2.0f, td / 2.0f };
 	struct disc inner = { td / 2.0f, td / 2.0f, td / 2.0f - 1.3f };
@@ -215,7 +224,8 @@ bool pl_assets_prepare(struct pl_assets *a, const struct pl_layout *l)
 	a->track = pl_mask_from_sdf(l->slider.track.w, l->slider.track_h, rr_sd, &tr);
 
 	struct pl_mask *all[] = { &a->bat_outline, &a->bat_inner, &a->bolt, &a->hl,
-		&a->ring, &a->disc, &a->track, &a->sun[0], &a->sun[1] };
+		&a->hl_clock, &a->hl_bat, &a->ring, &a->disc, &a->track, &a->sun[0],
+		&a->sun[1] };
 	bool ok = true;
 	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
 		ok &= all[i]->a != NULL;
@@ -253,18 +263,21 @@ struct pl_rect pl_row_value_rect(const struct pl_layout *l)
 }
 
 void pl_render_clock(const struct pl_canvas *c, const struct pl_layout *l,
-	const struct pl_assets *a, const struct pl_state *st)
+	const struct pl_assets *a, const struct pl_state *st, bool open)
 {
 	char buf[8];
 
 	pl_fill(c, l->clock, PL_COL_BG, a->bar_alpha);
+	if (open)
+		pl_blit(c, &a->hl_clock, l->hl[PL_BTN_CLOCK].x, l->hl[PL_BTN_CLOCK].y, PL_COL_HL,
+			255, NULL);
 	pl_clock_text(buf, sizeof(buf), st->hour, st->min);
 	pl_font_draw(c, &a->font, 0, PL_MARGIN, l->clock.y, l->clock.h, buf, PL_COL_FG,
 		pl_text_sub(a->sub, a->bar_alpha));
 }
 
 void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
-	const struct pl_assets *a, const struct pl_state *st)
+	const struct pl_assets *a, const struct pl_state *st, bool open)
 {
 	char buf[8];
 	bool icon = st->bat == PL_BAT_DISCHARGING || st->bat == PL_BAT_CHARGING ||
@@ -272,6 +285,9 @@ void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
 	int dh = l->battery.h;
 
 	pl_fill(c, l->battery, PL_COL_BG, a->bar_alpha);
+	if (open)
+		pl_blit(c, &a->hl_bat, l->hl[PL_BTN_BATTERY].x, l->hl[PL_BTN_BATTERY].y, PL_COL_HL,
+			255, NULL);
 	pl_battery_text(buf, sizeof(buf), st->bat, st->bat_pct);
 	int tw = pl_font_text_w(&a->font, 0, buf);
 	int tx = l->battery.x + l->battery.w - PL_MARGIN - tw;
@@ -353,6 +369,31 @@ void pl_render_row_value(const struct pl_canvas *c, const struct pl_layout *l,
 		PL_COL_FG, pl_text_sub(a->sub, a->popup_alpha));
 }
 
+static int row_width(void *ctx, int face, const char *s)
+{
+	return pl_font_text_w(ctx, PL_FACE_ROW + face, s);
+}
+
+void pl_row_text(const struct pl_layout *l, const struct pl_assets *a,
+	const struct pl_state *st, int open, struct pl_rowtext *out)
+{
+	const char *cand[1];
+	char date[40];
+	int face = 0;
+
+	out->text[0] = '\0';
+	out->face = PL_FACE_ROW;
+	out->w = 0;
+	if (pl_row_kind_of(open) != PL_ROW_DATE)
+		return;
+	pl_date_text(date, sizeof(date), st->year, st->mon, st->mday, st->wday);
+	cand[0] = date;
+	pl_fit_choose(cand, 1, PL_ROW_FACES, l->text.w, row_width, (void *)&a->font, &face);
+	snprintf(out->text, sizeof(out->text), "%s", cand[0]);
+	out->face = PL_FACE_ROW + face;
+	out->w = pl_font_text_w(&a->font, out->face, out->text);
+}
+
 void pl_render_row(const struct pl_canvas *c, const struct pl_layout *l,
 	const struct pl_assets *a, const struct pl_state *st, int open)
 {
@@ -360,6 +401,14 @@ void pl_render_row(const struct pl_canvas *c, const struct pl_layout *l,
 	pl_fill(c, (struct pl_rect){ 0, l->row_line_y, l->w, 1 }, PL_COL_ROW_LINE, a->popup_alpha);
 	if (open == PL_SLIDER_NONE)
 		return;
+	if (pl_row_kind_of(open) != PL_ROW_SLIDER) {
+		struct pl_rowtext t;
+
+		pl_row_text(l, a, st, open, &t);
+		pl_font_draw(c, &a->font, t.face, l->text.x + (l->text.w - t.w) / 2, l->row_in.y,
+			l->row_h - 1, t.text, PL_COL_FG, pl_text_sub(a->sub, a->popup_alpha));
+		return;
+	}
 	int pct = open == PL_SLIDER_BACKLIGHT ? st->bl_pct : st->vol_pct;
 	const struct pl_mask *m = icon_mask(a, open, pct, 1);
 	pl_blit(c, m, l->row_icon.x, l->row_icon.y, pct < 0 ? PL_COL_DISABLED : PL_COL_FG, 255,
@@ -373,10 +422,10 @@ void pl_render_all(const struct pl_canvas *c, const struct pl_layout *l,
 	pl_fill(c, (struct pl_rect){ 0, 0, c->w, c->h }, 0, 0);
 	pl_fill(c, (struct pl_rect){ 0, l->clock.y, l->w, l->bar_h - 1 }, PL_COL_BG, a->bar_alpha);
 	pl_fill(c, (struct pl_rect){ 0, l->bar_line_y, l->w, 1 }, PL_COL_LINE, a->bar_alpha);
-	pl_render_clock(c, l, a, st);
+	pl_render_clock(c, l, a, st, open == PL_BTN_CLOCK);
 	for (int i = 0; i < PL_SLIDERS; i++)
 		pl_render_button(c, l, a, st, open, i);
-	pl_render_battery(c, l, a, st);
+	pl_render_battery(c, l, a, st, open == PL_BTN_BATTERY);
 	if (l->row_shown)
 		pl_render_row(c, l, a, st, open);
 }

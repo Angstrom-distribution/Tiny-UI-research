@@ -21,6 +21,11 @@
 #     has colour fringes (capture), without the advertisement, with
 #     --subpixel none and on a rotated output it is grayscale.
 #  I: the same over a video window that was playing before the panel started.
+#  J: the clock is a button that opens a row with the weekday and the date: in
+#     the system's time zone (TZ is set per run), highlighted while open, the
+#     usable area of a second client unchanged, closed by the same tap, by the
+#     other buttons and after 3 s, a press in the row keeps it open and sets
+#     nothing, and the text fits the row.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -457,7 +462,7 @@ sleep 3
 echo 20 >"$BAT/capacity"
 echo Charging >"$BAT/status"
 wait_for "$DIR/d.out" '^redraw battery' 4 "D battery"
-tail -n 8 "$DIR/d.out" | grep -q '^battery text=20% status=charging percent=20 ' || fail "D: the battery is not shown as 20% charging"
+tail -n 16 "$DIR/d.out" | grep -q '^battery text=20% status=charging percent=20 ' || fail "D: the battery is not shown as 20% charging"
 echo Full >"$BAT/status"
 echo 100 >"$BAT/capacity"
 wait_for "$DIR/d.out" '^battery text=100% status=full percent=100 ' 4 "D battery full"
@@ -484,7 +489,7 @@ start_panel d --inject "ivol"
 has "$DIR/d.out" 'popup=volume$' "D volume row open"
 printf 'volume 32\nswitch 1\n' >"$CTL"
 wait_for "$DIR/d.out" '^redraw volume,row$' 2 "D external volume redraws the open row"
-tail -n 8 "$DIR/d.out" | grep -q '^volume available=1 value=80 ' || fail "D: the row does not show the new volume"
+tail -n 16 "$DIR/d.out" | grep -q '^volume available=1 value=80 ' || fail "D: the row does not show the new volume"
 # And the row closes by itself, event driven: the surface shrinks again.
 N=$(grep -c '^redraw resize' "$DIR/d.out")
 i=0
@@ -492,7 +497,7 @@ while [ "$(grep -c '^redraw resize' "$DIR/d.out")" -le "$N" ]; do
 	i=$((i + 1)); [ $i -gt 100 ] && fail "D: the row did not close by itself"
 	sleep 0.05
 done
-tail -n 8 "$DIR/d.out" | grep -q '^panel width=240 height=18 .*popup=none$' || fail "D: the surface did not shrink to the bar"
+tail -n 16 "$DIR/d.out" | grep -q '^panel width=240 height=18 .*popup=none$' || fail "D: the surface did not shrink to the bar"
 stop_panel D
 echo "panel-e2e: D ok"
 
@@ -524,9 +529,9 @@ has "$DIR/e.out" '^panel width=240 height=18 ' "E start"
 "$KEYS" 397 || fail "E: key client failed"
 wait_for "$DIR/e.out" '^panel width=320 height=18 bar=18 ' 5 "E rotated"
 has "$DIR/e.out" '^redraw resize' "E resize"
-BLX=$(comp "$(tail -n 8 "$DIR/e.out" | awk '$1 == "backlight" { for (i = 2; i <= NF; i++) { split($i, a, "="); if (a[1] == "button") print a[2] } }')" 1)
+BLX=$(comp "$(tail -n 16 "$DIR/e.out" | awk '$1 == "backlight" { for (i = 2; i <= NF; i++) { split($i, a, "="); if (a[1] == "button") print a[2] } }')" 1)
 [ "$BLX" -gt "$(comp "$BLB" 1)" ] || fail "E: the buttons are not laid out for 320 (x=$BLX)"
-tail -n 8 "$DIR/e.out" | grep -q '^surface exclusive=18 input=0,0,320,18$' || fail "E: the input region is not the new bar"
+tail -n 16 "$DIR/e.out" | grep -q '^surface exclusive=18 input=0,0,320,18$' || fail "E: the input region is not the new bar"
 M=$(mapped)
 [ "$M" = 320x222 ] || fail "E: a toplevel after the rotation is $M, wanted 320x222"
 "$KEYS" 397 || fail "E: key client failed"
@@ -540,7 +545,7 @@ stop_panel E
 start_panel e --inject "ibl;p$X0,$Y"
 "$KEYS" 397 || fail "E: key client failed"
 wait_for "$DIR/e.out" '^panel width=320 height=54 bar=18 row=36 ' 5 "E rotated with the row open"
-tail -n 8 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,18,320,36 ' || fail "E: the row is not 320 wide"
+tail -n 16 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,18,320,36 ' || fail "E: the row is not 320 wide"
 "$KEYS" 397 || fail "E: key client failed"
 i=0
 while [ "$(grep -c '^panel width=240 height=54' "$DIR/e.out")" -lt 2 ]; do
@@ -842,6 +847,110 @@ kill "$CLIENTPID" 2>/dev/null; wait "$CLIENTPID" 2>/dev/null; CLIENTPID=
 stop_picowl
 echo "panel-e2e: I ok"
 
+# ---- J: the clock opens the date row ----
+start_picowl
+echo 600 >"$BL/brightness"
+printf 'volume 8\nswitch 0\n' >"$CTL"
+# The date as the system says it for a zone; a midnight in between makes the
+# panel's answer either of the two.
+date_in() { TZ=$1 LC_ALL=C date '+%A %-d %B %Y'; }
+clock_in() { TZ=$1 LC_ALL=C date '+%H:%M'; }
+# row_text FILE: the text of the open text row in a dump
+row_text() { sed -n 's/^row kind=[a-z]* .* text="\(.*\)"$/\1/p' "$1" | tail -n1; }
+for ZONE in UTC0 'NZST-12NZDT,M9.5.0,M4.1.0/3' 'EST5EDT,M3.2.0,M11.1.0'; do
+	D0=$(date_in "$ZONE")
+	TZ=$ZONE dump j.out --inject "icl"
+	D1=$(date_in "$ZONE")
+	has "$DIR/j.out" '^panel width=240 height=54 bar=18 row=36 format=ARGB8888 anchor=top popup=clock$' "J open: the clock opens the surface of bar and row"
+	has "$DIR/j.out" '^row kind=date rect=0,18,240,36 ' "J the date row is the row"
+	T=$(row_text "$DIR/j.out")
+	[ "$T" = "$D0" ] || [ "$T" = "$D1" ] || fail "J: in $ZONE the date row says '$T', the system says '$D0'"
+	C=$(sed -n 's/^clock text=\([0-9:]*\) .*/\1/p' "$DIR/j.out")
+	[ "$C" = "$(clock_in "$ZONE")" ] || [ "$C" = "$(TZ=$ZONE LC_ALL=C date -d '1 minute ago' +%H:%M)" ] ||
+		fail "J: the clock shows $C in $ZONE, not $(clock_in "$ZONE")"
+	echo "panel-e2e: J $ZONE: '$T'"
+done
+# The names do not come from the locale.
+LC_ALL=de_DE.UTF-8 LANG=de_DE.UTF-8 TZ=UTC0 dump j.out --inject "icl"
+T=$(row_text "$DIR/j.out")
+[ "$T" = "$(date_in UTC0)" ] || [ "$T" = "$(TZ=UTC0 LC_ALL=C date -d '1 minute ago' '+%A %-d %B %Y')" ] || fail "J: another locale changed the date row: '$T'"
+TZ=UTC0 dump j.out --inject "icl"
+has "$DIR/j.out" '^surface exclusive=18 input=0,0,240,54$' "J open: the exclusive zone is the bar, the input region bar and row"
+# The text fits in the row, in the larger font.
+W=$(sed -n 's/^row kind=date .* width=\([0-9]*\) avail=\([0-9]*\) .*/\1 \2/p' "$DIR/j.out")
+[ "${W% *}" -gt 0 ] && [ "${W% *}" -le "${W#* }" ] || fail "J: the date row's text is $W px wide: it does not fit"
+SZ=$(sed -n 's/^row kind=date .* size=\([0-9]*\) .*/\1/p' "$DIR/j.out")
+BAR_SZ=$(sed -n 's/^style .* size=\([0-9]*\) small=.*/\1/p' "$DIR/j.out")
+[ "$SZ" -ge "$BAR_SZ" ] || fail "J: the date is in a $SZ px font, smaller than the bar's $BAR_SZ px"
+# The button: 36 px wide, the whole bar high, and open when it is.
+has "$DIR/j.out" '^target clock rect=0,0,[0-9]*,18 hl=[0-9]*,[0-9]*,[0-9]*,[0-9]* open=1$' "J the clock target is the whole bar high and open"
+CB=$(sed -n 's/^target clock rect=\([0-9,]*\) .*/\1/p' "$DIR/j.out")
+[ "$(comp "$CB" 3)" -ge 36 ] || fail "J: the clock button is only $(comp "$CB" 3) px wide"
+has "$DIR/j.out" '^target backlight .* open=0$' "J the other buttons are not open"
+# Nothing was set by looking or tapping.
+[ "$(cat "$BL/brightness")" = 600 ] || fail "J: a tap on the clock wrote the brightness"
+grep -q '^volume 8$' "$CTL" && grep -q '^switch 0$' "$CTL" || fail "J: a tap on the clock reached the mixer"
+# Shared logic: the same button closes, the others switch.
+dump j.out --inject "icl;icl"
+has "$DIR/j.out" '^panel width=240 height=18 .*popup=none$' "J the same tap closes the row and the surface shrinks"
+hasnt "$DIR/j.out" '^row ' "J closed: no row"
+dump j.out --inject "icl;ibl"
+has "$DIR/j.out" 'popup=backlight$' "J the sun switches from the date"
+has "$DIR/j.out" '^row slider=backlight ' "J to the slider row"
+dump j.out --inject "ibl;icl"
+has "$DIR/j.out" 'popup=clock$' "J the clock switches from the sun"
+has "$DIR/j.out" '^row kind=date ' "J to the date"
+dump j.out --inject "ivol;icl;ivol"
+has "$DIR/j.out" 'popup=volume$' "J and the speaker switches from the date"
+# A press anywhere in the date row sets nothing and keeps it open; it also
+# resets the 3 s.
+X=$(( TX + TD / 2 ))
+dump j.out --inject "icl;p$X,$Y;m$((X + 30)),$Y;r"
+has "$DIR/j.out" 'popup=clock$' "J a press and a drag in the date row keep it open"
+has "$DIR/j.out" '^backlight available=1 value=59 raw=600 ' "J a drag in the date row sets no backlight"
+has "$DIR/j.out" '^volume available=1 value=20 ' "J nor a volume"
+[ "$(cat "$BL/brightness")" = 600 ] || fail "J: a press in the date row wrote the brightness"
+grep -q '^volume 8$' "$CTL" || fail "J: a press in the date row reached the mixer"
+dump j.out --inject "icl;w2500"
+has "$DIR/j.out" 'popup=clock$' "J still open after 2.5 s"
+dump j.out --inject "icl;w2500;w800"
+has "$DIR/j.out" '^panel width=240 height=18 .*popup=none$' "J closed after 3.3 s"
+dump j.out --inject "icl;w2000;p$X,$Y;r;w2000"
+has "$DIR/j.out" 'popup=clock$' "J a press in the row 2 s in keeps it open at 4 s"
+dump j.out --inject "icl;w2000;p$X,$Y;r;w2000;w1300"
+has "$DIR/j.out" 'popup=none$' "J and it closes 3 s after that press"
+# The usable area of a second client does not change with the row open (the
+# stylus stays down, so the row stays open while the client is asked).
+start_panel j --inject "icl;p$X,$Y"
+has "$DIR/j.out" 'popup=clock$' "J the row is open"
+M=$(mapped)
+[ "$M" = 240x302 ] || fail "J: with the date row open a toplevel is $M, wanted 240x302 as without"
+# The pixels: the open clock is highlighted, the row has text in it.
+sleep 0.3
+HL=$(sed -n 's/^target clock .* hl=\([0-9,]*\) .*/\1/p' "$DIR/j.out" | tail -n1)
+RW=$(sed -n 's/^row kind=date rect=\([0-9,]*\) .*/\1/p' "$DIR/j.out" | tail -n1)
+HLX=$(comp "$HL" 1); HLY=$(comp "$HL" 2); HLH=$(comp "$HL" 4)
+"$CAPTURE" --at "$((HLX + 1)),$((HLY + HLH / 2))" >"$DIR/j.cap" 2>&1 || fail "J: capture failed"
+RGB=$(sed -n 's/.*rgb=\(.*\)/\1/p' "$DIR/j.cap" | head -n1)
+R=$((0x$(echo "$RGB" | cut -c1-2))); G=$((0x$(echo "$RGB" | cut -c3-4))); B=$((0x$(echo "$RGB" | cut -c5-6)))
+# the ground of the highlight is #2b3a57 (43,58,87); RGB565 rounds each channel a little
+[ "$R" -ge 36 ] && [ "$R" -le 50 ] && [ "$G" -ge 52 ] && [ "$G" -le 64 ] && [ "$B" -ge 80 ] && [ "$B" -le 94 ] ||
+	fail "J: the open clock's highlight pixel is #$RGB, wanted about #2b3a57"
+"$CAPTURE" --distinct "0,$(comp "$RW" 2),240,36" >"$DIR/j.cap" 2>&1 || fail "J: capture failed"
+D=$(sed -n 's/.*distinct \([0-9]*\)/\1/p' "$DIR/j.cap")
+[ "${D:-0}" -ge 5 ] || fail "J: the date row has $D colours: no anti-aliased text"
+stop_panel J
+# Closed, the same pixel is the bar's ground.
+start_panel j
+sleep 0.3
+"$CAPTURE" --at "$((HLX + 1)),$((HLY + HLH / 2))" >"$DIR/j.cap" 2>&1 || fail "J: capture failed"
+RGB=$(sed -n 's/.*rgb=\(.*\)/\1/p' "$DIR/j.cap" | head -n1)
+R=$((0x$(echo "$RGB" | cut -c1-2)))
+[ "$R" -lt 36 ] || fail "J: the closed clock has a highlight (#$RGB)"
+stop_panel J
+stop_picowl
+echo "panel-e2e: J ok"
+
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then
 	start_picowl
@@ -874,6 +983,25 @@ if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then
 	stop_picowl
 	restore_clock
 	echo "panel-e2e: clock ok"
+	# Midnight with the date row open (the stylus is held down, so it stays
+	# open): 12 s before the day changes, the row must show the next day after
+	# the minute tick, with no other timer.
+	export TZ=UTC0
+	start_picowl
+	CLOCK_T0=$(date +%s)
+	CLOCK_U0=$(uptime_s)
+	MID=$(( (CLOCK_T0 / 86400 + 1) * 86400 ))
+	BEFORE=$(date -d "@$((MID - 12))" '+%A %-d %B %Y')
+	AFTER=$(date -d "@$MID" '+%A %-d %B %Y')
+	date -s "@$((MID - 12))" >/dev/null || { CLOCK_T0=; fail "T: cannot set the clock"; }
+	start_panel t --inject "icl;p$X,$Y"
+	has "$DIR/t.out" "^row kind=date .* text=\"$BEFORE\"\$" "T the date row before midnight"
+	wait_for "$DIR/t.out" "^row kind=date .* text=\"$AFTER\"\$" 30 "T the date row after midnight"
+	stop_panel T
+	stop_picowl
+	restore_clock
+	unset TZ
+	echo "panel-e2e: midnight ok"
 fi
 
 cleanup

@@ -78,6 +78,41 @@ void pl_pct_text(char *buf, size_t len, int pct)
 	snprintf(buf, len, "%d%%", clampi(pct, 0, 100));
 }
 
+static const char *const weekdays[7] = { "Sunday", "Monday", "Tuesday", "Wednesday",
+	"Thursday", "Friday", "Saturday" };
+static const char *const months[12] = { "January", "February", "March", "April", "May",
+	"June", "July", "August", "September", "October", "November", "December" };
+
+void pl_date_text(char *buf, size_t len, int year, int mon, int mday, int wday)
+{
+	snprintf(buf, len, "%s %d %s %d", weekdays[clampi(wday, 0, 6)], clampi(mday, 1, 31),
+		months[clampi(mon, 0, 11)], clampi(year, 1, 9999));
+}
+
+enum pl_row_kind pl_row_kind_of(int open)
+{
+	if (open == PL_SLIDER_BACKLIGHT || open == PL_SLIDER_VOLUME)
+		return PL_ROW_SLIDER;
+	if (open == PL_BTN_CLOCK)
+		return PL_ROW_DATE;
+	if (open == PL_BTN_BATTERY)
+		return PL_ROW_ESTIMATE;
+	return PL_ROW_NONE;
+}
+
+int pl_fit_choose(const char *const *cand, int ncand, int nfaces, int avail,
+	pl_width_fn width, void *ctx, int *face)
+{
+	for (int f = 0; f < nfaces; f++)
+		for (int c = 0; c < ncand; c++)
+			if (width(ctx, f, cand[c]) <= avail) {
+				*face = f;
+				return c;
+			}
+	*face = nfaces > 0 ? nfaces - 1 : 0;
+	return ncand > 0 ? ncand - 1 : 0;
+}
+
 /* ---- layout ---- */
 
 int pl_clamp_height(int h)
@@ -133,7 +168,10 @@ void pl_layout_compute(struct pl_layout *l, int w, int bar_h, bool row_shown,
 	l->bat_icon_w = clampi(bar_h * 9 / 10, 16, 30);
 	l->bat_icon_h = l->bat_icon_w / 2;
 	int group_w = l->bat_icon_w + PL_GAP + m->bat_text_w;
-	l->battery = (struct pl_rect){ w - PL_MARGIN - group_w, iy, group_w + PL_MARGIN, dh };
+	/* The battery is a button too, so its rectangle leaves room for the
+	 * highlight around the icon and the text. */
+	l->battery = (struct pl_rect){ w - PL_MARGIN - group_w - PL_BAT_PAD, iy,
+		group_w + PL_MARGIN + PL_BAT_PAD, dh };
 
 	/* A stylus needs 36 px, the bar is slimmer than that. */
 	int bw = clampi(bar_h, 36, 44);
@@ -146,10 +184,28 @@ void pl_layout_compute(struct pl_layout *l, int w, int bar_h, bool row_shown,
 	}
 	l->bar_icon = clampi(bar_h * 14 / 20, 12, 28);
 
+	/* The clock and the battery: the touch target is the text widened to at
+	 * least 36 px and as high as the bar; the highlight is a pill around the
+	 * text with 4 px to spare, and for the battery around the widest it gets. */
+	int cw = l->clock.w < 36 ? 36 : l->clock.w;
+	l->button[PL_BTN_CLOCK] = (struct pl_rect){ 0, by, cw, bar_h };
+	l->hl[PL_BTN_CLOCK] = (struct pl_rect){ PL_MARGIN - PL_HL_PAD, iy + (dh - hh) / 2,
+		m->clock_w + 2 * PL_HL_PAD, hh };
+	int bx = l->battery.x, bww = w - bx;
+	if (bww < 36) {
+		bx = w - 36;
+		bww = 36;
+	}
+	l->button[PL_BTN_BATTERY] = (struct pl_rect){ bx, by, bww, bar_h };
+	l->hl[PL_BTN_BATTERY] = (struct pl_rect){ l->battery.x + PL_BAT_PAD - PL_HL_PAD,
+		iy + (dh - hh) / 2, group_w + 2 * PL_HL_PAD, hh };
+
 	int ry = bottom ? 0 : bar_h;
 	l->row = (struct pl_rect){ 0, ry, w, l->row_h };
 	l->row_in = (struct pl_rect){ 0, ry + (bottom ? 1 : 0), w, l->row_h - 1 };
 	l->row_line_y = bottom ? ry : ry + l->row_h - 1;
+	int tw_ = w - 2 * PL_MARGIN;
+	l->text = (struct pl_rect){ PL_MARGIN, l->row_in.y, tw_ < 1 ? 1 : tw_, l->row_h - 1 };
 	int ri = clampi(l->row_h * 2 / 3, 20, 28);
 	l->row_icon = (struct pl_rect){ PL_MARGIN, l->row_in.y + (l->row_h - 1 - ri) / 2, ri, ri };
 	l->pct = (struct pl_rect){ w - PL_MARGIN - m->pct_w, l->row_in.y, m->pct_w + PL_MARGIN,
@@ -228,7 +284,7 @@ static bool contains(const struct pl_rect *r, int x, int y)
 
 struct pl_hit pl_hit_test(const struct pl_layout *l, int x, int y)
 {
-	for (int i = 0; i < PL_SLIDERS; i++)
+	for (int i = 0; i < PL_BUTTONS; i++)
 		if (contains(&l->button[i], x, y))
 			return (struct pl_hit){ PL_HIT_BUTTON, i };
 	if (l->row_shown && contains(&l->slider.cell, x, y))
@@ -245,7 +301,7 @@ static int slider_value(const struct pl_layout *l, int slider, int x)
 }
 
 void pl_touch_press(struct pl_touch *t, const struct pl_layout *l, int open,
-	const bool enabled[PL_SLIDERS], int x, int y, struct pl_touch_out *out)
+	const bool enabled[PL_BUTTONS], int x, int y, struct pl_touch_out *out)
 {
 	t->down = true;
 	t->slider = PL_SLIDER_NONE;
@@ -257,7 +313,8 @@ void pl_touch_press(struct pl_touch *t, const struct pl_layout *l, int open,
 		 * the floor (a dark screen) and one on the speaker would mute. */
 		if (enabled[h.slider])
 			out->tap = h.slider;
-	} else if (h.kind == PL_HIT_TRACK && open != PL_SLIDER_NONE && enabled[open]) {
+	} else if (h.kind == PL_HIT_TRACK && pl_row_kind_of(open) == PL_ROW_SLIDER &&
+			enabled[open]) {
 		t->slider = open;
 		out->slider = open;
 		out->value = slider_value(l, open, x);
@@ -294,9 +351,9 @@ int pl_apply_wait_ms(int64_t now_ms, int64_t last_ms)
 
 /* ---- the pop-out row ---- */
 
-int pl_popup_tap(struct pl_popup *p, int slider, int64_t now_ms)
+int pl_popup_tap(struct pl_popup *p, int button, int64_t now_ms)
 {
-	p->open = p->open == slider ? PL_SLIDER_NONE : slider;
+	p->open = p->open == button ? PL_SLIDER_NONE : button;
 	p->last_ms = now_ms;
 	return p->open;
 }

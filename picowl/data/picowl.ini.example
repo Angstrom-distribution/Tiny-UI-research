@@ -34,8 +34,9 @@ color = #101010
 [autostart]
 # One shell command per line, run once at startup.
 # The panel: a slim bar with clock, battery and backlight and volume buttons; a
-# tap on a button pops a slider row out under the bar (it covers windows, it
-# does not move them) and closes it again 3 s after the last touch. It is hidden
+# tap on a button pops a row out under the bar (a slider for the backlight and
+# the volume, the weekday and date for the clock; it covers windows, it does
+# not move them) and closes it again 3 s after the last touch. It is hidden
 # while an app has the focus, and with it the row, unless [zerocopy]
 # panel_autohide is false. Options: --height N (18..80, default 18), --bottom,
 # --font PATH and --font-size PX (the text is rasterized from a TrueType font,

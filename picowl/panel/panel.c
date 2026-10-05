@@ -1,12 +1,13 @@
 /*
  * picowl-panel - a tiny layer-shell panel for picowl on 240x320 handhelds: a
  * slim bar with the clock, the battery and a backlight and a volume button.
- * Tapping a button pops a slider row out under the bar. Drawn with wl_shm.
+ * Tapping a button pops a row out under the bar: a slider for the backlight and
+ * the volume, the date for the clock. Drawn with wl_shm.
  *
  * One thread, one poll() loop. Nothing wakes it up without a reason: the
  * Wayland socket, the minute timer of the clock, a 30 s timer for the battery,
- * the mixer's descriptors, a timer that exists only while a slider row is open
- * (it closes the row 3 s after the last touch), and a short deadline only
+ * the mixer's descriptors, a timer that exists only while a row is open (it
+ * closes the row 3 s after the last touch), and a short deadline only
  * while a drag has a value waiting to be written. A redraw happens when a value
  * changes, and only the changed rectangles are damaged. The pure parts are in
  * panel-logic.c, panel-gfx.c, panel-draw.c and panel-sys.c; this file is the
@@ -50,7 +51,7 @@
 #define MAX_OUTPUTS 8
 
 /* Widgets to redraw. W_ROW_VALUE is the track, thumb and value of the open
- * row, W_ROW the whole row. */
+ * slider row, W_ROW the whole row. */
 enum {
 	W_CLOCK = 1, W_BATTERY = 2, W_BACKLIGHT = 4, W_VOLUME = 8,
 	W_ROW_VALUE = 16, W_ROW = 32,
@@ -207,11 +208,11 @@ static void flush_redraw(struct panel *p)
 	if (!p->buffer || !p->dirty)
 		return;
 	if (p->dirty & W_CLOCK) {
-		pl_render_clock(c, l, &p->assets, &p->st);
+		pl_render_clock(c, l, &p->assets, &p->st, open == PL_BTN_CLOCK);
 		add_damage(p, l->clock);
 	}
 	if (p->dirty & W_BATTERY) {
-		pl_render_battery(c, l, &p->assets, &p->st);
+		pl_render_battery(c, l, &p->assets, &p->st, open == PL_BTN_BATTERY);
 		add_damage(p, l->battery);
 	}
 	for (int s = 0; s < PL_SLIDERS; s++)
@@ -621,15 +622,24 @@ static void popup_disarm(struct panel *p)
 	timerfd_settime(p->popup_fd, 0, &off, NULL);
 }
 
-/* The open slider went from prev to p->pop.open: the buttons and the row
- * change, and the surface is asked for its new size on the next flush. */
+static void clock_update(struct panel *p);
+
+/* The widget a button is drawn by. */
+static unsigned button_widget(int button)
+{
+	return button == PL_BTN_CLOCK ? W_CLOCK : button == PL_BTN_BATTERY ? W_BATTERY :
+		button >= 0 && button < PL_SLIDERS ? W_BACKLIGHT << button : 0;
+}
+
+/* The open row went from prev to p->pop.open: the buttons and the row change,
+ * and the surface is asked for its new size on the next flush. */
 static void popup_changed(struct panel *p, int prev)
 {
 	int now = p->pop.open;
 
-	for (int s = 0; s < PL_SLIDERS; s++)
-		if (s == prev || s == now)
-			p->dirty |= W_BACKLIGHT << s;
+	p->dirty |= button_widget(prev) | button_widget(now);
+	if (now == PL_BTN_CLOCK)
+		clock_update(p);
 	if (now != PL_SLIDER_NONE)
 		p->dirty |= W_ROW;
 	if (now == PL_SLIDER_NONE)
@@ -664,7 +674,8 @@ static void popup_timer(struct panel *p)
 
 static void touch_press(struct panel *p)
 {
-	bool en[PL_SLIDERS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0 };
+	/* The battery's row has nothing to show yet. */
+	bool en[PL_BUTTONS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0, true, false };
 	struct pl_touch_out o;
 
 	/* set_slider ignores a value equal to the shown one, which must not be
@@ -938,6 +949,17 @@ static void clock_update(struct panel *p)
 		p->st.min = tm.tm_min;
 		p->dirty |= W_CLOCK;
 	}
+	/* The date is kept up to date by the same tick, so that an open date row
+	 * follows midnight; with the row closed it is just a few integers. */
+	if (tm.tm_year + 1900 != p->st.year || tm.tm_mon != p->st.mon ||
+			tm.tm_mday != p->st.mday || tm.tm_wday != p->st.wday) {
+		p->st.year = tm.tm_year + 1900;
+		p->st.mon = tm.tm_mon;
+		p->st.mday = tm.tm_mday;
+		p->st.wday = tm.tm_wday;
+		if (p->pop.open == PL_BTN_CLOCK)
+			p->dirty |= W_ROW;
+	}
 }
 
 static void battery_update(struct panel *p)
@@ -986,9 +1008,9 @@ static void wait_ms(struct panel *p, int ms)
 	}
 }
 
-static void tap_button(struct panel *p, int slider)
+static void tap_button(struct panel *p, int button)
 {
-	const struct pl_rect *b = &p->layout.button[slider];
+	const struct pl_rect *b = &p->layout.button[button];
 
 	p->px = b->x + b->w / 2;
 	p->py = b->y + b->h / 2;
@@ -999,7 +1021,7 @@ static void tap_button(struct panel *p, int slider)
 }
 
 /* "p X,Y" press, "m X,Y" motion, "e X,Y" pointer enter, "r" release,
- * "ibl" and "ivol" tap the backlight or the volume button, "w MS" run the
+ * "ibl", "ivol" and "icl" tap the backlight, volume or clock button, "w MS" run the
  * event loop for MS milliseconds (the auto-close, for one), separated by ; or
  * space: the same handlers as the wl_pointer events, for tests without a
  * pointer. "b RAW" writes the backlight as another process would. */
@@ -1019,8 +1041,12 @@ static void run_inject(struct panel *p)
 		} else if (tok[0] == 'b' && sscanf(tok + 1, "%d", &x) == 1) {
 			/* Another process sets the backlight. */
 			pl_backlight_write(&p->bl, x);
-		} else if (!strcmp(tok, "ibl") || !strcmp(tok, "ivol")) {
-			tap_button(p, tok[1] == 'b' ? PL_SLIDER_BACKLIGHT : PL_SLIDER_VOLUME);
+		} else if (!strcmp(tok, "ibl")) {
+			tap_button(p, PL_SLIDER_BACKLIGHT);
+		} else if (!strcmp(tok, "ivol")) {
+			tap_button(p, PL_SLIDER_VOLUME);
+		} else if (!strcmp(tok, "icl")) {
+			tap_button(p, PL_BTN_CLOCK);
 		} else if (tok[0] == 'w' && sscanf(tok + 1, "%d", &x) == 1) {
 			flush_redraw(p);
 			wait_ms(p, x);
@@ -1055,7 +1081,8 @@ static const char *bat_name(enum pl_bat_status st)
 
 static const char *slider_name(int s)
 {
-	return s == PL_SLIDER_BACKLIGHT ? "backlight" : s == PL_SLIDER_VOLUME ? "volume" : "none";
+	return s == PL_SLIDER_BACKLIGHT ? "backlight" : s == PL_SLIDER_VOLUME ? "volume" :
+		s == PL_BTN_CLOCK ? "clock" : s == PL_BTN_BATTERY ? "battery" : "none";
 }
 
 static void print_rect(const char *name, struct pl_rect r)
@@ -1107,14 +1134,31 @@ static void dump_state(const struct panel *p, const char *why)
 		print_rect("button", l->button[s]);
 		printf("\n");
 	}
-	if (l->row_shown && p->pop.open != PL_SLIDER_NONE) {
+	/* The touch targets and the highlights of the open buttons. */
+	for (int i = 0; i < PL_BUTTONS; i++) {
+		printf("target %s", slider_name(i));
+		print_rect("rect", l->button[i]);
+		print_rect("hl", l->hl[i]);
+		printf(" open=%d\n", p->pop.open == i);
+	}
+	if (l->row_shown && pl_row_kind_of(p->pop.open) == PL_ROW_SLIDER) {
 		int v = p->pop.open == PL_SLIDER_BACKLIGHT ? p->st.bl_pct : p->st.vol_pct;
 		printf("row slider=%s", slider_name(p->pop.open));
 		print_rect("rect", l->row);
 		print_rect("cell", l->slider.cell);
 		print_rect("track", l->slider.track);
 		print_rect("thumb", pl_slider_thumb(l, v));
-		printf("\n");
+		printf(" kind=slider\n");
+	} else if (l->row_shown && p->pop.open != PL_SLIDER_NONE) {
+		/* A line of text: what is drawn, in which size, and the room it
+		 * has, so that a test can see that it fits. */
+		struct pl_rowtext t;
+		pl_row_text(l, &p->assets, &p->st, p->pop.open, &t);
+		printf("row kind=%s", pl_row_kind_of(p->pop.open) == PL_ROW_DATE ? "date" : "estimate");
+		print_rect("rect", l->row);
+		printf(" size=%d width=%d avail=%d text=\"%s\"\n",
+			p->font_ttf ? p->assets.font.face[t.face].px : p->assets.font.scale[t.face] * 7,
+			t.w, l->text.w, t.text);
 	}
 	fflush(stdout);
 }
@@ -1133,7 +1177,7 @@ static void usage(FILE *out)
 		"  --font-size PX      size of the text in pixels, 8..48 (default: %d at the\n"
 		"                      default height)\n"
 		"  --bar-alpha N       opacity of the bar, 0..255 (default %d)\n"
-		"  --popup-alpha N     opacity of the slider row, 0..255 (default %d);\n"
+		"  --popup-alpha N     opacity of the pop-out row, 0..255 (default %d);\n"
 		"                      below 255 the surface needs ARGB8888 while the row is open\n"
 		"  --subpixel MODE     auto, rgb, bgr or none (default auto): the order of the\n"
 		"                      colour stripes for subpixel text. auto uses what the\n"
@@ -1147,7 +1191,8 @@ static void usage(FILE *out)
 		"  --exit-after-frame  exit after the first frame\n"
 		"  --inject SPEC       test only: feed pointer events after the first frame\n"
 		"                      (p X,Y press; m X,Y motion; e X,Y enter; r release;\n"
-		"                      ibl, ivol tap a button; w MS wait; b RAW sets the\n"
+		"                      ibl, ivol, icl tap the backlight, volume or clock\n"
+		"                      button; w MS wait; b RAW sets the\n"
 		"                      backlight), before the dump\n"
 		"  --help              this text\n",
 		PL_HEIGHT_MIN, PL_HEIGHT_MAX, PL_HEIGHT_DEFAULT,
@@ -1463,6 +1508,7 @@ int main(int argc, char **argv)
 	p.assets.sub = p.sub;
 
 	p.st.hour = p.st.min = -1;
+	p.st.year = p.st.mon = p.st.mday = p.st.wday = -1;
 	clock_arm(&p);
 	clock_update(&p);
 	battery_update(&p);

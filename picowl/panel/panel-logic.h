@@ -5,10 +5,12 @@
  * it anywhere.
  *
  * The surface is a slim bar of bar_h pixels (clock on the left; on the right a
- * backlight button, a volume button and the battery). While a slider is open it
- * is bar_h + row_h pixels high: the slider row sits below the bar. Only the bar
- * is the panel's exclusive zone, so the row covers windows instead of moving
- * them.
+ * backlight button, a volume button and the battery). Each of the four is a
+ * button: while a row is open the surface is bar_h + row_h pixels high and the
+ * row sits below the bar. The backlight and the volume open a slider row, the
+ * clock a row with the date and the battery a row with the time left. Only the
+ * bar is the panel's exclusive zone, so the row covers windows instead of
+ * moving them.
  */
 #ifndef PICOWL_PANEL_LOGIC_H
 #define PICOWL_PANEL_LOGIC_H
@@ -35,6 +37,12 @@
 #define PL_MARGIN 8
 #define PL_GAP 4
 
+/* The highlight of an open clock or battery reaches this far past the text,
+ * and the battery's rectangle starts this far before its icon so that the
+ * highlight fits inside it. */
+#define PL_HL_PAD 4
+#define PL_BAT_PAD 6
+
 #define PL_ALPHA_BAR_DEFAULT 255
 #define PL_ALPHA_POPUP_DEFAULT 224
 
@@ -43,6 +51,22 @@ enum pl_slider_id {
 	PL_SLIDER_BACKLIGHT = 0,
 	PL_SLIDER_VOLUME = 1,
 	PL_SLIDERS = 2,
+};
+
+/* The buttons of the bar: the sliders' ids first, so that an id says which row
+ * is open (PL_SLIDER_NONE: none). */
+enum pl_button_id {
+	PL_BTN_CLOCK = PL_SLIDERS,
+	PL_BTN_BATTERY,
+	PL_BUTTONS,
+};
+
+/* What a row shows. */
+enum pl_row_kind {
+	PL_ROW_NONE,
+	PL_ROW_SLIDER,		/* a slider and its value */
+	PL_ROW_DATE,		/* weekday and date, one line of text */
+	PL_ROW_ESTIMATE,	/* the battery's time estimate, one line of text */
 };
 
 enum pl_bat_status {
@@ -67,6 +91,7 @@ struct pl_rect {
 /* What is shown. -1 in bl_pct and vol_pct: not available, drawn greyed out. */
 struct pl_state {
 	int hour, min;
+	int year, mon, mday, wday;	/* local date: mon 0..11, wday 0 is Sunday */
 	enum pl_bat_status bat;
 	int bat_pct;		/* 0..100, only with a battery status */
 	int bl_pct;
@@ -99,12 +124,13 @@ struct pl_layout {
 	struct pl_rect clock;	/* drawing rectangles, they leave out the line */
 	struct pl_rect battery;
 	int bat_icon_w, bat_icon_h;
-	struct pl_rect button[PL_SLIDERS];	/* touch targets, the whole bar height */
-	struct pl_rect hl[PL_SLIDERS];		/* highlight of an open button */
+	struct pl_rect button[PL_BUTTONS];	/* touch targets, the whole bar height */
+	struct pl_rect hl[PL_BUTTONS];		/* highlight of an open button */
 	int bar_icon;				/* edge of the icon in a button */
 	struct pl_rect row;			/* the slider row, valid if row_shown */
 	struct pl_rect row_in;			/* the row without its line */
 	struct pl_rect row_icon;
+	struct pl_rect text;			/* the line of a text row: the row less its margins */
 	struct pl_rect pct;			/* where the value text goes */
 	struct pl_slider slider;
 };
@@ -131,6 +157,25 @@ void pl_battery_text(char *buf, size_t len, enum pl_bat_status st, int pct);
 /* "NN%" for a slider value. */
 void pl_pct_text(char *buf, size_t len, int pct);
 
+/* "Monday 5 October 2026": the names are in a table of the panel's own, so the
+ * line does not depend on the locale. mon is 0..11 and wday 0..6 from Sunday,
+ * as in struct tm; a value out of range is clamped. buf needs 40 bytes. */
+void pl_date_text(char *buf, size_t len, int year, int mon, int mday, int wday);
+
+/* What a button opens: PL_ROW_NONE for an id that is none. */
+enum pl_row_kind pl_row_kind_of(int open);
+
+/* Width of s in pixels in the face (see panel-gfx.h). */
+typedef int (*pl_width_fn)(void *ctx, int face, const char *s);
+
+/* The text of a row is shrunk stepwise instead of clipped: it tries the faces
+ * from 0 (the largest) on, and in each one the candidates from the most to the
+ * least informative, and takes the first that is at most avail pixels wide.
+ * Returns its index and sets *face. If none fits it is the last candidate in
+ * the last face, which the caller should make the shortest. */
+int pl_fit_choose(const char *const *cand, int ncand, int nfaces, int avail,
+	pl_width_fn width, void *ctx, int *face);
+
 /* ---- layout ---- */
 
 int pl_clamp_height(int h);
@@ -139,7 +184,7 @@ int pl_clamp_alpha(int a);
 /* Default font size for a bar height: 12 px on the 20 px bar. */
 int pl_default_font_px(int bar_h);
 
-/* Height of the slider row for a bar. */
+/* Height of the row for a bar. */
 int pl_row_height(int bar_h);
 
 /* Height of the surface with or without the row. */
@@ -175,7 +220,7 @@ int pl_slider_value(const struct pl_slider *s, int x);
 
 enum pl_hit_kind {
 	PL_HIT_NONE,
-	PL_HIT_BUTTON,		/* an icon button: slider says which */
+	PL_HIT_BUTTON,		/* a button of the bar: slider says which */
 	PL_HIT_TRACK,		/* the track area of the row */
 };
 
@@ -188,25 +233,25 @@ struct pl_hit pl_hit_test(const struct pl_layout *l, int x, int y);
 
 /* ---- touch ---- */
 
-/* A press on a button taps it. A press in the track area of the open row
- * starts a drag of the open slider; motion keeps setting its value, release
- * ends it. A press anywhere else (the icon and the value text of the row
- * included), or on a disabled slider, starts nothing and motion is ignored
- * until the release. */
+/* A press on a button taps it. A press in the track area of an open slider row
+ * starts a drag of that slider; motion keeps setting its value, release ends
+ * it. A press anywhere else (the icon and the value text of the row included,
+ * and anything in a text row), or on a disabled button, starts nothing and
+ * motion is ignored until the release. */
 struct pl_touch {
 	bool down;
 	int slider;		/* dragged slider, PL_SLIDER_NONE if none */
 };
 
 struct pl_touch_out {
-	int tap;		/* slider whose button was tapped, or PL_SLIDER_NONE */
+	int tap;		/* button that was tapped (a pl_button_id), or PL_SLIDER_NONE */
 	int slider;		/* slider whose value changes, or PL_SLIDER_NONE */
 	int value;		/* the new value; the backlight's is already floored */
 };
 
-/* open: the slider shown in the row, or PL_SLIDER_NONE. */
+/* open: the button whose row is shown, or PL_SLIDER_NONE. */
 void pl_touch_press(struct pl_touch *t, const struct pl_layout *l, int open,
-	const bool enabled[PL_SLIDERS], int x, int y, struct pl_touch_out *out);
+	const bool enabled[PL_BUTTONS], int x, int y, struct pl_touch_out *out);
 void pl_touch_motion(struct pl_touch *t, const struct pl_layout *l, int x,
 	struct pl_touch_out *out);
 /* Returns the slider whose drag ended, or PL_SLIDER_NONE. */
@@ -219,13 +264,13 @@ int pl_apply_wait_ms(int64_t now_ms, int64_t last_ms);
 /* ---- the pop-out row ---- */
 
 struct pl_popup {
-	int open;		/* slider in the row, or PL_SLIDER_NONE */
+	int open;		/* button whose row is shown, or PL_SLIDER_NONE */
 	int64_t last_ms;	/* time of the last touch */
 };
 
-/* A tap on a button: the same one closes the row, the other one switches it.
- * Returns the slider now open. Counts as a touch. */
-int pl_popup_tap(struct pl_popup *p, int slider, int64_t now_ms);
+/* A tap on a button: the same one closes the row, another one switches it.
+ * Returns the button now open. Counts as a touch. */
+int pl_popup_tap(struct pl_popup *p, int button, int64_t now_ms);
 void pl_popup_touch(struct pl_popup *p, int64_t now_ms);
 /* Milliseconds until the row closes by itself, -1 if it is not open. A stylus
  * that is still down keeps it open, so the wait is then the full time. */

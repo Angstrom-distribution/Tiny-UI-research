@@ -40,13 +40,13 @@ struct pl_assets {
 	enum pl_sub sub;
 
 	/* What the masks were built for. */
-	int key[9];
+	int key[13];
 	bool built;
 
 	struct pl_mask sun[2];		/* in a button, in the row */
 	struct pl_mask speaker[3][2];	/* muted, one wave, two waves */
 	struct pl_mask bat_outline, bat_inner, bolt;
-	struct pl_mask hl, ring, disc, track;
+	struct pl_mask hl, hl_clock, hl_bat, ring, disc, track;
 };
 
 /* Loads the font (font_path NULL: the default search) and keeps the alphas.
@@ -69,14 +69,25 @@ int pl_speaker_variant(int vol_pct);
 struct pl_rect pl_button_rect(const struct pl_layout *l, int slider);
 struct pl_rect pl_row_value_rect(const struct pl_layout *l);
 
-/* Redraw one widget including its background. open is the slider in the row,
- * or PL_SLIDER_NONE. */
+/* Redraw one widget including its background. open is the button whose row is
+ * shown, or PL_SLIDER_NONE; the clock and the battery are highlighted when
+ * theirs is. */
 void pl_render_clock(const struct pl_canvas *c, const struct pl_layout *l,
-	const struct pl_assets *a, const struct pl_state *st);
+	const struct pl_assets *a, const struct pl_state *st, bool open);
 void pl_render_battery(const struct pl_canvas *c, const struct pl_layout *l,
-	const struct pl_assets *a, const struct pl_state *st);
+	const struct pl_assets *a, const struct pl_state *st, bool open);
 void pl_render_button(const struct pl_canvas *c, const struct pl_layout *l,
 	const struct pl_assets *a, const struct pl_state *st, int open, int slider);
+/* The line of a text row, as drawn: the text, the face it is drawn in (an index
+ * into the font's faces) and its width. Empty for a row without text. */
+struct pl_rowtext {
+	char text[64];
+	int face;
+	int w;
+};
+void pl_row_text(const struct pl_layout *l, const struct pl_assets *a,
+	const struct pl_state *st, int open, struct pl_rowtext *out);
+
 /* The row without its icon: track, thumb, value. For a drag. */
 void pl_render_row_value(const struct pl_canvas *c, const struct pl_layout *l,
 	const struct pl_assets *a, const struct pl_state *st, int open);
