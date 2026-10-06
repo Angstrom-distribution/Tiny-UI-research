@@ -158,7 +158,7 @@ def gen(dst, paths):
         out.append("};\n")
         tab.append((name, bw, bh, asc, bpr))
     for name, bw, bh, asc, bpr in tab:
-        out.append('const struct pl_pixfont pl_pixfont_%s = { "%s", %d, %d, %d, %d, rows_%s };'
+        out.append('const struct pl_pixfont pl_pixfont_%s = { "%s", %d, %d, %d, %d, rows_%s, 0, 0 };'
                    % (name, name, bw, bh, asc, bpr, name))
     with open(dst, "w") as f:
         f.write("\n".join(out) + "\n")

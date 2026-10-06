@@ -492,8 +492,8 @@ static const uint8_t rows_10x20[95 * 20 * 2] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x39, 0x80, 0x6d, 0x80, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* '~' */
 };
 
-const struct pl_pixfont pl_pixfont_6x10 = { "6x10", 6, 10, 8, 1, rows_6x10 };
-const struct pl_pixfont pl_pixfont_7x13B = { "7x13B", 7, 13, 11, 1, rows_7x13B };
-const struct pl_pixfont pl_pixfont_7x14B = { "7x14B", 7, 14, 12, 1, rows_7x14B };
-const struct pl_pixfont pl_pixfont_9x15B = { "9x15B", 9, 15, 12, 2, rows_9x15B };
-const struct pl_pixfont pl_pixfont_10x20 = { "10x20", 10, 20, 16, 2, rows_10x20 };
+const struct pl_pixfont pl_pixfont_6x10 = { "6x10", 6, 10, 8, 1, rows_6x10, 0, 0 };
+const struct pl_pixfont pl_pixfont_7x13B = { "7x13B", 7, 13, 11, 1, rows_7x13B, 0, 0 };
+const struct pl_pixfont pl_pixfont_7x14B = { "7x14B", 7, 14, 12, 1, rows_7x14B, 0, 0 };
+const struct pl_pixfont pl_pixfont_9x15B = { "9x15B", 9, 15, 12, 2, rows_9x15B, 0, 0 };
+const struct pl_pixfont pl_pixfont_10x20 = { "10x20", 10, 20, 16, 2, rows_10x20, 0, 0 };

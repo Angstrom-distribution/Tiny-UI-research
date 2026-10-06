@@ -1,7 +1,9 @@
-Licences of the pixel fonts in this directory (the BDF files, and the C data
-panel/panel-pixfont-data.c that gen-pixfont.py makes of them).
+Licences of the pixel fonts in this directory: the misc-fixed BDF files and the C
+data panel/panel-pixfont-data.c that gen-pixfont.py makes of them (public domain),
+and, further down, the DejaVu Sans Bold bitmaps of panel/panel-pixfont-dejavu.c
+(Bitstream Vera licence, notice in DEJAVU-LICENSE).
 
-All five are misc-fixed fonts of the X.Org font-misc-misc package, taken from
+The five BDF files are misc-fixed fonts of the X.Org font-misc-misc package, taken from
 Debian's xfonts-base (trixie), converted with pcf2bdf and reduced to printable
 ASCII by `gen-pixfont.py trim`. The header of each BDF file says what their
 author put on them, and gen-pixfont.py refuses to use a font whose COPYRIGHT
@@ -20,3 +22,26 @@ is the single line "Public domain font.  Share and enjoy."
 
 Terminus (SIL OFL 1.1) is not used: the misc-fixed fonts cover the sizes the
 panel needs and have no licence text that must travel with the binary.
+
+DejaVu Sans Bold (panel/panel-pixfont-dejavu.c, made by gen-dejavu-bitmaps.c)
+
+The DejaVu data is different: it has a licence text that must travel with it.
+panel-pixfont-dejavu.c holds 1-bit renderings of DejaVu Sans Bold at 9, 10, 11
+and 12 px, made with FreeType's v35 TrueType interpreter from DejaVuSans-Bold.ttf
+of Debian trixie's fonts-dejavu-core 2.37-8 (the font's own version string is
+"Version 2.37"). The fonts derive from Bitstream Vera. Their copyright line is
+"Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is a
+trademark of Bitstream, Inc." and "DejaVu changes are in public domain". The
+copyright, trademark and permission notice is in DEJAVU-LICENSE in this
+directory, the file /usr/share/doc/fonts-dejavu-core/copyright of that package
+copied unchanged. The permission notice asks for the copyright and trademark
+notices and the notice itself in all copies of the typefaces, so DEJAVU-LICENSE
+goes with the generated data and with every copy of it; the header of the
+generated file says so too. The last stanza of that file (Debian's packaging,
+GPL-2+) is about the package, not the fonts.
+
+The baked data is compiled-in bitmaps for the panel's text. It is not distributed
+as a font and not under the Bitstream or Vera names; the notice allows a modified
+font only under a name that has neither word. The font files themselves are not
+in this repository: the generator reads the ones the package installs. This
+records facts and is not legal advice.
