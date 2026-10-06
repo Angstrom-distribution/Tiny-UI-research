@@ -239,6 +239,15 @@ enum pl_strip pl_strip_for(int transform, bool force_top)
 		transform == PL_STRIP_270 ? PL_STRIP_270 : PL_STRIP_NONE;
 }
 
+void pl_rot_resolve(const struct pl_rot_hint *h, int geo_transform, int geo_subpixel,
+	int *transform, int *native_subpixel)
+{
+	bool hw = h && h->present && h->hardware;
+
+	*transform = hw ? h->transform : geo_transform;
+	*native_subpixel = hw ? h->subpixel : geo_subpixel;
+}
+
 enum pl_edge pl_edge_for(enum pl_strip strip, bool bottom)
 {
 	switch (strip) {

@@ -1345,31 +1345,46 @@ echo "panel-e2e: U ok"
 # rotation is not testable here.
 export PICOWL_TEST_VIRTUAL_POINTER=1
 # v_picowl ROT [SUBPIXEL]: picowl whose output is turned by ROT with software
-# rotation, advertising SUBPIXEL if given
+# rotation, advertising SUBPIXEL if given. With VHW=1 it takes the path of
+# hardware rotation instead (PICOWL_TEST_HW_ROTATION: the frame is the rotated
+# one, wl_output says normal, the picture is not turned: v_rows turns the
+# capture back the way the plane would).
+VHW=0
 v_picowl() {
 	cp "$DIR/picowl.base" "$DIR/picowl.ini"
 	printf '\n[output]\n* = %s\n' "$1" >>"$DIR/picowl.ini"
 	[ -n "$2" ] && printf 'subpixel = %s\n' "$2" >>"$DIR/picowl.ini"
-	printf '\n[rotation]\n* = software\n' >>"$DIR/picowl.ini"
-	start_picowl
+	if [ "$VHW" = 1 ]; then
+		printf '\n[rotation]\n* = hardware\n' >>"$DIR/picowl.ini"
+		export PICOWL_TEST_HW_ROTATION=1
+		start_picowl
+		unset PICOWL_TEST_HW_ROTATION
+	else
+		printf '\n[rotation]\n* = software\n' >>"$DIR/picowl.ini"
+		start_picowl
+	fi
 }
 # v_rows NAME HEIGHT: HEIGHT rows of the scanout from row $VY (the top), in
 # $DIR/NAME.rows
 VY=0
+VPLANE=
 v_rows() {
-	"$CAPTURE" --dump "0,$VY,240,$2" >"$DIR/$1.cap" 2>&1 || fail "V: capture failed: $(cat "$DIR/$1.cap")"
+	"$CAPTURE" $VPLANE --dump "0,$VY,240,$2" >"$DIR/$1.cap" 2>&1 || fail "V: capture failed: $(cat "$DIR/$1.cap")"
 	grep '^pw-capture-client: row ' "$DIR/$1.cap" >"$DIR/$1.rows"
 	[ "$(wc -l <"$DIR/$1.rows")" -eq "$2" ] || fail "V: the capture of $1 has $(wc -l <"$DIR/$1.rows") rows, wanted $2"
 }
 # v_shot NAME ROT HEIGHT SUBPIXEL PANEL-ARGS...: one run of picowl and the panel
 v_shot() {
 	vn=$1; vrot=$2; vh=$3; vsp=$4; shift 4
+	VPLANE=
+	[ "$VHW" = 1 ] && case $vrot in 90|270) VPLANE="--plane $vrot";; esac
 	v_picowl "$vrot" "$vsp"
 	start_panel "$vn" "$@"
 	sleep 0.4
 	v_rows "$vn" "$vh"
 	stop_panel "$vn"
 	stop_picowl
+	VPLANE=
 }
 # v_same WHAT HEIGHT SUBPIXEL PANEL-ARGS...: the top HEIGHT rows of the scanout
 # at 90 and at 270 are the ones of the portrait bar, pixel for pixel. A minute
@@ -1601,9 +1616,113 @@ for rot in 90 270; do
 	stop_picowl
 	echo "panel-e2e: V $rot: taps, the slider drag and the 3 s auto-close work on the strip"
 done
+echo "panel-e2e: V ok"
+
+# ---- W: the same with the display doing the turning ----
+# Under hardware rotation wl_output says the transform normal; the panel learns
+# the turn from picowl-rotation-v1. PICOWL_TEST_HW_ROTATION makes the headless
+# output take that path (the mode is the rotated one, hw_rotation is set,
+# nothing turns the frame) and the capture is turned back by the plane's
+# rotation, which is what the display would show.
+VHW=1
+# wl_output.geometry on the wire is what clients get: the transform is normal
+# and the subpixel layout is the one a client sees (horizontal_rgb of the panel
+# is vertical_rgb, 4, turned by 90 and vertical_bgr, 5, turned by 270).
+for rot in 90 270; do
+	v_picowl $rot horizontal_rgb
+	WAYLAND_DEBUG=1 "$PANEL" --dump-state --subpixel auto >"$DIR/w.out" 2>"$DIR/w.err" || fail "W $rot: the panel failed"
+	VSUB=4; [ $rot = 270 ] && VSUB=5
+	grep -q "wl_output[#@][0-9]*.geometry(.*, $VSUB, \"[^\"]*\", \"[^\"]*\", 0)" "$DIR/w.err" ||
+		fail "W $rot: wl_output.geometry is not 'subpixel $VSUB, transform normal': $(grep 'geometry' "$DIR/w.err" | head -n 2)"
+	has "$DIR/w.out" '^rotation hint=hardware$' "W $rot: the hint says the display turns the output"
+	EDGE=right; TR=1; [ $rot = 270 ] && { EDGE=left; TR=3; }
+	has "$DIR/w.out" "^placement edge=$EDGE transform=$TR surface=18x240 input=0,0,18,240\$" "W $rot: the strip is on the physical top"
+	has "$DIR/w.out" '^text subpixel=rgb$' "W $rot: the strip draws subpixel text with the panel's own stripes"
+	# --edge top keeps the bar where it was, with the text of the view
+	"$PANEL" --dump-state --edge top --subpixel auto >"$DIR/w.out" 2>&1 || fail "W $rot: the panel failed with --edge top"
+	has "$DIR/w.out" '^placement edge=top transform=0 surface=320x18 ' "W $rot --edge top: on the top of the view"
+	has "$DIR/w.out" '^text subpixel=none$' "W $rot --edge top: vertical stripes in the view, grayscale"
+	M=$(mapped)
+	[ "$M" = 320x240 ] || fail "W $rot: a toplevel is $M, wanted 320x240 (the view the client sees)"
+	stop_picowl
+done
+# Nothing is turned at the other transforms, hardware or not.
+for rot in normal 180; do
+	v_picowl $rot
+	"$PANEL" --dump-state --subpixel none >"$DIR/w.out" 2>&1 || fail "W $rot: the panel failed"
+	has "$DIR/w.out" '^placement edge=top transform=0 ' "W $rot: the bar stays on the top edge"
+	stop_picowl
+done
+v_same "hardware: bar" 18 none --subpixel none
+v_same "hardware: slider row" 54 none --subpixel none --inject "ibl"
+v_same "hardware: date row" 54 none --subpixel none --inject "icl"
+v_same "hardware: bar with subpixel text" 18 horizontal_rgb --subpixel auto
+v_same "hardware: crisp bar" 18 none --style crisp
+VY=302
+v_same "hardware: bottom bar" 18 none --subpixel none --bottom
+VY=0
+v_picowl 90 horizontal_rgb
+VPLANE="--plane 90"
+start_panel v --subpixel auto
+sleep 0.3
+CR=$(val "$DIR/v.out" clock rect)
+h_spread_plane() { "$CAPTURE" $VPLANE --spread "$1" --bg 1c1f24 --fg e8eaed >"$DIR/h.cap" 2>&1; }
+h_spread_plane "$(comp "$CR" 1),$(comp "$CR" 2),$(comp "$CR" 3),$(comp "$CR" 4)"
+HSP=$(sed -n 's/.*spread max=\([0-9.]*\) ink=.*/\1/p' "$DIR/h.cap")
+awk "BEGIN { exit !($HSP > 0.35) }" || fail "W: spread $HSP: no colour fringes on the clock in the strip under hardware rotation"
+echo "panel-e2e: W subpixel text in the strip under hardware rotation: spread $HSP"
+stop_panel W
+stop_picowl
+VPLANE=
+
+# Taps: the logical view is the same as with software rotation.
+v_picowl 90
+echo 600 >"$BL/brightness"
+start_panel v --subpixel none
+CR=$(val "$DIR/v.out" clock rect)
+PX=$(( $(comp "$CR" 1) + $(comp "$CR" 3) / 2 ))
+"$POINTER" --size 320x240 tap "$(v_at 90 $PX 8)" || fail "W: the pointer client failed"
+wait_for "$DIR/v.out" '^panel .* popup=clock$' 3 "W: a tap on the physical clock opens the date row"
+stop_panel W
+stop_picowl
+
+# A rotation while the panel runs, by the display: the hint follows. The strip
+# is only checked by where the panel puts itself and by the usable area, not by
+# pixels: the screencopy of the headless output after its mode changed at run
+# time is incomplete (the last quarter of the rows stays black; software
+# rotation does not change the mode and is not affected), which is not looked
+# into here.
+v_picowl normal
+start_panel v --subpixel none
+sleep 0.3
+"$KEYS" 397 || fail "W: key client failed"
+wait_for "$DIR/v.out" '^placement edge=right transform=1 surface=18x240 ' 5 "W rotating to 90"
+M=$(mapped)
+[ "$M" = 302x240 ] || fail "W: after the rotation to 90 a toplevel is $M, wanted 302x240"
+"$KEYS" 397 || fail "W: key client failed"
+wait_for "$DIR/v.out" '^placement edge=top transform=0 surface=240x18 ' 5 "W rotating to 180"
+"$KEYS" 397 || fail "W: key client failed"
+wait_for "$DIR/v.out" '^placement edge=left transform=3 surface=18x240 ' 5 "W rotating to 270"
+"$KEYS" 397 || fail "W: key client failed"
+wait_for "$DIR/v.out" '^placement edge=top transform=0 surface=240x18 .*' 5 "W rotating back to normal"
+[ "$(grep -c '^placement edge=top transform=0 ' "$DIR/v.out")" -ge 3 ] || fail "W: no return to the top edge"
+stop_panel W
+stop_picowl
+
+# Without the hint (older picowl, another compositor) the panel does what it
+# did before: the bar stays on the top of the view it is shown.
+export PICOWL_TEST_NO_ROTATION_HINT=1
+v_picowl 90 horizontal_rgb
+unset PICOWL_TEST_NO_ROTATION_HINT
+"$PANEL" --dump-state --subpixel auto >"$DIR/w.out" 2>&1 || fail "W: the panel failed without the hint"
+has "$DIR/w.out" '^rotation hint=none$' "W: no hint"
+has "$DIR/w.out" '^placement edge=top transform=0 surface=320x18 ' "W: no hint, the bar stays on the top edge"
+has "$DIR/w.out" '^text subpixel=none$' "W: no hint, vertical stripes in the view: grayscale"
+stop_picowl
+VHW=0
 unset PICOWL_TEST_VIRTUAL_POINTER
 cp "$DIR/picowl.base" "$DIR/picowl.ini"
-echo "panel-e2e: V ok"
+echo "panel-e2e: W ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

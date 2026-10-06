@@ -12,7 +12,10 @@
  * "pw-capture-client: palette N" and one "pw-capture-client: colour RRGGBB COUNT"
  * line for each colour of the rectangle (up to 4096; more is "palette 4097"),
  * --dump X,Y,W,H one "pw-capture-client: row Y RRGGBB RRGGBB ..." line for each
- * row of it. --spread X,Y,W,H with
+ * row of it. --plane 90|270 first turns the capture back into the panel's own
+ * frame the way a display plane with that rotation would (the capture of an
+ * output with hardware rotation is the rotated frame; X,Y,W,H and the sizes
+ * printed are then in the turned frame). --spread X,Y,W,H with
  * --bg RRGGBB and --fg RRGGBB prints "pw-capture-client: spread max=F ink=N":
  * for each pixel of the rectangle that is not the ground, the coverage of the
  * text colour is worked out per channel in linear light, and F is the largest
@@ -37,6 +40,8 @@ static struct wl_output *output;
 static struct zwlr_screencopy_manager_v1 *mgr;
 
 static uint32_t fmt, width, height, stride;
+static int plane;	/* 0, 90 or 270: see --plane */
+static uint32_t cap_w, cap_h;	/* the capture, before the turn */
 static bool got_buffer, ready, failed;
 static void *pixels = MAP_FAILED;
 static size_t map_size;
@@ -127,6 +132,15 @@ static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
 /* A pixel as 0xRRGGBB. RGB565 and the 32 bit formats are the ones picowl has. */
 static uint32_t rgb_at(int x, int y, size_t bpp)
 {
+	if (plane == 90) {
+		int lx = (int)cap_w - 1 - y, ly = x;
+		x = lx;
+		y = ly;
+	} else if (plane == 270) {
+		int lx = y, ly = (int)cap_h - 1 - x;
+		x = lx;
+		y = ly;
+	}
 	const uint8_t *p = (const uint8_t *)pixels + (size_t)y * stride + (size_t)x * bpp;
 	uint32_t v = 0;
 
@@ -159,6 +173,8 @@ int main(int argc, char **argv)
 			sscanf(argv[++i], "%d,%d,%d,%d", &dx, &dy, &dw, &dh);
 		else if (!strcmp(argv[i], "--palette") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d,%d,%d", &px0, &py0, &pw0, &ph0);
+		else if (!strcmp(argv[i], "--plane") && i + 1 < argc)
+			plane = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--dump") && i + 1 < argc)
 			sscanf(argv[++i], "%d,%d,%d,%d", &ux, &uy, &uw, &uh);
 		else if (!strcmp(argv[i], "--spread") && i + 1 < argc)
@@ -213,6 +229,12 @@ int main(int argc, char **argv)
 	}
 	uint32_t px = 0;
 	memcpy(&px, first, bpp);
+	cap_w = width;
+	cap_h = height;
+	if (plane == 90 || plane == 270) {
+		width = cap_h;
+		height = cap_w;
+	}
 	printf("pw-capture-client: captured %ux%u format=%u identical=%s pixel=%08x\n",
 		width, height, fmt, same ? "yes" : "no", px);
 	fflush(stdout);

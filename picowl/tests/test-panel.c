@@ -3668,6 +3668,36 @@ static void test_sys(void)
 
 /* The strip: the panel on the short side of an output rotated by 90 or 270
  * degrees, drawn in its own orientation and turned by the buffer transform. */
+/* The turn and the panel's layout an output has for the panel: the hint when it
+ * says the display turns the output, else geometry. */
+static void test_rot_hint(void)
+{
+	struct pl_rot_hint none = { 0 };
+	struct pl_rot_hint hw = { true, true, 1, 1 };	/* 90, horizontal_rgb */
+	struct pl_rot_hint sw = { true, false, 1, 1 };
+	int t, s;
+
+	pl_rot_resolve(NULL, 0, 4, &t, &s);
+	CHECK(t == 0 && s == 4, "no hint: geometry (old picowl, another compositor)");
+	pl_rot_resolve(&none, 3, 2, &t, &s);
+	CHECK(t == 3 && s == 2, "a hint that never came: geometry");
+	pl_rot_resolve(&hw, 0, 4, &t, &s);
+	CHECK(t == 1 && s == 1, "hardware: the hint's turn and the panel's own layout");
+	pl_rot_resolve(&sw, 3, 2, &t, &s);
+	CHECK(t == 3 && s == 2, "software: geometry is used, not the hint");
+
+	/* What the panel does with it at each turn: a strip at 90 and 270 only. */
+	for (int rot = 0; rot < 8; rot++) {
+		struct pl_rot_hint h = { true, true, rot, 1 };
+
+		pl_rot_resolve(&h, 0, 4, &t, &s);
+		CHECK_EQ(pl_strip_for(t, false), pl_strip_for(rot, false),
+			"under hardware rotation the strip follows the hint");
+	}
+	pl_rot_resolve(&hw, 0, 4, &t, &s);
+	CHECK_EQ(pl_strip_for(t, true), PL_STRIP_NONE, "--edge top wins over the hint");
+}
+
 static void test_strip(void)
 {
 	CHECK_EQ(pl_strip_for(1, false), PL_STRIP_90, "90 is a strip");
@@ -3744,6 +3774,7 @@ int main(void)
 	test_layout();
 	test_layout_bottom();
 	test_strip();
+	test_rot_hint();
 	test_touch();
 	test_popup();
 	test_text_buttons();

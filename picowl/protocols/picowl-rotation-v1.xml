@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="picowl_rotation_v1">
+  <copyright>MIT</copyright>
+
+  <interface name="picowl_rotation_manager_v1" version="1">
+    <description summary="how an output is turned, also by the display">
+      With hardware rotation the display turns the picture, so wl_output
+      tells clients the transform normal and an output that is physically
+      turned looks like an unturned one with swapped sides. A client that
+      cares where the physical top of the device is (a status bar that
+      belongs on the short edge of a portrait panel) asks here. Nothing about
+      wl_output changes; a client that does not bind this sees what it saw
+      before.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager"/>
+    </request>
+
+    <request name="get_rotation">
+      <description summary="get the rotation of an output">
+        The picowl_rotation_v1 sends its first rotation event at once and
+        another one whenever the rotation, who does it or the native
+        subpixel layout of the output changes.
+      </description>
+      <arg name="id" type="new_id" interface="picowl_rotation_v1"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+  </interface>
+
+  <interface name="picowl_rotation_v1" version="1">
+    <description summary="the rotation of one output">
+      Sent for the output of the wl_output given to get_rotation. The
+      wl_output of a removed output gets no events.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the object"/>
+    </request>
+
+    <event name="rotation">
+      <description summary="the rotation of the output">
+        transform is the wl_output.transform value that turns the panel as
+        it is built (its native orientation) into what the user sees: with
+        software rotation the one wl_output.geometry carries, with hardware
+        rotation what that event leaves out. hardware is 1 when the display
+        does the turning, 0 when the compositor does (then wl_output.geometry
+        says the same and this event adds nothing).
+
+        subpixel is the wl_output.subpixel value of the panel in its native
+        orientation, whatever the rotation. wl_output.geometry carries it
+        that way with software rotation and as the client sees it with
+        hardware rotation; this is the one that applies to anything drawn in
+        the panel's own orientation and turned by a buffer transform.
+      </description>
+      <arg name="transform" type="uint"/>
+      <arg name="hardware" type="uint"/>
+      <arg name="subpixel" type="uint"/>
+    </event>
+  </interface>
+</protocol>
