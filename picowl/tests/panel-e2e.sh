@@ -200,7 +200,7 @@ start_panel() {
 	: >"$DIR/$n.out"
 	"$PANEL" --watch "$@" >"$DIR/$n.out" 2>"$DIR/$n.err" &
 	PANELPID=$!
-	wait_for "$DIR/$n.out" '^redraw first' 5 "$n"
+	wait_for "$DIR/$n.out" '^redraw first' "${START_WAIT:-5}" "$n"
 }
 
 # stop_panel NAME: SIGTERM, it must exit 0 within 2 s.
@@ -2054,12 +2054,18 @@ grep -q 'protocol error' "$DIR/w.err" && fail "X: protocol error on a change of 
 # a run of changes leaves nothing behind: the resident size does not grow with
 # the number of changes
 rss_kb() { sed -n 's/^VmRSS:[^0-9]*\([0-9]*\) kB.*/\1/p' /proc/$1/status; }
-x_toggles() { t=""; n=$1; while [ "$n" -gt 0 ]; do t="${t}d203;d0;"; n=$((n - 1)); done; echo "$t"; }
+# the wait between the changes lets each one configure and rebuild, so that a
+# buffer left behind by a real 18 <-> 34 change shows in the resident size
+x_toggles() { t=""; n=$1; while [ "$n" -gt 0 ]; do t="${t}d203;w60;d0;w60;"; n=$((n - 1)); done; echo "$t"; }
+# the first frame is dumped after the inject script has run, which takes a while
+START_WAIT=30
 start_panel x --popup-alpha 255 --inject "$(x_toggles 5)"
 R5=$(rss_kb "$PANELPID")
 stop_panel X
 start_panel x --popup-alpha 255 --inject "$(x_toggles 45)"
 R45=$(rss_kb "$PANELPID")
+START_WAIT=5
+[ "$(grep -c '^redraw \(resize\|look\)$' "$DIR/x.out")" -ge 90 ] || fail "X: $(grep -c '^redraw \(resize\|look\)$' "$DIR/x.out") rebuilds for 90 changes of the look"
 [ "$(x_infos "$DIR/x.err")" = 91 ] || fail "X: $(x_infos "$DIR/x.err") decisions for 45 round trips, wanted 91"
 stop_panel X
 echo "panel-e2e: X resident size after 5 round trips of the look: $R5 kB, after 45: $R45 kB"
