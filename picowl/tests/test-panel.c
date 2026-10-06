@@ -3666,10 +3666,6 @@ static void test_sys(void)
 		exit(2);
 }
 
-/* The strip: the panel on the short side of an output rotated by 90 or 270
- * degrees, drawn in its own orientation and turned by the buffer transform. */
-/* The turn and the panel's layout an output has for the panel: the hint when it
- * says the display turns the output, else geometry. */
 /* ---- the look: style and height from the density ---- */
 
 static struct pl_look look_of(enum pl_styleopt st, int dpi, int height, int w, int h, int mw,
@@ -3806,6 +3802,8 @@ static void test_look(void)
 	CHECK_STR(pl_dpi_src_name(PL_DPI_OVERRIDE), "override", "source name");
 }
 
+/* The turn and the panel's layout an output has for the panel: the hint when it
+ * says the display turns the output, else geometry. */
 static void test_rot_hint(void)
 {
 	struct pl_rot_hint none = { 0 };
@@ -3834,6 +3832,8 @@ static void test_rot_hint(void)
 	CHECK_EQ(pl_strip_for(t, true), PL_STRIP_NONE, "--edge top wins over the hint");
 }
 
+/* The strip: the panel on the short side of an output rotated by 90 or 270
+ * degrees, drawn in its own orientation and turned by the buffer transform. */
 static void test_strip(void)
 {
 	CHECK_EQ(pl_strip_for(1, false), PL_STRIP_90, "90 is a strip");
