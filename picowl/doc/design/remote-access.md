@@ -3,6 +3,8 @@
 **Status:** research and design proposal, nothing implemented. Written from five independent online and source sweeps, a skeptic's check of the decisive claims, and a read of the picowl source. Everything about CPU cost on the PXA255 is an extrapolation (nobody has published zlib, ZRLE or JPEG speeds for an ARMv5 core), and every Bluetooth figure comes from other hardware of the era. Nothing was run on the h2200. The tags [read], [inf] and [unknown] are explained in the first line of the text below.
 
 
+The claim-by-claim evidence, with each source URL and the skeptic's review, is in [remote-access-sources.md](remote-access-sources.md).
+
 Tags: [read] means a sweep read it at the cited URL. [inf] is inference. [unknown] could not be established. The skeptic's corrections are applied. Every CPU figure for the PXA255 is an extrapolation with an error of about 3x or more, because nobody has published zlib, ZRLE, Hextile or JPEG speeds for any ARMv5 core.
 
 ## 0. Corrections to the sweep findings
