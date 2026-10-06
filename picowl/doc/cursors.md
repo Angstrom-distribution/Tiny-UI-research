@@ -1,5 +1,7 @@
 # Picowl Cursor Requirements and Configuration
 
+Reference for the implemented cursor support: the rules every cursor frame must meet, what picowl draws (the tap-and-hold animation and the `wait` and `progress` cursor shapes), the `[cursor]` and `[touch]` keys that control it, the strip format for custom animations, and the `picowl-cursor-convert` tool. The README has a short summary in its [cursor section](../README.md#cursor) and the full key list in its [configuration section](../README.md#configuration). The rules in "Platform Cursor Rules" are enforced in `src/cursorfit.c`; the statements about the mq11xx kernel driver, the MediaQ hardware, wlroots 0.19 and the other boards come from the kernel port and wlroots 0.19.0, not from this repository, and are not verified here.
+
 ## Platform Cursor Rules
 
 Every cursor frame displayed by picowl must comply with hardware cursor constraints to avoid frame commit failures on targets with cursor-plane support.
@@ -15,7 +17,7 @@ Every cursor frame displayed by picowl must comply with hardware cursor constrai
 - The mq11xx kernel driver validating cursor buffers before commit enforces:
   - ARGB8888 format (4 bytes per pixel)
   - Size 1..64 pixels in both dimensions
-  - Fully transparent pixels (alpha `0x00000000`) or fully opaque (alpha `0xff`) — no translucency
+  - Fully transparent pixels (alpha `0x00000000`) or fully opaque (alpha `0xff`); no translucency
   - At most 2 distinct opaque colours per frame (compared at 6 bits per component, i.e. `colour >> 2`)
 - Violations are rejected with `-EINVAL`, which fails the entire output commit and drops the frame
 
@@ -44,7 +46,7 @@ Every picowl cursor frame must satisfy:
 
 ## Picowl Cursor Behaviour
 
-Picowl displays a cursor **only during the tap-and-hold animation**. No cursor is drawn otherwise.
+Picowl displays a cursor **only during the tap-and-hold animation**, and while the client with pointer focus asks for a `wait` or `progress` shape (next section). No cursor is drawn otherwise.
 
 ### Client Cursor Shapes
 
@@ -59,18 +61,18 @@ Requests from clients without pointer focus are dropped; a tablet tool request i
 
 ### Configuration Keys
 
-All cursor configuration lives in the `[cursor]` section of the INI config file (first found of `$XDG_CONFIG_HOME/picowl/picowl.ini`, `~/.config/picowl/picowl.ini`, `/etc/picowl.ini`):
+All cursor configuration lives in the `[cursor]` section of the INI config file (first found of `$XDG_CONFIG_HOME/picowl/picowl.ini`, `~/.config/picowl/picowl.ini`, `/etc/picowl.ini`). Unknown keys in `[cursor]` are silently ignored. An invalid colour logs an error (`Invalid color format: ... (use #RRGGBB)`) and keeps the default. `frame_interval_ms` is read with `atoi`; a value outside `20..1000` logs an error and uses 83. `hold_animation` is not checked when the config is read, only when picowl loads the file at startup.
 
 | Key | Default | Range/Format | Meaning |
 |-----|---------|--------------|---------|
-| `hold_animation` | `builtin` | `builtin` or file path | Animation to display during hold. `builtin` = Pocket PC 2003 rotating circle of circles. File path = PAM or PPM strip of frames. |
+| `hold_animation` | `builtin` (unset) | `builtin` or file path | Animation to display during hold. `builtin` = Pocket PC 2003 rotating circle of circles. File path = PAM or PPM strip of frames. |
 | `fill` | `#2050c0` | `#RRGGBB` | Body colour of every dot in the builtin animation. Compared at 6 bits per component. |
 | `outline` | `#ffffff` | `#RRGGBB` | 1-pixel ring around the lead dot and its two trail dots in the builtin animation. Compared at 6 bits per component. |
 | `frame_interval_ms` | `83` | `20..1000` | Frame duration in milliseconds (~12 fps at default). |
 
 ### Related Touch Configuration
 
-Tap-and-hold timing is configured in the `[touch]` section:
+Tap-and-hold timing is configured in the `[touch]` section. `hold_action` and `hold_button` with an unknown value log an error and keep the default. `hold_delay_ms`, `hold_ms` and `slop_px` are read with `atoi`. If `hold_ms` is not greater than `hold_delay_ms`, an error is logged and both return to their defaults (300 and 900). A `slop_px` outside `0..64` logs an error and returns to 8.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -78,7 +80,7 @@ Tap-and-hold timing is configured in the `[touch]` section:
 | `hold_button` | `right` | `right` (BTN_RIGHT) or `middle` (BTN_MIDDLE, pastes the primary selection in a terminal); unused with `hold_action = none` |
 | `hold_delay_ms` | `300` | Milliseconds before the animation starts |
 | `hold_ms` | `900` | Milliseconds from touch-down to send the click |
-| `slop_px` | `8` | Movement tolerance in pixels; exceeding this cancels the hold |
+| `slop_px` | `8` | Movement tolerance in pixels, `0..64`; exceeding this cancels the hold |
 
 ### Per-App Hold Overrides
 
@@ -88,12 +90,12 @@ You can configure different tap-and-hold behaviour for specific apps and layer-s
 [app.mediaplayer]
 hold_action = none
 
-# built in: picowl ships this rule for the on-screen keyboard
+# built in: picowl ships this rule for the on-screen keyboard (wvkbd) and for the panel
 [layer.wvkbd]
 hold_action = none
 ```
 
-All keys from the table above are available. Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), its three timing keys revert to the `[touch]` values; its `hold_action` and `hold_button` are kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
+picowl ships `hold_action = none` for the layer namespaces `wvkbd` and `panel`: the keyboard times its own long presses and the panel's sliders are dragged, so a hold must not delay their presses or turn a slow drag into a right click. A `[layer.wvkbd]` or `[layer.panel]` section of your own merges over these. All hold keys from the table above are available (the `[app.<app_id>]` sections take further, unrelated keys, see the [README configuration section](../README.md#configuration)). Unset keys inherit from `[touch]`, wherever `[touch]` appears in the file. If a rule's timings are bad (`hold_ms` not greater than `hold_delay_ms`, or `slop_px` outside 0..64), an error is logged and its three timing keys revert to the `[touch]` values; its `hold_action` and `hold_button` are kept. The rule is chosen at touch-down from the surface under the finger and stays fixed until the finger lifts.
 
 `hold_action = none` is useful for apps that time their own long press (e.g. media players): the left press is sent at touch-down, motion is forwarded, and there is no right-click and no hold animation. `hold_delay_ms` has no effect in that mode.
 
@@ -107,7 +109,7 @@ A custom cursor is a horizontal strip of square frames in PAM or PPM format.
 - **PPM:** `P6` binary format, maxval 255
 - **Frame Layout:** Frames are side-by-side horizontally; frame width = strip height (square frames)
 - **Hotspot:** Always the centre of the (possibly cropped) frame; the PAM strip stores no hotspot and it cannot be overridden
-- **Maximum:** 64 frames per strip (width ≤ 4096 pixels for a 64×64 frame)
+- **Maximum:** 64 frames per strip. picowl rejects a strip whose height is over 256 pixels, whose width is not a multiple of its height, or that has more than 64 frames (bad strip geometry, builtin fallback). A frame larger than 64×64 is centre-cropped to 64×64 by the fitting step (see "Runtime Compliance Checking"). A 64×64 frame strip with 64 frames is 4096 pixels wide.
 
 ### Example: Creating a Strip
 
@@ -117,17 +119,17 @@ A 32×32 pixel 8-frame animation as a horizontal strip would be 256 pixels wide 
 
 If a loaded `hold_animation` file is non-compliant:
 - Picowl automatically converts it at load time using the cursorfit library
-- A warning is logged describing what was fixed
+- A line starting `cursor: warning:` is logged, at error level, describing what was fixed
 - If the file cannot be read or is unusable after conversion, picowl falls back to the builtin animation
 
 ## Converting Cursor Images: picowl-cursor-convert
 
-The `picowl-cursor-convert` tool helps create or validate platform-compliant cursor strips. It is part of the picowl build.
+The `picowl-cursor-convert` tool helps create or validate platform-compliant cursor strips. It is built and installed with picowl unless meson is run with `-Dtools=false` (the default is `true`).
 
 ### Command-Line Syntax
 
 ```
-picowl-cursor-convert [--frame-width N] [--fg #rrggbb] [--bg #rrggbb] 
+picowl-cursor-convert [--frame-width N] [--fg #rrggbb] [--bg #rrggbb]
                       [--premultiplied] [--hotspot X,Y] in.pam|ppm out.pam
 
 picowl-cursor-convert --check [--frame-width N] in.pam|ppm
@@ -137,13 +139,14 @@ picowl-cursor-convert --export-builtin [--fg #rrggbb] [--bg #rrggbb] out.pam
 
 ### Options
 
-- `--check`: Validate only; do not write output. Exits 0 if compliant, 1 if non-compliant. Prints one line per frame explaining any violation.
-- `--export-builtin`: Write the built-in Pocket PC 2003 animation as a PAM strip to `out.pam`. Useful as a template for custom animations.
+- `--check`: Validate only; do not write output. Exits 0 if compliant, 1 if non-compliant. Prints one line per frame: `frame N: compliant` or `frame N: non-compliant: <reason>`.
+- `--export-builtin`: Write the built-in Pocket PC 2003 animation as a PAM strip to `out.pam` (8 frames of 32×32, so 256×32). Useful as a template for custom animations. Here `--fg` is the fill colour and `--bg` the outline colour (defaults `#2050c0` and `#ffffff`, the `[cursor]` defaults).
 - `--frame-width N`: Width of each frame in pixels. Default (0) = frame width equals strip height (square frames).
-- `--fg #rrggbb`: Force the first colour (foreground/lead colour in a 2-colour palette) as `#RRGGBB` hex.
-- `--bg #rrggbb`: Force the second colour (background/other colour in a 2-colour palette) as `#RRGGBB` hex.
+- `--fg #rrggbb`: Force the first of the two output colours (the lead colour). Giving `--fg` or `--bg` switches on colour forcing; without either, the two most frequent colours of each frame are kept. The value must be `#` and six hex digits, else the tool exits 2.
+- `--bg #rrggbb`: Force the second of the two output colours. Without `--fg`, the first colour defaults to `#2050c0` and the second to `#ffffff` when only one of the two is given.
 - `--premultiplied`: Input is premultiplied alpha (divide RGB by alpha before processing).
-- `--hotspot X,Y`: Accepted but currently ignored: no hotspot is stored in the PAM strip and picowl always uses the frame centre.
+- `--hotspot X,Y`: Accepted but ignored: no hotspot is stored in the PAM strip and picowl always uses the frame centre.
+- `--help`, `-h`: Print the usage to stderr and exit 2.
 
 ### Exit Codes
 
@@ -153,7 +156,7 @@ picowl-cursor-convert --export-builtin [--fg #rrggbb] [--bg #rrggbb] out.pam
 
 ### Output Report
 
-When writing `out.pam`, picowl-cursor-convert prints one `frame N: WxH ...` line per frame, either `(already compliant)` or the counters `alpha_clipped`, `colours_merged`, `cropped_to_WxH`, `remapped_pixels`, `input_colours`, then `wrote <out>: N frames`. There is no separate warning output.
+When writing `out.pam`, picowl-cursor-convert prints one `frame N: WxH ...` line per frame, either `(already compliant)` or the counters `alpha_clipped`, `colours_merged`, `cropped_to_WxH`, `remapped_pixels`, `input_colours`, then `wrote <out>: N frames`. Each fitted frame is placed centred in a square cell of the size of frame 0, so the output strip stays square-celled. There is no separate warning output.
 
 ### Examples
 
@@ -232,8 +235,8 @@ At startup, picowl loads the configured `hold_animation` file:
    - If non-compliant, run cursorfit's fitting algorithm:
      - Alpha threshold: alpha ≥ 128 → opaque (0xff), else → transparent (0x00000000)
      - Resize: Centre-crop to 64×64 if needed; adjust hotspot
-     - Colour reduction: Keep the two most-frequent 6-bit-quantised colours; map all opaque pixels to the nearest one
-3. **Logging:** If any frame was fixed, log a warning with the changes made
+     - Colour reduction: Keep the two most-frequent 6-bit-quantised colours (if only one dominates, the second is chosen by splitting on luminance); map all opaque pixels to the nearer one in RGB distance
+3. **Logging:** If any frame was fixed, log a warning (at error level) with the changes made
 4. **Fallback:** If the file is unreadable or no frames can be extracted, fall back to the builtin animation
 
 ## Built-in Animation: Pocket PC 2003 Rotating Circle

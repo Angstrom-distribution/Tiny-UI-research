@@ -1,12 +1,12 @@
 # picowl-buffer-v1: client reference
 
-This is how a client uses picowl's compositor-allocated buffers. The protocol itself is `protocols/picowl-buffer-v1.xml`. The design (direct scanout, copy-type outputs, hardware rotation, memory tuning, wlroots patches) and the hardware-only checklist are in [zero-copy.md](zero-copy.md).
+Client reference for picowl's compositor-allocated buffers, as implemented (both interfaces at version 2). The protocol itself is `protocols/picowl-buffer-v1.xml`; the README lists it in its [protocol section](../README.md#protocols) and the `[zerocopy]` keys in its [configuration section](../README.md#configuration). The compositor side (direct scanout, copy-type outputs, hardware rotation, memory tuning, wlroots patches) and the hardware-only checklist are in [zero-copy.md](zero-copy.md).
 
 ## Why it exists
 
 - **No render node:** the iPAQ DRM drivers expose `/dev/dri/card0` but no `/dev/dri/renderD*`. Clients therefore can't allocate dumb buffers themselves.
 - **The compositor allocates instead:** picowl creates an RGB565 dumb buffer, PRIME-exports it, and hands the client the dmabuf. A full-screen client can then be scanned out directly with no compositor copy.
-- **Single buffering on copy-type drivers:** on mq11xx, w100 and sa1100-lcdc, the kernel copies the damage out during the commit. Once picowl tells the client that copy has happened (`copied`), the client may redraw into the same buffer.
+- **Single buffering on copy-type drivers:** on mq11xx, w100 and sa1100-lcdc (and the other driver names in `pw_copytype_driver`, see [zero-copy.md](zero-copy.md)), the kernel copies the damage out during the commit. Once picowl tells the client that copy has happened (`copied`), the client may redraw into the same buffer.
 
 ## Flow
 
@@ -21,23 +21,23 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
    | reason | value |
    |---|---|
    | `unsupported_format` | 0 |
-   | `too_large` | 1 |
-   | `no_memory` | 2 |
+   | `too_large` | 1 (width or height of 0 or below, or above the width or height of the largest output; the check is on the current output size, not on the other orientation) |
+   | `no_memory` | 2 (over a limit, or the allocation failed) |
    | `no_drm` | 3 (reserved, never sent: with no DRM device the manager global is simply not advertised) |
 
-   **Limits** are compositor policy (`[zerocopy]` and `[app.<app_id>]` in `picowl.ini`, see the README). By default a client may hold 3 buffers and all clients share 2 MiB. An app with a rule can get more, for example 7 for a media player. Over a limit you get `failed(no_memory)`; destroy that object. Don't assume a count: request what you want, stop at the first `failed`, and use what was granted.
+   **Limits** are compositor policy (`[zerocopy]` and `[app.<app_id>]` in `picowl.ini`, see the README). By default a client may hold 3 buffers and all clients without an `[app.*]` buffer rule share a 2 MiB pool. An app with a rule can get more, for example 7 for a media player. Over a limit you get `failed(no_memory)`; destroy that object. Don't assume a count: request what you want, stop at the first `failed`, and use what was granted.
 
    **Set the `app_id` first.** The compositor picks the limits by the `xdg_toplevel` app_id at the time of `create_buffer`, so call `xdg_toplevel.set_app_id` before it (a commit is not needed). Buffers created earlier stay under the default limits.
 3. **Wrap the buffer:**
    - `mmap` the fd for drawing.
-   - Wrap it as a `wl_buffer` with `zwp_linux_dmabuf_v1`: `create_params`, `add` with the fd, offset, stride and modifier, then `create_immed` with the same size and format.
+   - Wrap it as a `wl_buffer` with `zwp_linux_dmabuf_v1`: `create_params`, `add` with the fd, offset, stride and modifier, then `create_immed` with the same size and format. picowl's linux-dmabuf check accepts only a single-plane RGB565 buffer with a LINEAR or INVALID modifier, a stride of at least width times 2, stride and offset multiples of 4, and both sides at most the larger side of the largest output (either orientation); anything else is refused at import.
 4. **`attach_surface(wl_surface)`** on the buffer object. Commits of that surface are numbered from 1 (uint32, wrapping, 0 skipped).
 5. **Draw, attach and commit as usual.** Exactly one of these events answers each commit, unless a newer commit supersedes it first:
 
    | Event | Meaning | What the client does |
    |---|---|---|
-   | `copied(serial)` | All commits up to `serial` were shown by direct scanout on a copy-type output and have been copied to device memory | Draw the next frame into the **same** buffer; don't wait for `wl_buffer.release` |
-   | `retained(serial)` | The commit was composited, occluded, off-output, on a scanout-type output, or the output is blanked; picowl keeps reading it | Don't touch this buffer. Draw the next frame into a second buffer (create it on demand) and wait for `wl_buffer.release` on this one, as with any Wayland buffer |
+   | `copied(serial)` | All commits up to `serial` were shown by direct scanout on a copy-type output (the only enabled output) and have been copied to device memory | Draw the next frame into the **same** buffer; don't wait for `wl_buffer.release` |
+   | `retained(serial)` | The commit was composited, occluded, off-output, on a scanout-type output, shown by more than one enabled output, or the output is blanked; picowl keeps reading it | Don't touch this buffer. Draw the next frame into a second buffer (create it on demand) and wait for `wl_buffer.release` on this one, as with any Wayland buffer |
 
 **Always commit complete frames.** picowl takes no snapshot. If a direct-scanned surface later has to be composited before your next commit, for example because a popup, the software cursor or the OSK appears over it, the last committed buffer is re-read for that region.
 
@@ -55,4 +55,4 @@ This is how a client uses picowl's compositor-allocated buffers. The protocol it
 ## Status
 
 - **Built and tested here:** compile and unit tests (`copyrel`, `copytype`, `zbquota`), the bind events and the version gating (`bufproto`: in-process client over a socketpair, and `pw-test-client` at version 2 and forced to version 1 against a version 2 and a version 1 server), plus the wl_shm fallback in the headless smoke test.
-- **Hardware-only:** everything involving a real DRM device, i.e. allocation, direct scanout, `copied`/`retained` timing and the kernel copy. This container and CI have no `/dev/dri`. The checks to run on an iPAQ are listed in [zero-copy.md](zero-copy.md), section "Hardware-only checklist".
+- **Hardware-only, not run on any board:** everything involving a real DRM device, i.e. allocation, direct scanout, `copied`/`retained` timing and the kernel copy. The headless tests have no `/dev/dri`, and no document in this repository records a run of this protocol on a board (the h2200 measurements in [rotation-results.md](rotation-results.md) used `picowl-commit-loop`, which is not a picowl-buffer-v1 client). The checks to run on a board are listed in [zero-copy.md](zero-copy.md), section "Hardware-only checklist".

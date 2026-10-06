@@ -1,8 +1,10 @@
 # DRM lease
 
-picowl offers its DRM output through `wp_drm_lease_device_v1` (wlroots `wlr_drm_lease_v1`). The media player (`--vo drm:lease`) gets a DRM fd for the connector, its CRTC and planes, and drives KMS directly: the hardware paths a Wayland client cannot reach (the hx4700 YUV overlay, MediaQ C8 and pixel doubling, GC0C tear-free flips). There is no VT switch. picowl keeps its session, its input and its power policy, and takes the output back as soon as the lease ends. The design and the reasoning are in `doc/design/drm-lease.md`; the player side is §3.2 of `doc/mediaplayer-integration.md`.
+Reference for the implemented DRM lease, with a hardware checklist at the end. The picowl side is implemented and unit-tested. It has not been run on a board, and the vkms end-to-end test (`lease-vkms`) is opt-in and has no recorded run (see the Status line of [design/drm-lease.md](design/drm-lease.md)), so everything the checklist lists is still to be verified. The player side (`--vo drm:lease`) is not in this repository. The README lists the `[lease]` keys in its [configuration section](../README.md#configuration) and the global in its [protocol list](../README.md#protocols).
 
-Source: `src/lease.c` (protocol glue, state), `src/leasepolicy.c` (pure grant and key policy), hooks in `output.c`, `input.c`, `view.c`, `power.c`, and patch 0004 of wlroots (`subprojects/packagefiles/wlroots/README.md`).
+picowl offers its DRM output through `wp_drm_lease_device_v1` (wlroots `wlr_drm_lease_v1`). The media player (`--vo drm:lease`) gets a DRM fd for the connector, its CRTC and planes, and drives KMS directly: the hardware paths a Wayland client cannot reach (the hx4700 YUV overlay, MediaQ C8 and pixel doubling, GC0C tear-free flips). There is no VT switch. picowl keeps its session, its input and its power policy, and takes the output back as soon as the lease ends. The design and the reasoning are in [design/drm-lease.md](design/drm-lease.md); the player side is §3.2 of [mediaplayer-integration.md](mediaplayer-integration.md).
+
+Source: `src/lease.c` (protocol glue, state), `src/leasepolicy.c` (pure grant and key policy), hooks in `output.c`, `input.c`, `view.c`, `power.c`, and patch 0004 of wlroots (`subprojects/packagefiles/wlroots/0004-drm-lease-overlay-planes.patch`, described in `subprojects/packagefiles/wlroots/README.md`).
 
 ## Configuration
 
@@ -14,17 +16,19 @@ enable = true
 allow = mediaplayer
 ```
 
-`enable = false` creates no global, so no client gets a DRM fd. `allow` is a comma-separated list; blanks around entries are ignored, `*` accepts any focused client, an empty value rejects every request. The global exists only with the DRM backend (not headless or nested) and when the user can open the card as a non-master (the `video` group, `data/picowl.service`); picowl logs `lease: no DRM backend, disabled` otherwise.
+Both keys have these defaults when unset. `enable` takes yes/no, true/false, 1/0 or on/off; other text logs an error and keeps `true`. Unknown keys in `[lease]` log an error. `enable = false` creates no global, so no client gets a DRM fd (log: `lease: disabled by config`). `allow` is a comma-separated list; blanks around entries are ignored, `*` accepts any focused client, an empty value rejects every request. The global exists only with the DRM backend (not headless or nested) and when the user can open the card as a non-master (the `video` group, `data/picowl.service`); picowl logs `lease: no DRM backend, disabled` otherwise. When the global is created it logs `lease: wp_drm_lease_device_v1 offered, allow '<list>'`.
 
 ## Who may lease
 
-picowl grants a request only when all of these hold. Otherwise it rejects (the client gets `finished`) and logs `lease: rejected (reason)`.
+picowl grants a request only when all of these hold. Otherwise it rejects (the client gets `finished`) and logs `lease: rejected (reason)`. The checks run in this order, with the reasons `leasing disabled`, `already leased`, `session inactive`, `exclusive keyboard focus`, `requester is not the focused client` and `app_id not allowed`; the connector check logs `lease: rejected (the request must name one active output)`.
 
 1. `[lease] enable` is set and no lease is active (one output, one lease).
 2. The session is active (the kernel lease needs DRM master).
 3. No layer surface holds exclusive keyboard focus (a lease must not bypass a lock surface).
 4. The requester owns the focused, mapped toplevel, and that toplevel's `app_id` is in `allow`.
 5. The request names exactly one connector, and picowl has that output.
+
+A granted request logs `lease: granting NAME (WxH) to 'app_id'`. If the screen is blanked, picowl unblanks it first; when it cannot, it rejects with `lease: rejected (cannot unblank the output)`.
 
 The player therefore maps a fullscreen toplevel with `app_id = "mediaplayer"` first, for example one `wp_single_pixel_buffer` scaled with a viewport, and waits for the `activated` state before it submits the request.
 
@@ -40,10 +44,10 @@ picowl has no outputs (wlroots destroys the `wlr_output` and creates it again wh
 
 | What | Behaviour |
 |---|---|
-| Power | Dimming and blanking are held (`PW_INHIBIT_LEASE`, see `doc/power.md`). A blanked screen is unblanked before the grant. Normal timeouts restart from the end of the lease |
+| Power | Dimming and blanking are held (`PW_INHIBIT_LEASE`, see [power.md](power.md)). A blanked screen is unblanked before the grant. Normal timeouts restart from the end of the lease |
 | Keyboard | Unchanged: the lessee's toplevel keeps the focus and gets the keys |
-| Keybindings | `blank` (the power key), `cycle`, `spawn`, `panel`, `osk`: end the lease first, then run. `close` and `quit` run as usual (the lease ends with the client or the compositor). `rotate` is ignored: the player owns scanout |
-| Touch | Every touch device is mapped to the region `{0,0,W,H}` in panel-native mode pixels and gets its default calibration matrix, so the player receives pointer coordinates in the frame its KMS code renders in, on hardware- and software-rotation boards alike. The lessee's toplevel is the target. Tap-and-hold follows the lessee's `[app.<app_id>]` hold settings (`BTN_RIGHT` by default, nothing with `hold_action = none`), without the animation. A blanked screen that cannot be unblanked rejects the lease |
+| Keybindings | `blank` (the power key), `cycle`, `spawn`, `panel`, `osk`: end the lease first, then run. `close` and `quit` run as usual (the lease ends with the client or the compositor). `rotate` is dropped (log: `lease: key action dropped while leased`): the player owns scanout |
+| Touch | Every touch device is mapped to the region `{0,0,W,H}` in panel-native mode pixels and gets its default calibration matrix, so the player receives pointer coordinates in the frame its KMS code renders in, on hardware- and software-rotation boards alike. The lessee's toplevel is the target. Tap-and-hold follows the lessee's `[app.<app_id>]` hold settings (`BTN_RIGHT` by default, nothing with `hold_action = none`), without the animation. |
 | Focus | New toplevels and activation requests (xdg-activation, foreign-toplevel) do not take the focus. New toplevels stack behind the lessee, so a pop-up does not end playback |
 | Views and panel | No configures go out. The panel's layer surface is closed with the output, as after a VT switch; it re-creates its surface on the next `wl_output` |
 | Lessee unmaps or is destroyed | picowl revokes |
@@ -76,7 +80,7 @@ When the lease ends, wlroots emits `new_output`; `output_new` applies the hardwa
 - `smoke` (headless): the log line `lease: no DRM backend, disabled`, and `pw-test-client --expect-no-global wp_drm_lease_device_v1`. This covers the NULL manager and the teardown.
 - `lease-vkms` (suite `vkms`, opt-in with `PW_LEASE_VKMS=1`, needs root and the `vkms` module, skips with exit 77 otherwise): `tests/lease-vkms.sh` with `tests/pw-lease-client.c` runs picowl on a vkms card and checks the rejection, a normal lease cycle, `kill -9` of the lessee and the close-fd-only case, and the contents of the lease. Build picowl and wlroots with ASan to also check the grant fix of patch 0004.
 
-Hardware checklist (h2210, h5550, hx4700, h3870, h3970), with `-d 3`:
+Hardware checklist (h2210, h5550, hx4700, h3870, h3970), with `-d 3`. None of these has been run on a board; the h2200 results in [rotation-results.md](rotation-results.md) do not cover leases.
 
 - [ ] `lease: offering <output>` at start and after every re-create.
 - [ ] `mediaplayer --vo drm:lease` gets the fd; `drmModeGetLease` lists the expected objects (on the hx4700 the overlay too).

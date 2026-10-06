@@ -1,6 +1,6 @@
 # Power Management and Backlight Dimming
 
-Power-aware idle timeout and screen blanking for embedded handhelds. Behaviour is controlled by power profile (AC, BATTERY, LOW) selected from sysfs power supply, with per-profile dim and blank timeouts. Dimming writes the backlight via sysfs `/sys/class/backlight/` without heap allocations.
+Reference for the implemented power management: the idle state machine (dim, blank), the power profiles (AC, BATTERY, LOW) chosen from the sysfs power supply, idle inhibit, backlight handling, and the configuration keys of `[power]` and `[power.*]` (all of them are parsed in `src/config.c`). It ends with a hardware checklist. The README lists the keys in its [configuration section](../README.md#configuration); the idle-inhibit design record is [design/idle-inhibit.md](design/idle-inhibit.md). The backlight is written through sysfs (`/sys/class/backlight/`) with no heap allocation in the write path.
 
 ## State Machine: ACTIVE, DIMMED, BLANKED
 
@@ -27,11 +27,11 @@ Profiles: AC, BATTERY, LOW. Read from sysfs `/sys/class/power_supply/`. Rule:
 - **BATTERY**: neither AC nor LOW
 - **No readable supplies**: defaults to BATTERY
 
-Profiles switch on kernel uevent (immediate) or fallback sysfs poll (every `poll_s` seconds). Each profile has its own `[power.ac]`, `[power.battery]`, `[power.low]` timings.
+Profiles switch on a kernel uevent with `SUBSYSTEM=power_supply` (immediate) or on the fallback sysfs poll (every `poll_s` seconds). The log line is `power profile N -> M`, with the profile as a number (0 AC, 1 BATTERY, 2 LOW; see `src/powersupply.h`). Each profile has its own `[power.ac]`, `[power.battery]`, `[power.low]` timings.
 
 ## Configuration Keys
 
-All keys are in `data/picowl.ini.example`. Out-of-range values log a warning and fall back to the default.
+All keys are in `data/picowl.ini.example`. The numeric keys are read with `atoi`, so text that is not a number reads as 0. A value outside the range logs one line at INFO level and keeps the default (the key is not applied). Unknown keys in `[power]` are silently ignored. Unknown keys in `[power.ac]`, `[power.battery]` and `[power.low]` log an error (`Unknown key in [power.<profile>]: <key>`), and so does an unknown profile section (`Unknown power profile: [power.<name>]`). `max_brightness_pct` is valid only in `[power.low]`; in the other two profiles it is an unknown key.
 
 ### [power] Section (Main Settings)
 
@@ -75,7 +75,7 @@ Active when no AC and battery capacity <= `low_capacity`.
 
 ## Idle inhibit
 
-picowl offers `zwp_idle_inhibit_manager_v1` (version 1, from wlroots). A video player creates an inhibitor on its toplevel surface while it plays. While at least one inhibitor counts, picowl stops its dim and blank timers; nothing wakes up during playback. The same result goes to `ext_idle_notifier_v1` clients, which are told the compositor is inhibited (version 2 `get_input_idle_notification` objects ignore inhibitors by protocol).
+picowl offers `zwp_idle_inhibit_manager_v1` (version 1, from wlroots). A video player creates an inhibitor on its toplevel surface while it plays. While at least one inhibitor counts, picowl stops its dim and blank timers; nothing wakes up during playback. The same result goes to `ext_idle_notifier_v1` clients, which are told the compositor is inhibited (version 2 `get_input_idle_notification` objects ignore inhibitors by protocol; from the protocol text, not verified here).
 
 An inhibitor counts only while its surface is visible. picowl does not compute occlusion; it uses its stacking rules. Popups and subsurfaces count with the surface they belong to (at most 8 levels).
 
@@ -106,15 +106,18 @@ Any client can keep the screen on while its surface is visible, as on other Wayl
 
 **Session inactive.** While another program owns the display on another VT (for example `mediaplayer-drm`), picowl's session is inactive: it gets no input, and its dim timer would otherwise write the sysfs backlight under the other program's video. `power.c` listens to the session `active` signal and holds the timers (reason `PW_INHIBIT_SESSION`) while the session is inactive; they restart from the moment it becomes active again. This reason ignores the `inhibit` key. There is no session on the headless backend.
 
-**DRM lease.** While the display is leased to the media player (`doc/lease.md`), picowl has no outputs and nothing it does with the timers would be visible, but the backlight is still its to write. `lease.c` holds the timers with reason `PW_INHIBIT_LEASE` from the grant to the end of the lease, so a film longer than `blank_after_s` is not dimmed. Like `PW_INHIBIT_SESSION` it ignores the `inhibit` key. A DIMMED screen is undimmed when the lease starts. A BLANKED one is unblanked first (`pw_power_set_blanked(false)` before the grant), because the player modesets the display and an inhibitor alone never unblanks. Input is not swallowed under the lease. The timers restart from the end of the lease. The power key ends the lease and then blanks.
+**DRM lease.** While the display is leased to the media player ([lease.md](lease.md)), picowl has no outputs and nothing it does with the timers would be visible, but the backlight is still its to write. `lease.c` holds the timers with reason `PW_INHIBIT_LEASE` from the grant to the end of the lease, so a film longer than `blank_after_s` is not dimmed. Like `PW_INHIBIT_SESSION` it ignores the `inhibit` key. A DIMMED screen is undimmed when the lease starts. A BLANKED one is unblanked first (`pw_power_set_blanked(false)` before the grant), because the player modesets the display and an inhibitor alone never unblanks. Input is not swallowed under the lease. The timers restart from the end of the lease. The power key ends the lease and then blanks.
 
-### Legacy [idle] Section (Deprecated)
+### Legacy keys (deprecated)
 
-For backwards compatibility:
+Two keys from before the power profiles still work:
 
 | Key | Meaning |
 |-----|---------|
-| `timeout_ms` | Milliseconds before blank. If no `[power.*] blank_after_s` is set, converted to seconds and applied to all profiles |
+| `[idle] timeout_ms` | Milliseconds of inactivity before blanking, read with `atoi` |
+| `[core] idle_timeout_ms` | The same, under its older name |
+
+The value applies to `blank_after_s` of all three profiles, rounded up to whole seconds (0 stays 0, the result is clamped to 86400), and only when no `[power.*] blank_after_s` was set in the file. It does not touch `dim_after_s`. The log line is `Applying legacy idle timeout N ms as blank_after_s=S for all profiles`. If both legacy keys are present, the one read last wins. Without either key the profile defaults above apply.
 
 ## Backlight Selection and Behaviour
 
@@ -170,7 +173,7 @@ Don't run picowl as root or give it `CAP_DAC_OVERRIDE` just for the backlight.
 
 ## Per-board notes
 
-Facts below are from the kernel port's per-board hardware notes (`h2200.md`, `h3800.md`, `h39xx.md`, `h5xxx.md`, `hx4700.md`), which are not in this repo and are not verified here. Backlight device names depend on the DTS; `backlight = auto` picks the device by type, so you rarely need a name. None of the boards has been tested with this code yet.
+Facts below are from the kernel port's per-board hardware notes (`h2200.md`, `h3800.md`, `h39xx.md`, `h5xxx.md`, `hx4700.md`), which are not in this repository. They are not verified here (not verified). Backlight device names depend on the DTS; `backlight = auto` picks the device by type, so you rarely need a name. No document in this repository records a run of this power code on any of these boards; the h2200 measurements in [rotation-results.md](rotation-results.md) cover rotation only.
 
 | Board | SoC / display | Power-supply data | Backlight | Dimming |
 |---|---|---|---|---|
@@ -189,16 +192,16 @@ Things to verify on each board:
 
 `meson test -C build` covers this feature with:
 - **`backlight`, `powersupply` and `dim` unit tests**, using fake sysfs trees and an injected clock (`backlight` includes the adoption of a level written by another process);
-- **the config parser test**, including the `[power*]` keys, the legacy `[idle] timeout_ms` to `blank_after_s` mapping (rounded up, ignored when any `[power.*] blank_after_s` is set) and the `[core]` alias;
+- **the config parser test**, including the `[power*]` keys, the legacy `[idle] timeout_ms` to `blank_after_s` mapping (rounded up, ignored when any `[power.*] blank_after_s` is set) and the `[core] idle_timeout_ms` alias;
 - **`power-e2e`**: headless picowl against a fake sysfs tree (`PICOWL_SYSFS_ROOT`). On the AC profile it checks that the real event loop dims the backlight from 40 to 12 after 1 s. On the LOW profile it checks that the startup brightness cap is applied (40 to 25). With the test client (`--inhibit`, `--linger S`) it also checks that a visible inhibitor holds dimming and the timers restart on release, that an inhibitor behind the focused window does not count, and that `[power.low] inhibit = no` is honoured. A level written by another process while ACTIVE is dimmed as a percentage of that level and restored at exit, and it is also kept when picowl exits before any dim. `smoke` checks the inhibit log lines.
 
-The `dim` unit test covers `pw_dim_set_inhibited()` in every state, and the unblank, hold and release sequence of a lease.
+The `dim` unit test covers `pw_dim_set_inhibited()` in every state, and the unblank, hold and release sequence of a lease. The `power-e2e` script also covers a crash while dimmed: the restarted picowl takes the user level from the state file in `$XDG_RUNTIME_DIR` and restores it on a clean exit.
 
 The headless backend has no input devices, so restore on input isn't covered end to end; the `dim` unit test covers it. Uevent delivery isn't covered either; the parser is unit-tested on canned messages.
 
-On hardware, run `picowl -d 3` and check:
+Hardware checklist. None of these steps has a recorded run on a board in this repository. Run `picowl -d 3` and check:
 1. The startup line `power: profile N, backlight NAME, dim … ms, blank … ms`.
-2. Plugging and unplugging AC logs `power profile A -> B`.
+2. Plugging and unplugging AC logs `power profile N -> M`.
 3. The backlight dims after `dim_after_s`, a tap restores it and is delivered to the app, and the screen blanks after `blank_after_s`.
 4. Idle inhibit, with the player: `idle inhibit on (app_id mediaplayer)` when playback starts and no dim or blank for longer than `blank_after_s`; `idle inhibit off` on pause, and the screen dims `dim_after_s` after the pause, not at once. The power key blanks during playback and unblanks again, and the screen then stays on. A tap while blanked is swallowed. Alt-tab to another app dims after `dim_after_s`. `kill -9` of the player releases the hold. With `[power.low] inhibit = no`, crossing `low_capacity` lets the screen dim.
 5. On the h5550 (on/off backlight) playback longer than `blank_after_s` does not blank.
