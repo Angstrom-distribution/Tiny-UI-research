@@ -3666,12 +3666,84 @@ static void test_sys(void)
 		exit(2);
 }
 
+/* The strip: the panel on the short side of an output rotated by 90 or 270
+ * degrees, drawn in its own orientation and turned by the buffer transform. */
+static void test_strip(void)
+{
+	CHECK_EQ(pl_strip_for(1, false), PL_STRIP_90, "90 is a strip");
+	CHECK_EQ(pl_strip_for(3, false), PL_STRIP_270, "270 is a strip");
+	for (int t = 0; t < 8; t++)
+		if (t != 1 && t != 3)
+			CHECK_EQ(pl_strip_for(t, false), PL_STRIP_NONE,
+				"normal, 180 and the flipped transforms keep the bar on the top");
+	CHECK_EQ(pl_strip_for(1, true), PL_STRIP_NONE, "--edge top at 90");
+	CHECK_EQ(pl_strip_for(3, true), PL_STRIP_NONE, "--edge top at 270");
+	CHECK_EQ(pl_strip_for(-1, false), PL_STRIP_NONE, "a bad transform is none");
+
+	CHECK_EQ(pl_edge_for(PL_STRIP_NONE, false), PL_EDGE_TOP, "top edge");
+	CHECK_EQ(pl_edge_for(PL_STRIP_NONE, true), PL_EDGE_BOTTOM, "bottom edge");
+	CHECK_EQ(pl_edge_for(PL_STRIP_90, false), PL_EDGE_RIGHT, "physical top at 90");
+	CHECK_EQ(pl_edge_for(PL_STRIP_270, false), PL_EDGE_LEFT, "physical top at 270");
+	CHECK_EQ(pl_edge_for(PL_STRIP_90, true), PL_EDGE_LEFT, "physical bottom at 90");
+	CHECK_EQ(pl_edge_for(PL_STRIP_270, true), PL_EDGE_RIGHT, "physical bottom at 270");
+
+	int bw, bh;
+	pl_strip_buffer_size(PL_STRIP_NONE, 240, 54, &bw, &bh);
+	CHECK(bw == 240 && bh == 54, "no strip: the buffer is the surface");
+	pl_strip_buffer_size(PL_STRIP_90, 54, 240, &bw, &bh);
+	CHECK(bw == 240 && bh == 54, "a strip: the axes change places");
+	pl_strip_buffer_size(PL_STRIP_270, 18, 240, &bw, &bh);
+	CHECK(bw == 240 && bh == 18, "a strip of 270: the axes change places");
+
+	/* Every pixel of the buffer is one pixel of the surface and back, and the
+	 * rectangle of a pixel is the pixel's place, in both turns. */
+	for (int strip = PL_STRIP_90; strip <= PL_STRIP_270; strip += 2) {
+		bool all = true, in = true;
+		for (int y = 0; y < 54; y++)
+			for (int x = 0; x < 240; x++) {
+				struct pl_rect r = pl_rect_to_surface(strip,
+					(struct pl_rect){ x, y, 1, 1 }, 240, 54);
+				int bx, by;
+				pl_point_to_buffer(strip, r.x, r.y, 240, 54, &bx, &by);
+				all = all && r.w == 1 && r.h == 1 && bx == x && by == y;
+				in = in && r.x >= 0 && r.y >= 0 && r.x < 54 && r.y < 240;
+			}
+		CHECK(all, "a pixel of the buffer maps to one pixel of the surface and back");
+		CHECK(in, "the pixels of the buffer land inside the surface");
+	}
+
+	/* The bar of the buffer is its first rows: the surface's columns next to
+	 * the edge, with the row inward of them. */
+	struct pl_rect bar = { 0, 0, 240, 18 }, row = { 0, 18, 240, 36 };
+	struct pl_rect a = pl_rect_to_surface(PL_STRIP_90, bar, 240, 54);
+	CHECK(a.x == 36 && a.y == 0 && a.w == 18 && a.h == 240, "90: the bar is the right 18 columns");
+	a = pl_rect_to_surface(PL_STRIP_90, row, 240, 54);
+	CHECK(a.x == 0 && a.y == 0 && a.w == 36 && a.h == 240, "90: the row is inward of the bar");
+	a = pl_rect_to_surface(PL_STRIP_270, bar, 240, 54);
+	CHECK(a.x == 0 && a.y == 0 && a.w == 18 && a.h == 240, "270: the bar is the left 18 columns");
+	a = pl_rect_to_surface(PL_STRIP_270, row, 240, 54);
+	CHECK(a.x == 18 && a.y == 0 && a.w == 36 && a.h == 240, "270: the row is inward of the bar");
+	a = pl_rect_to_surface(PL_STRIP_NONE, row, 240, 54);
+	CHECK(a.x == 0 && a.y == 18 && a.w == 240 && a.h == 36, "no strip: a rectangle is left as it is");
+
+	/* The left end of the bar (the clock) is at the top of the strip at 90 and
+	 * at the bottom at 270. */
+	int bx, by;
+	pl_point_to_buffer(PL_STRIP_90, 50, 0, 240, 54, &bx, &by);
+	CHECK(bx == 0 && by == 3, "90: the top of the strip is the left of the bar");
+	pl_point_to_buffer(PL_STRIP_270, 3, 239, 240, 54, &bx, &by);
+	CHECK(bx == 0 && by == 3, "270: the bottom of the strip is the left of the bar");
+	pl_point_to_buffer(PL_STRIP_NONE, 7, 9, 240, 54, &bx, &by);
+	CHECK(bx == 7 && by == 9, "no strip: a point is left as it is");
+}
+
 int main(void)
 {
 	printf("test-panel: unit tests\n");
 	test_mapping();
 	test_layout();
 	test_layout_bottom();
+	test_strip();
 	test_touch();
 	test_popup();
 	test_text_buttons();

@@ -68,6 +68,7 @@ struct panel {
 	enum pl_subopt subopt;
 	bool crisp;		/* --style crisp: pixel fonts and whole-pixel shapes */
 	enum pl_crisp_font crisp_font;	/* --crisp-font */
+	bool edge_top;		/* --edge top: the bar stays on a top edge when rotated */
 	int battery_mah;	/* capacity given by the user, 0 unknown */
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
@@ -93,7 +94,13 @@ struct panel {
 	bool shm_565;
 	bool configured, closed, need_buffer, first;
 	int cfg_w, cfg_h;
-	int req_h;		/* the surface height last asked for */
+	int req_h;		/* the surface thickness (bar and row) last asked for */
+	/* The strip: on an output rotated by 90 or 270 degrees the bar is on the
+	 * short side, drawn in the panel's own orientation and turned by the
+	 * buffer transform. strip is what the output calls for now, req_strip what
+	 * the compositor was asked for and buf_strip the transform of the buffer
+	 * that is attached, which changes only together with the buffer. */
+	enum pl_strip strip, req_strip, buf_strip;
 
 	/* the single buffer */
 	struct wl_buffer *buffer;
@@ -183,6 +190,7 @@ static void commit(struct panel *p)
 {
 	if (!p->buffer)
 		return;
+	wl_surface_set_buffer_transform(p->surface, p->buf_strip);
 	wl_surface_attach(p->surface, p->buffer, 0, 0);
 	for (int i = 0; i < p->n_dmg; i++)
 		wl_surface_damage_buffer(p->surface, p->dmg[i].x, p->dmg[i].y,
@@ -191,18 +199,53 @@ static void commit(struct panel *p)
 	wl_surface_commit(p->surface);
 }
 
-/* Ask for the surface the open or closed row needs. The exclusive zone is
- * never touched: the bar keeps its strip, the row only covers windows. Done
- * after a pending configure has been answered with its buffer, so that a
- * commit never carries an acknowledged size and a buffer of another one. */
+static uint32_t anchor_for(enum pl_strip strip, bool bottom)
+{
+	switch (pl_edge_for(strip, bottom)) {
+	case PL_EDGE_BOTTOM:
+		return ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+	case PL_EDGE_LEFT:
+		return ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+	case PL_EDGE_RIGHT:
+		return ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT | ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+	default:
+		return ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+	}
+}
+
+/* State for a surface of the given thickness (bar and row) in the current
+ * mode: along the edge the compositor decides (size 0), so the bar spans the
+ * short side of a rotated output. The anchor is sent only when the mode
+ * changes, the exclusive zone never. */
+static void request_surface(struct panel *p, int want)
+{
+	if (p->strip != p->req_strip || !p->req_h)
+		zwlr_layer_surface_v1_set_anchor(p->ls, anchor_for(p->strip, p->bottom));
+	p->req_h = want;
+	p->req_strip = p->strip;
+	if (p->strip != PL_STRIP_NONE)
+		zwlr_layer_surface_v1_set_size(p->ls, want, 0);
+	else
+		zwlr_layer_surface_v1_set_size(p->ls, 0, want);
+}
+
+/* Ask for the surface the open or closed row needs, or for the other edge
+ * when the output was rotated. The exclusive zone is never touched: the bar
+ * keeps its strip, the row only covers windows. Done after a pending
+ * configure has been answered with its buffer, so that a commit never carries
+ * an acknowledged size and a buffer of another one. */
 static void sync_size(struct panel *p)
 {
 	int want = pl_surface_height(p->height, p->pop.open != PL_SLIDER_NONE);
 
-	if (want == p->req_h || !p->configured || p->need_buffer)
+	if ((want == p->req_h && p->strip == p->req_strip) || !p->configured ||
+			p->need_buffer)
 		return;
-	p->req_h = want;
-	zwlr_layer_surface_v1_set_size(p->ls, 0, want);
+	request_surface(p, want);
 	wl_surface_commit(p->surface);
 }
 
@@ -300,6 +343,10 @@ static void set_regions(struct panel *p, int w, int h)
 		opaque[n++] = (struct pl_rect){ 0, 0, w, h };
 	else
 		n = pl_opaque_rects(l, p->bar_alpha, p->popup_alpha, opaque);
+	/* Regions are in surface coordinates, the layout is in the buffer's. */
+	in = pl_rect_to_surface(p->buf_strip, in, w, h);
+	for (int i = 0; i < n; i++)
+		opaque[i] = pl_rect_to_surface(p->buf_strip, opaque[i], w, h);
 
 	struct wl_region *rg = wl_compositor_create_region(p->compositor);
 	add_rects(rg, opaque, n);
@@ -725,13 +772,20 @@ static void touch_release(struct panel *p)
 
 /* ---- wl_pointer ---- */
 
+/* The surface reports positions in its own coordinates, the layout works in
+ * the buffer's: the same unless the bar is a strip. */
+static void set_pointer(struct panel *p, wl_fixed_t x, wl_fixed_t y)
+{
+	pl_point_to_buffer(p->buf_strip, wl_fixed_to_int(x), wl_fixed_to_int(y),
+		p->canvas.w, p->canvas.h, &p->px, &p->py);
+}
+
 static void ptr_enter(void *d, struct wl_pointer *w, uint32_t serial,
 	struct wl_surface *s, wl_fixed_t x, wl_fixed_t y)
 {
 	struct panel *p = d;
 	(void)w; (void)serial; (void)s;
-	p->px = wl_fixed_to_int(x);
-	p->py = wl_fixed_to_int(y);
+	set_pointer(p, x, y);
 	backlight_refresh(p);
 }
 
@@ -749,8 +803,7 @@ static void ptr_motion(void *d, struct wl_pointer *w, uint32_t time,
 {
 	struct panel *p = d;
 	(void)w; (void)time;
-	p->px = wl_fixed_to_int(x);
-	p->py = wl_fixed_to_int(y);
+	set_pointer(p, x, y);
 	touch_motion(p);
 }
 
@@ -812,17 +865,34 @@ static const struct wl_seat_listener seat_listener = { seat_caps, seat_name };
 
 /* ---- registry, shm, layer surface ---- */
 
-/* The text mode follows the output the bar is on: its subpixel layout and
- * transform come in wl_output.geometry, which is sent again when the output is
- * rotated. Without a surface enter (yet) the first output stands in. */
-static void sub_update(struct panel *p)
+/* The output the bar is on; without a surface enter (yet) the first one
+ * stands in. */
+static const struct out_info *bar_output(const struct panel *p)
 {
 	const struct out_info *oi = NULL;
 
 	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
 		if (p->outs[i].wl && (!oi || p->outs[i].wl == p->surf_out))
 			oi = &p->outs[i];
-	enum pl_sub s = oi ? pl_subpixel_resolve(p->subopt, oi->subpixel, oi->transform) :
+	return oi;
+}
+
+/* The text mode follows the output the bar is on: its subpixel layout and
+ * transform come in wl_output.geometry, which is sent again when the output is
+ * rotated. So does the edge: the strip on a short side is for the outputs the
+ * compositor says are rotated by 90 or 270 degrees. An output with hardware
+ * rotation says it is not (picowl sends the transform normal then, the
+ * display does the turning), so there the bar stays on the top. A change of
+ * the edge is asked for from the loop, after the pending configure. */
+static void sub_update(struct panel *p)
+{
+	const struct out_info *oi = bar_output(p);
+
+	p->strip = oi ? pl_strip_for(oi->transform, p->edge_top) : PL_STRIP_NONE;
+	/* A strip is drawn in the panel's own orientation, so its stripes run along
+	 * the bar whatever the output's transform is. */
+	enum pl_sub s = oi ? pl_subpixel_resolve(p->subopt, oi->subpixel,
+			p->strip != PL_STRIP_NONE ? 0 : oi->transform) :
 		pl_subpixel_resolve(p->subopt, 0, 0);
 
 	if (s == p->sub)
@@ -1151,6 +1221,19 @@ static void dump_state(const struct panel *p, const char *why)
 	printf("surface exclusive=%d", l->bar_h);
 	print_rect("input", in);
 	printf("\n");
+	/* Where the surface is for the compositor: the edge of the view, the buffer
+	 * transform, and the surface and the input region in surface coordinates
+	 * (the other lines are in the buffer's own frame). */
+	static const char *const edges[] = { "top", "bottom", "left", "right" };
+	int sw = p->canvas.w, sh = p->canvas.h;
+	if (p->buf_strip != PL_STRIP_NONE) {
+		sw = p->canvas.h;
+		sh = p->canvas.w;
+	}
+	printf("placement edge=%s transform=%d surface=%dx%d",
+		edges[pl_edge_for(p->buf_strip, p->bottom)], (int)p->buf_strip, sw, sh);
+	print_rect("input", pl_rect_to_surface(p->buf_strip, in, p->canvas.w, p->canvas.h));
+	printf("\n");
 	pl_clock_text(text, sizeof(text), p->st.hour, p->st.min);
 	printf("clock text=%s", text);
 	print_rect("rect", l->clock);
@@ -1208,6 +1291,13 @@ static void usage(FILE *out)
 		"usage: picowl-panel [options]\n"
 		"  --height N          height of the bar in pixels, %d..%d (default %d)\n"
 		"  --bottom            anchor at the bottom edge (default: top)\n"
+		"  --edge MODE         auto (default) or top. On an output that is rotated by 90\n"
+		"                      or 270 degrees auto puts the bar on the short side, the\n"
+		"                      edge that is the physical top of a portrait panel (the\n"
+		"                      physical bottom with --bottom), drawn as in portrait and\n"
+		"                      turned by the buffer transform; top keeps it on the top\n"
+		"                      (bottom) edge of the rotated view. Other transforms are\n"
+		"                      not affected\n"
 		"  --style STYLE       smooth (default) or crisp: crisp draws nothing\n"
 		"                      anti-aliased, with built-in pixel fonts and icons on\n"
 		"                      whole pixels, and ignores --font, --font-size and\n"
@@ -1310,6 +1400,16 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				say("--subpixel: '%s' is not auto, rgb, bgr or none", v);
 				return -1;
 			}
+		} else if (!strcmp(a, "--edge") && i + 1 < argc) {
+			const char *v = argv[++i];
+			if (!strcmp(v, "auto")) {
+				p->edge_top = false;
+			} else if (!strcmp(v, "top")) {
+				p->edge_top = true;
+			} else {
+				say("--edge: '%s' is not auto or top", v);
+				return -1;
+			}
 		} else if (!strcmp(a, "--style") && i + 1 < argc) {
 			const char *v = argv[++i];
 			if (!strcmp(v, "smooth")) {
@@ -1374,12 +1474,31 @@ static void first_frame(struct panel *p)
 static bool handle_buffer(struct panel *p)
 {
 	p->need_buffer = false;
-	int w = p->cfg_w > 0 ? p->cfg_w : 240;
-	int h = p->cfg_h > 0 ? p->cfg_h : pl_surface_height(p->height, false);
+	/* A configure that was sent before the compositor saw the new edge has
+	 * the other orientation: it is answered, not drawn for, and the one for
+	 * the new request follows. */
+	if (p->cfg_w > 0 && p->cfg_h > 0 &&
+			(p->strip != PL_STRIP_NONE ? p->cfg_w > p->cfg_h : p->cfg_w < p->cfg_h) &&
+			p->strip != p->buf_strip)
+		return true;
+	int sw = p->cfg_w > 0 ? p->cfg_w :
+		p->strip != PL_STRIP_NONE ? pl_surface_height(p->height, false) : 240;
+	int sh = p->cfg_h > 0 ? p->cfg_h :
+		p->strip != PL_STRIP_NONE ? 240 : pl_surface_height(p->height, false);
+	int w, h;
 
+	pl_strip_buffer_size(p->strip, sw, sh, &w, &h);
+	bool turned = p->buf_strip != p->strip;
+	p->buf_strip = p->strip;
 	if (p->buffer && w == p->canvas.w && h == p->canvas.h) {
 		/* Same size again: nothing to draw, but the configure is
-		 * answered by a commit. */
+		 * answered by a commit. A bar that moved to another edge has the
+		 * same buffer and other regions: they are in surface coordinates. */
+		if (turned) {
+			set_regions(p, w, h);
+			if (p->watch)
+				dump_state(p, "edge");
+		}
 		commit(p);
 		return true;
 	}
@@ -1611,11 +1730,7 @@ int main(int argc, char **argv)
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
 	wl_surface_add_listener(p.surface, &surf_listener, &p);
 	zwlr_layer_surface_v1_add_listener(p.ls, &ls_listener, &p);
-	p.req_h = p.height;
-	zwlr_layer_surface_v1_set_size(p.ls, 0, p.height);
-	zwlr_layer_surface_v1_set_anchor(p.ls,
-		(p.bottom ? ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM : ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP) |
-		ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+	request_surface(&p, p.height);
 	/* The bar's strip only: the slider row is taller than that and covers
 	 * the windows instead of pushing them. */
 	zwlr_layer_surface_v1_set_exclusive_zone(p.ls, p.height);

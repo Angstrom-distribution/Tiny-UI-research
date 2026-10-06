@@ -13,7 +13,7 @@
 #     region is the bar and the row, the protocol sequence on the wire.
 #  D: no redraw and no wake-up while nothing changes; the battery and an
 #     external volume change are followed.
-#  E: rotation: the panel is laid out again for the new width.
+#  E: rotation with --edge top: the panel is laid out again for the new width.
 #  F: errors and exit codes: no compositor, no layer shell, no output, SIGTERM,
 #     the compositor going away; a font that is not there.
 #  G: a translucent row lets the window behind it show through (capture).
@@ -538,7 +538,9 @@ stop_panel idle
 echo "panel-e2e: D idle after a row ok ($((V1 - V0)) switches)"
 
 # ---- E: rotation ----
-start_panel e
+# --edge top: the bar stays on the top of the rotated view, as it did before the
+# strip on the short side (section V) existed.
+start_panel e --edge top
 has "$DIR/e.out" '^panel width=240 height=18 ' "E start"
 "$KEYS" 397 || fail "E: key client failed"
 wait_for "$DIR/e.out" '^panel width=320 height=18 bar=18 ' 5 "E rotated"
@@ -556,7 +558,7 @@ while [ "$(grep -c '^panel width=240' "$DIR/e.out")" -lt 2 ]; do
 done
 stop_panel E
 # With the row open while the output turns: the row follows the new width.
-start_panel e --inject "ibl;p$X0,$Y"
+start_panel e --edge top --inject "ibl;p$X0,$Y"
 "$KEYS" 397 || fail "E: key client failed"
 wait_for "$DIR/e.out" '^panel width=320 height=54 bar=18 row=36 ' 5 "E rotated with the row open"
 tail -n 16 "$DIR/e.out" | grep -q '^row slider=backlight rect=0,18,320,36 ' || fail "E: the row is not 320 wide"
@@ -789,8 +791,9 @@ sleep 0.3
 h_spread "$((240 - 60)),$(comp "$RV" 2),60,$(comp "$RV" 4)"
 awk "BEGIN { exit !($HSPREAD < 0.2) }" || fail "H: the value in the translucent row has fringes (spread $HSPREAD)"
 stop_panel H
-# Rotated: the output tells the stripes are across the other axis, grayscale.
-start_panel h --subpixel auto
+# Rotated with the bar on the top of the rotated view: the output tells the
+# stripes are across the other axis, grayscale. (In the strip they are not, see V.)
+start_panel h --subpixel auto --edge top
 "$KEYS" 397 || fail "H: key client failed"
 i=0
 while [ "$(grep '^text subpixel=' "$DIR/h.out" | tail -n1)" != "text subpixel=none" ]; do

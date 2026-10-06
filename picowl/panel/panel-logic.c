@@ -231,6 +231,68 @@ void pl_layout_compute(struct pl_layout *l, int w, int bar_h, bool row_shown,
 	s->cell = (struct pl_rect){ tx - 6, ry, tw + 12, l->row_h };
 }
 
+enum pl_strip pl_strip_for(int transform, bool force_top)
+{
+	if (force_top)
+		return PL_STRIP_NONE;
+	return transform == PL_STRIP_90 ? PL_STRIP_90 :
+		transform == PL_STRIP_270 ? PL_STRIP_270 : PL_STRIP_NONE;
+}
+
+enum pl_edge pl_edge_for(enum pl_strip strip, bool bottom)
+{
+	switch (strip) {
+	case PL_STRIP_90:
+		return bottom ? PL_EDGE_LEFT : PL_EDGE_RIGHT;
+	case PL_STRIP_270:
+		return bottom ? PL_EDGE_RIGHT : PL_EDGE_LEFT;
+	default:
+		return bottom ? PL_EDGE_BOTTOM : PL_EDGE_TOP;
+	}
+}
+
+void pl_strip_buffer_size(enum pl_strip strip, int sw, int sh, int *bw, int *bh)
+{
+	bool swap = strip != PL_STRIP_NONE;
+
+	*bw = swap ? sh : sw;
+	*bh = swap ? sw : sh;
+}
+
+/* At 90 the compositor shows the buffer turned clockwise: its top edge is the
+ * right edge of the surface and its left edge the top one, which is what puts
+ * the physical top of a panel whose output is rotated by 90 on the right. 270
+ * is the other way round. (Measured with the scanout of the headless output;
+ * the wording of the protocol suggests the opposite direction.) */
+struct pl_rect pl_rect_to_surface(enum pl_strip strip, struct pl_rect r, int bw, int bh)
+{
+	switch (strip) {
+	case PL_STRIP_90:
+		return (struct pl_rect){ bh - r.y - r.h, r.x, r.h, r.w };
+	case PL_STRIP_270:
+		return (struct pl_rect){ r.y, bw - r.x - r.w, r.h, r.w };
+	default:
+		return r;
+	}
+}
+
+void pl_point_to_buffer(enum pl_strip strip, int sx, int sy, int bw, int bh, int *x, int *y)
+{
+	switch (strip) {
+	case PL_STRIP_90:
+		*x = sy;
+		*y = bh - 1 - sx;
+		break;
+	case PL_STRIP_270:
+		*x = bw - 1 - sy;
+		*y = sx;
+		break;
+	default:
+		*x = sx;
+		*y = sy;
+	}
+}
+
 struct pl_rect pl_input_rect(const struct pl_layout *l, int sw, int sh)
 {
 	int h = l->bar_h + (l->row_shown ? l->row_h : 0);

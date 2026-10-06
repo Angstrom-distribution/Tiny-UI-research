@@ -426,6 +426,45 @@ int pl_popup_wait_ms(const struct pl_popup *p, int64_t now_ms, bool touching);
 /* Closes the row if its time is up; true if it did. */
 bool pl_popup_expire(struct pl_popup *p, int64_t now_ms, bool touching);
 
+/* ---- the strip: the panel on the short side of a rotated output ---- */
+
+/* The h2200's panel is 240x320 and its physical top edge is the short side. When
+ * the output is rotated by 90 or 270 degrees the bar would sit on a long edge
+ * of the 320x240 view and cost 18 of the scarce 240 pixels, so it moves to the
+ * edge that is the physical top of the device instead. The bar is drawn in the
+ * panel's own (physical) orientation, as a buffer of the short side's length,
+ * and set_buffer_transform tells the compositor how it maps onto that edge; so
+ * on the device it looks exactly like the bar of the portrait orientation.
+ * The values are wl_output.transform values. */
+enum pl_strip {
+	PL_STRIP_NONE = 0,	/* top or bottom edge of the view, no buffer transform */
+	PL_STRIP_90 = 1,
+	PL_STRIP_270 = 3,
+};
+
+/* The mode for an output transform (a wl_output.transform value). Only 90 and
+ * 270 give a strip, flipped ones and everything else keep the bar on the top
+ * (or bottom) edge; force_top is --edge top. */
+enum pl_strip pl_strip_for(int transform, bool force_top);
+
+enum pl_edge { PL_EDGE_TOP, PL_EDGE_BOTTOM, PL_EDGE_LEFT, PL_EDGE_RIGHT };
+
+/* The edge of the output's view the layer surface is anchored to. bottom is
+ * the panel's own frame (--bottom): the physical bottom edge is the other
+ * short side. */
+enum pl_edge pl_edge_for(enum pl_strip strip, bool bottom);
+
+/* Size of the buffer for a surface of sw x sh as the compositor configured it
+ * (the same numbers with the axes exchanged in a strip). */
+void pl_strip_buffer_size(enum pl_strip strip, int sw, int sh, int *bw, int *bh);
+
+/* A rectangle of the buffer (bw x bh) as it is in surface coordinates, which
+ * is what input and opaque regions are given in. */
+struct pl_rect pl_rect_to_surface(enum pl_strip strip, struct pl_rect r, int bw, int bh);
+
+/* A point of the surface, as a pointer event reports it, in the buffer. */
+void pl_point_to_buffer(enum pl_strip strip, int sx, int sy, int bw, int bh, int *x, int *y);
+
 /* ---- fallback font ---- */
 
 /* 7 rows of a 5 pixel wide glyph, bit 4 of each byte is the leftmost pixel.
