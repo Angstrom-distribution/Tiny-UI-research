@@ -1,10 +1,16 @@
 # On-screen keyboard
 
-**Status:** Part 1 (section 2) exists in the repository as the eleven patches (`oe/recipes-graphics/wvkbd/files/`, `subprojects/packagefiles/wvkbd/`, `subprojects/wvkbd.wrap`, `tests/patches-sync.sh`) and the recipe `oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`. It is not built into an image and not run on a board yet, and the recipe has not been parsed with bitbake. Part 3 (section 4) is implemented in `src/imrelay.c` without the keyboard grab and the popup hold rules. Part 2 (section 3) is implemented in `src/osk.c` and `src/oskstate.c`, with the panel hookup of section 3.5 still interim. What remains is the hardware checklist (section 6).
+**Status:** partly implemented.
+- **Part 1 (wvkbd-ipaq, section 2): implemented as a patch series.** Eleven patches (`oe/recipes-graphics/wvkbd/files/`, a byte-identical copy in `subprojects/packagefiles/wvkbd/`, `subprojects/wvkbd.wrap`, checked by the `wvkbd-patches-sync` test) and the recipe `oe/recipes-graphics/wvkbd/wvkbd-ipaq_git.bb`. The series differs from the plan's table of nine patches, see the note under section 2.2. The long press for accents (the plan's patch 9) is not implemented. The recipe was parse-checked with bitbake once, before later changes, and was not built into an image; nothing ran on a board (see [oe/README.md](../../oe/README.md)).
+- **Part 2 (picowl, section 3): implemented** in `src/osk.c` and `src/oskstate.c`: the `[osk]` section (`cmd`, `restart`), the `osk show|hide|toggle` key action, the built-in `[layer.wvkbd]` rule with `hold_action = none`, and the panning of a tiled stack (section 3.7). Not implemented: the panel's Keyboard widget (section 3.5; the panel has no keyboard button).
+- **Part 3 (section 4): implemented** in `src/imrelay.c` and `src/implace.c`, without the input-method keyboard grab and without touch hold rules for input-method popups.
+- Not done: the hardware checklist (section 6).
+
+The behaviour is documented in [README.md](../../README.md#configuration) (`[osk]`, the `osk` key action, `[layout] pan`), [README.md](../../README.md#touch-input) (the built-in hold rule), [README.md](../../README.md#protocols) (text-input and input-method) and [oe/README.md](../../oe/README.md) (the recipe).
 
 The OSK is wvkbd, rebuilt for the iPAQ as a patch series on a pinned upstream commit, packaged in picowl's OE layer (Part 1). picowl starts and supervises it, shows and hides it by signal from a keybinding or the panel, and keeps its own tap-and-hold out of the way (Part 2). An input-method relay that shows the keyboard automatically on text focus is Part 3, implemented apart from the keyboard grab and the popup hold rules.
 
-wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on 2026-10-04). picowl citations are to commit 3f74900.
+wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on 2026-10-04). Line references into picowl's own files (`src/`, `tests/`) are against picowl commit 3f74900, the plan's baseline, not the current code; the function names are current. wlroots references are to wlroots 0.19.0. Evidence tag: [est] estimate.
 
 ## 1. Problem
 
@@ -36,9 +42,9 @@ wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on
   - `SRC_URI = "git://github.com/jjsullivan5196/wvkbd.git;protocol=https;branch=master"` plus the patches; `SRCREV = "e14b53a..."` (full hash).
   - `S = "${UNPACKDIR}/${BP}"` per wrynose/blacksail conventions (as in `picowl_git.bb`).
   - `LICENSE = "GPL-3.0-only & MIT"` is a first guess: `LICENSE` is the GPLv3 text; `COPYING` says `os-compatibility.[ch]` are MIT (text in `COPYING_WESTON`) and everything else GPL v3, without saying "only" or "or later". Check the per-file headers before settling it; `shm_open.[ch]` carry no header. `LIC_FILES_CHKSUM` covers `LICENSE` and `COPYING_WESTON`.
-  - `inherit meson pkgconfig`; `DEPENDS = "wayland wayland-native libxkbcommon cairo scdoc-native"`, plus `pango fontconfig` only for `text=pango`. Upstream links pangocairo unconditionally (`Makefile:10`), so a bitmap build has to remove the pango and fontconfig code paths first (patch 8). All protocol XMLs it needs are vendored in its `proto/` directory, so wayland-protocols is optional. `scdoc` builds the man page.
-  - `picowl_git.bb` gets `RRECOMMENDS:${PN} += "wvkbd-ipaq"`, so a minimal image can leave it out.
-- **Wrap** `picowl/subprojects/wvkbd.wrap` (git, pinned revision, `diff_files` = the series), used only by the `osk_tests` meson option; nothing from it is installed.
+  - `inherit meson pkgconfig`; `DEPENDS = "wayland wayland-native libxkbcommon cairo scdoc-native"`, plus `pango fontconfig` only for `text=pango`. Upstream links pangocairo unconditionally (`Makefile:10`), so a bitmap build has to remove the pango and fontconfig code paths first (patch 4 as built). All protocol XMLs it needs are vendored in its `proto/` directory, so wayland-protocols is optional. `scdoc` builds the man page.
+  - The plan had `picowl_git.bb` recommend `wvkbd-ipaq`. It does not: the keyboard is not recommended, and the installed `/etc/picowl.ini` has `[osk]` commented out ([oe/README.md](../../oe/README.md)).
+- **Wrap** `picowl/subprojects/wvkbd.wrap` (git, pinned revision, `diff_files` = the series), used only by the `osk_tests` meson option (`-Dosk_tests=enabled`, which builds the patched tree with `kbd_layout=ipaq`, `text=bitmap`, `tests=true`); nothing from it is installed.
 
 ### 2.2 Patches
 | # | Patch | Content |
@@ -52,6 +58,24 @@ wvkbd citations are to upstream commit e14b53a (v0.20-9, upstream master HEAD on
 | 7 | `ipaq` layout | Portrait 240 px wide: 10 keys per row (24 px), 4 rows plus a function row, ~100 px total. Landscape 320 and VGA 480/640: same rows, wider keys, ~80 px (QVGA landscape) or ~160 px (VGA portrait). Layers: letters, shifted, numbers/symbols, a small Dutch/German/French accent layer. `--non-exclusive` is the default. Upstream's `--dock`, `--ratio`, `--width` and `--corner-radius` (added in e14b53a) change the geometry too: either honour them in the `ipaq` layout or document that it ignores them |
 | 8 | text backends | One label-mask path for all text, with three backends, see section 2.3. 8a: the mask atlas and its blitter replace the pango drawing in `drw.c`; 8b: built-in bitmap fonts (default); 8c: pango as an option; 8d: the persistent mask cache. Replacing the pango calls (font setup at `main.c:1264`, layout drawing around `drw.c:281`) and the fontconfig lookup is more than one small patch |
 | 9 | long press | Long press on a letter for its accented variants, at 500 ms by default (`--long-press MS`, 0 = off). It is shorter than picowl's `hold_ms` default (900 ms), but picowl leaves the OSK alone anyway (§3.3) |
+
+**As built.** The series has eleven patches, in this order (the subject lines of some carry old `n/9` numbers):
+
+| # | As built |
+|---|---|
+| 1 | meson build alongside the Makefile (`kbd_layout`, `tests`, `man` options) |
+| 2 | block signals first, stop leaking keymap fds |
+| 3 | RGB565 when the compositor offers it (`--format auto|rgb565|xrgb8888|argb8888`) |
+| 4 | label coverage masks with built-in bitmap fonts (`text` = `bitmap` or `pango`, default `bitmap`) |
+| 5 | key preview popup default per layout, `--popup` |
+| 6 | keep the surfaces on hide, unmap with a NULL buffer |
+| 7 | repaint only the keys that changed on a shift or layer switch |
+| 8 | the `ipaq` layout (240 px wide, ten 24 px keys per row, five rows, 100 px high on QVGA portrait; 80 landscape, 160 and 130 on VGA; popup off; `DEFAULT_EXCLUSIVE` false) |
+| 9 | persistent label mask cache for the pango backend (`--prerender`, `--cache-dir`, `--no-cache`, meson options `cache_dir`, `cache_tool`) |
+| 10 | take the pointer position from `wl_pointer.enter` (a stylus tap arrives as enter, press, release without motion) |
+| 11 | keep a pressed key highlighted for a minimum time (`--highlight-ms`, a blue highlight colour in the ipaq layout) |
+
+Differences from the plan's table above: the plan's patch 9 (long press for accents, `--long-press`) is not in the series. The plan's patch 8 (text backends) became patches 4 and 9. Patches 10 and 11 were not planned. The plan's `text=cache` is not a value of `text`: the cache belongs to the pango backend. The meson option `cache_tool` builds a generator for the cache files for a build-time or first-boot step; the recipe does not enable it.
 
 **Text path decision.** Bitmap text is the default and comes first; pango stays available as `text=pango`; a cache of pre-rendered labels (section 2.3) lets a pango build avoid pango at run time after the first start. All three feed the same mask blitter, so the drawing code is written once.
 
@@ -75,7 +99,7 @@ cmd = wvkbd-ipaq --hidden
 # Restart after a crash: yes/no
 restart = yes
 ```
-- Defaults: `cmd` empty (no OSK), `restart = yes`. The example ini and README show the line above with `--hidden --auto`, which is what the board runs (`/usr/bin/wvkbd-ipaq --hidden --auto`).
+- Defaults: `cmd` empty (no OSK), `restart = yes`. The example ini and README show the line above with `--hidden --auto` (`/usr/bin/wvkbd-ipaq --hidden --auto`), which is also the launch line in [oe/README.md](../../oe/README.md).
 - An empty `cmd` value switches the handling off. `[autostart]` keeps working for anything else, and the keyboard needs no entry there.
 - There is no config reload, so the give-up state of section 3.2 ends with an `osk show` or `osk toggle` key.
 
@@ -98,11 +122,11 @@ code:<button> = osk toggle      # or: osk show, osk hide
 - `PW_ACTION_OSK` with an argument `show|hide|toggle` (default `toggle`), parsed like the `spawn` command field (`src/picowl.h:67`).
 - Sends SIGUSR2 (show), SIGUSR1 (hide) or SIGRTMIN (toggle, resolved at run time) to the pid. With no running OSK (gave up, waiting to restart, or `restart = no` and exited), `show` and `toggle` start it at once and reset the give-up state; `hide` does nothing. The keyboard starts hidden, so that key press does not show it; a second press does. A signal sent straight after the fork would hit the shell before `exec`, which is why the start is not followed by one.
 - Show and hide are sent even when picowl's `visible` guess already says so, since the guess can be wrong.
-- During a DRM lease the key ends the lease first, like `spawn` (`doc/lease.md`). Without a `cmd` the action is logged and ignored.
+- During a DRM lease the key ends the lease first, like `spawn` ([lease.md](../lease.md)). Without a `cmd` the action is logged and ignored.
 - A key press that wakes a blanked display is swallowed as today and doesn't toggle.
 
 ### 3.5 Panel
-The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until `picowl-control-v1` exists, the panel can't reach picowl's action. Interim: the widget sends the signal itself (`pkill -x -RTMIN wvkbd-ipaq`), and picowl's `visible` guess is then wrong until the next picowl-driven toggle. `picowl-control-v1` gets `osk(show|hide|toggle)` and a `osk_visible` event.
+**Not implemented.** The panel has no Keyboard button, and `picowl-control-v1` does not exist (it is a design idea in [panel.md](../panel.md)). The plan: the panel's Keyboard widget ([panel.md](../panel.md) lists it as a planned widget) needs a way to call picowl's `osk` action. Until `picowl-control-v1` exists the widget would send the signal itself (`pkill -x -RTMIN wvkbd-ipaq`), and picowl's `visible` guess would then be wrong until the next picowl-driven toggle. `picowl-control-v1` would get `osk(show|hide|toggle)` and an `osk_visible` event. See the [roadmap](roadmap.md).
 
 ### 3.6 Fallbacks
 | Case | Behaviour |
@@ -110,11 +134,11 @@ The panel's Keyboard widget (`doc/panel.md` §2) needs a way to call this. Until
 | `cmd` not found / exits at once | Quick-exit backoff, then give up with one ERROR log |
 | wvkbd's keymap fails to compile | wlroots disconnects the client (`keymap_fail` → `wl_client_post_no_memory` in `types/wlr_virtual_keyboard_v1.c`); picowl restarts it |
 | Compositor has no RGB565 | Patch 3 falls back to XRGB8888 (picowl always offers RGB565) |
-| OSK over a direct-scanned client | The output composites while the keyboard is visible (`doc/zero-copy.md`); direct scanout resumes when it hides |
+| OSK over a direct-scanned client | The output composites while the keyboard is visible ([zero-copy.md](../zero-copy.md)); direct scanout resumes when it hides |
 | Rotation | wvkbd gets a new size from layer-shell configure and picks the landscape height |
 
 ### 3.7 Tiled stack: the keyboard pans, it does not resize
-With `[layout] stack` set and both apps mapped (README, Tiled layout), a keyboard with an exclusive zone would resize both windows (the shipped one asks for none, but the mechanism covers both) on every show and hide, and a video player pays for that with a new scaler. picowl therefore moves the stack instead:
+With `[layout] stack` set and both apps mapped ([README.md](../../README.md#tiled-layout)), a keyboard with an exclusive zone would resize both windows (the shipped one asks for none, but the mechanism covers both) on every show and hide, and a video player pays for that with a new scaler. picowl therefore moves the stack instead:
 - **Which surfaces:** `[layout] pan`, comma separated layer-shell namespaces, default `wvkbd`; an empty value restores the shrinking. A surface counts when it is mapped (a null buffer commit unmaps it, which is how wvkbd hides, so a hidden keyboard pans by 0), anchored to the bottom edge but not the top (alone or with left and right), and either has a positive exclusive zone or has none (zone 0, which is what the patched wvkbd-ipaq asks for: `DEFAULT_EXCLUSIVE` is false). With a zone the amount is what wlroots takes off the usable area for it (zone plus bottom margin), measured in `arrange_layers` (`src/layer.c`); without one nothing is taken off, so the amount is the surface's committed height plus its bottom margin (`desired_height` and `margin.bottom`). A surface is counted in one of the two passes only, by its zone, never both. The amount is kept in `pw_output.pan_zone`; `pw_output.tile_area` is the usable area plus only what the zone took off it, so a zone-less keyboard leaves the tile layout as it is. A negative zone is not panned. A top panel, a bottom panel or any other exclusive surface shrinks `usable_area` as before.
 - **Layout:** `tile_active` (`src/view.c`) lays the pair out on `tile_area`, so the windows have the size they have without a keyboard, and `view_arrange` only moves the scene nodes up by `pw_tile_pan(zone, output height, top of the lower window)` (`src/tile.c`), which is the zone clamped so that the lower window's top is never above the top of the screen. `view_arrange` calls the xdg-toplevel setters only for values that differ from the scheduled ones, so the clients get no configure at all for a pan.
 - **Not panned:** a pair split side by side (landscape): both windows span the full height, so the move would cut the top off each, and the pair is laid out on the shrunk `usable_area` instead. Windows outside the pair and a single app of the pair on its own are always maximized into `usable_area`, which a zone-less keyboard does not shrink, so they sit under it. When the pair breaks up while the keyboard is shown, the survivor is configured to the shrunk area at once (the full area for a keyboard without a zone).
@@ -124,7 +148,7 @@ With `[layout] stack` set and both apps mapped (README, Tiled layout), a keyboar
 
 ## 4. Part 3 (optional): automatic show
 
-**Status:** implemented (`src/imrelay.c`, `src/implace.c`), except the keyboard grab. Tested by `tests/pw-im-client.c` (run from `tests/smoke.sh`) and `tests/test-implace.c`.
+**Status:** implemented (`src/imrelay.c`, `src/implace.c`), except the keyboard grab and the popup hold rules. Tested by `tests/pw-im-client.c` (run from `tests/smoke.sh`) and `tests/test-implace.c`.
 
 - **wvkbd already does its half.** With `--auto` it binds `zwp_input_method_manager_v2` and calls `show()` on `activate` and `hide()` on `deactivate` (`main.c:472-473`, `:1106-1108`, `:1257-1259`, `:525-535`); the other input-method events are empty stubs. It never uses text-input-v3 and types through virtual-keyboard only. No wvkbd patch is needed for this part. `activate` acts immediately, not on `done`.
 - picowl creates `wlr_input_method_manager_v2` and `wlr_text_input_manager_v3` (wlroots 0.19 `wlr/types/wlr_input_method_v2.h`, `wlr_text_input_v3.h`) and relays between them: focused surface ↔ text input `enter/leave`; `enable`/`commit`/`disable` → input method `activate`/`deactivate`/`done` with surrounding text, content type and change cause; input method `commit` → `delete_surrounding_text`, `commit_string`, `preedit_string` and `done`. An OSK that speaks input-method-v2 (squeekboard) shows itself on text focus; wvkbd stays on virtual-keyboard and does not use any of this.
@@ -132,8 +156,8 @@ With `[layout] stack` set and both apps mapped (README, Tiled layout), a keyboar
 - Focus follows the seat's keyboard `focus_change` signal, so all four focus paths (touch, exclusive layer surface, view focus, unmap) are covered without hooks. At most one text input is active, and only one whose surface has the keyboard focus. After every focus change and every new input method the relay looks for an enabled, focused text input, because wlroots keeps `current_enabled` across leave and enter.
 - One input method per seat. A second `get_input_method` gets `unavailable`. If the input method client dies, the text inputs keep their state and the next one is activated at once.
 - Popups: `zwp_input_popup_surface_v2` surfaces are placed in the overlay layer below the text cursor rectangle (above it when there is no room), clamped to the usable area of the output the cursor is on, and told the cursor rectangle in popup coordinates. They are placed again on popup commit, text input commit and `pw_view_arrange_all` (rotation, panel changes). wlroots maps them only while the input method is active; the scene node follows map and unmap.
-- **Not implemented: the input method keyboard grab** (`zwp_input_method_v2.grab_keyboard`, used by engines such as fcitx and ibus that want raw keys). A grab request is logged and the grab object is destroyed in the compositor, so it stays inert and keys always go to the focused application. Implementing it needs the key and modifier handlers in `input.c` to forward to the grab (after the keybindings, skipping keys that come from the input method's own virtual keyboard to avoid an echo loop), plus `wlr_input_method_keyboard_grab_v2_set_keyboard`.
-- **Not implemented: hold-action rules for popups.** A touch on an input method popup falls back to the global `[touch]` hold defaults (`hold_identity` in `input.c` knows no popup role); a long press could send a right click to the candidate list.
+- **Not implemented: the input method keyboard grab** (in the [roadmap](roadmap.md); `zwp_input_method_v2.grab_keyboard`, used by engines such as fcitx and ibus that want raw keys). A grab request is logged and the grab object is destroyed in the compositor, so it stays inert and keys always go to the focused application. Implementing it needs the key and modifier handlers in `input.c` to forward to the grab (after the keybindings, skipping keys that come from the input method's own virtual keyboard to avoid an echo loop), plus `wlr_input_method_keyboard_grab_v2_set_keyboard`).
+- **Not implemented: hold-action rules for popups** (in the [roadmap](roadmap.md)). A touch on an input method popup falls back to the global `[touch]` hold defaults (`hold_identity` in `input.c` knows no popup role); a long press could send a right click to the candidate list.
 - **OSK requirement:** the OSK must use layer-shell keyboard interactivity `none`. With `on_demand` or `exclusive` a tap on its keys moves the keyboard focus to the OSK, the text input gets `leave`, the input method gets `deactivate` and the OSK hides itself.
 - Reference: labwc's `src/input/ime.c` (~720 lines with keyboard grab and popups).
 - **Who benefits:** only clients that speak text-input-v3, i.e. GTK3/4 and Qt apps, which are too large for these boards, and the havoc terminal with the patch in `oe/recipes-graphics/havoc/files/` (it enables the text input once per focus, so a keyboard hidden with the toggle button stays hidden until the focus returns). GTK+2 apps get nothing until a GDK2 Wayland backend exists and gains an input-method module. Typing never needs this part; virtual-keyboard alone is enough.
@@ -150,9 +174,9 @@ With `[layout] stack` set and both apps mapped (README, Tiled layout), a keyboar
 
 ## 6. Tests
 **CI (headless, no `/dev/dri`):**
-- Fork tests (patch 1 `tests` option): keymap generation, layout geometry for 240/320/480/640 widths, the RGB565 draw path, key state.
-- `tests/patches-sync.sh`: OE and packagefiles patch copies are identical.
-- `tests/osk.sh` (skipped, exit 77, unless `PW_OSK_BIN` points at a `wvkbd-ipaq`): starts headless picowl, checks that the OSK binds virtual-keyboard and layer-shell with namespace `wvkbd`, maps an opaque RGB565 surface with no exclusive zone, and that 100 SIGRTMIN toggles cause no protocol error and no fd growth; a signal sent during start-up must not kill it.
+- Fork tests (the `tests` option of patch 1, run with `-Dosk_tests=enabled`): keymap generation, layout geometry for 240/320/480/640 widths, the RGB565 draw path, key state.
+- `tests/patches-sync.sh` (meson test `wvkbd-patches-sync`): the OE and packagefiles patch copies are identical, apart from the `Upstream-Status` line in the OE copies.
+- **Planned, not present:** a `tests/osk.sh` (skipped, exit 77, unless `PW_OSK_BIN` points at a `wvkbd-ipaq`) that would start headless picowl and check that the OSK binds virtual-keyboard and layer-shell with namespace `wvkbd`, maps an opaque RGB565 surface with no exclusive zone, and that 100 SIGRTMIN toggles cause no protocol error and no fd growth; a signal sent during start-up must not kill it. The fork's own tests (`-Dosk_tests=enabled`, for example `check-signals.py`, `check-popup.sh`, `test-draw.c`, `test-pointer.c`) cover part of this without picowl; the run against picowl is still open (see the [roadmap](roadmap.md)).
 - `tests/test-oskstate.c`: backoff series, give-up after 5 quick exits, reset after a long run, `restart = no`, the visibility guess, `osk show` and `toggle` resetting give-up and `hide` not starting anything.
 - `tests/test-config.c`: `[osk]` keys, the `osk` action and its arguments, the built-in `[layer.wvkbd]` rule and a user override of it. `tests/test-leasepolicy.c`: the `osk` key ends a lease.
 - `tests/osk-e2e.sh` (meson test `osk-e2e`, about 20 s): headless picowl with `pw-osk-fake` (logs the signals it gets, can crash on a timer) in place of wvkbd, and `pw-key-client` pressing keys through virtual-keyboard. It checks that the keyboard is picowl's child, that the three `osk` keys arrive as the right signals in order, that `[autostart]` still works, that SIGTERM stops the keyboard and it is not restarted, the 1, 2, 4, 8 s backoff and the give-up, a start by key press with the backoff starting over, a missing command, `restart = no` and an `osk` key without `cmd`.
@@ -165,11 +189,17 @@ With `[layout] stack` set and both apps mapped (README, Tiled layout), a keyboar
 - [ ] RSS of `wvkbd-ipaq` with bitmap text on the h3870.
 
 ## 7. Open questions
-1. Accent layers: which languages beyond nl/de/fr?
-2. Should the panel reserve space when the OSK shows (exclusive zone just for the panel's text-entry dialogs)?
-3. Is `pkill` from the panel acceptable until `picowl-control-v1` exists?
+
+Still open, in the [roadmap](roadmap.md):
+
+- Accent layers: which languages beyond nl/de/fr.
+- Whether the panel should reserve space when the OSK shows (an exclusive zone just for the panel's text-entry dialogs).
+- Whether a `pkill` from the panel is acceptable until `picowl-control-v1` exists (see section 3.5).
 
 ## 8. Effort estimate [est]
+
+The estimate made before the work, kept for reference.
+
 | Part | Effort |
 |---|---|
 | Part 1: 11 patches, fork tests | 2 days |

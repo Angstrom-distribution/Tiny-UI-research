@@ -1,21 +1,21 @@
 # picowl-buffer-v1 v2: caching event
 
-**Status:** implemented.
+**Status:** implemented. The behaviour is documented in [README.md](../../README.md#configuration) (`[zerocopy] caching`), [buffers.md](../buffers.md) (the protocol) and [zero-copy.md](../zero-copy.md) (the driver table and the hardware checklist). The plan below is kept for its reasoning; where the code differs, the [Implementation notes](#implementation-notes) say so. The hardware part is not verified on a board.
 
-Implementation: `protocols/picowl-buffer-v1.xml` (version 2), `src/copytype.c/.h` (`pw_caching_*`), `src/zbproto.c/.h` (`pw_zbproto_send_bind`), `src/zerocopy.c` (`pw_zerocopy_init`, `mgr_bind`), `src/config.c` (`[zerocopy] caching`). Details and deviations are in the final section, "Implementation notes".
+Implementation: `protocols/picowl-buffer-v1.xml` (version 2), `src/copytype.c/.h` (`pw_caching_*`), `src/zbproto.c/.h` (`pw_zbproto_send_bind`), `src/zerocopy.c` (`pw_zerocopy_init`, `mgr_bind`), `src/config.c` (`[zerocopy] caching`).
 
-Work item 7 (second half) of `doc/mediaplayer-integration.md:133`. The per-`app_id` buffer budget (first half of item 7) needs no protocol change and has its own design.
+Work item 7 (second half) in [mediaplayer-integration.md](../mediaplayer-integration.md) §4. The per-`app_id` buffer budget (first half of item 7) needs no protocol change and has its own design.
 
-Line numbers refer to picowl commit b9eac6d. libwayland references are to wayland 1.24 sources; the host used for checking had libwayland 1.22.0.
+Line numbers into picowl's `src/`, `tests/` and `protocols/` are against picowl commit b9eac6d, not the current code (function names are current). Line numbers into wlroots are against wlroots 0.19.0, into the Linux kernel against the kernel the plan was written for, and libwayland references are to wayland 1.24 sources; the host used for checking had libwayland 1.22.0. Evidence tag: [est] estimate.
 
 ## 1. Problem
 
-- **What the player needs to know.** Whether it may read back from a display buffer, or decode into one (`media-player.md:217-219`: "whether the buffers are write-combined or uncached (the core then never reads them back and never decodes into them)"). The bare-DRM front-end gets this from `drmGetVersion()` and a driver table (`media-player.md:246-249`). A Wayland client has no DRM fd (`mediaplayer-integration.md:60`).
-- **Today's stand-in.** The interim rule is that `copy_type = 1` means cacheable and `copy_type = 0` means write-combined (`mediaplayer-integration.md:62`). `copy_type` describes the outputs, not the memory, so the rule fails in these cases:
+- **What the player needs to know.** Whether it may read back from a display buffer, or decode into one: when the buffers are write-combined or uncached, the player's core never reads them back and never decodes into them ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.4). The bare-DRM front-end gets this from `drmGetVersion()` and a driver table. A Wayland client has no DRM fd (§2.4).
+- **Today's stand-in.** The interim rule is that `copy_type = 1` means cacheable and `copy_type = 0` means write-combined ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.4). `copy_type` describes the outputs, not the memory, so the rule fails in these cases:
   - **Old kernel.** On a kernel without `DRM_IOCTL_MODE_CLOSEFB`, mq11xx and w100 get `copy_type = 0` (`src/output.c:381-393`), so the cacheable shmem is reported as write-combined.
   - **Overrides.** `[copytype]` overrides (`src/config.c:425-437`) change `copy_type` without changing the memory.
   - **Runtime changes.** `copy_type` follows enabled outputs (`src/zerocopy.c:51-58`) and is re-sent when it changes (`src/zerocopy.c:94-104`, `501-518`), but the memory type of a buffer never changes.
-  - **sa1100-lcdc.** It is copy-type (`src/copytype.c:48-51`) but CMA, and so write-combined, according to the player docs (`mediaplayer-integration.md:62`).
+  - **sa1100-lcdc.** It is copy-type (`src/copytype.c:48-51`) but CMA, and so write-combined, according to [mediaplayer-integration.md](../mediaplayer-integration.md) §2.4.
 - **What `caching` is not.** It is not a hint that the compositor keeps reading the buffer: `retained` covers that (`protocols/picowl-buffer-v1.xml:115-129`). It is not a buffer-count hint either: buffer count and reuse stay driven by `copy_type`, `copied`, `retained` and `wl_buffer.release`. `caching` describes only the CPU mapping attributes of the dmabuf the client `mmap`s.
 
 ## 2. Design
@@ -37,17 +37,17 @@ The resolved values per driver are below. sa1100-lcdc is still open: see §9 Q1.
 
 | Driver | `copy_type` (`src/copytype.c:44-52`) | `caching` | Source |
 |---|---|---|---|
-| mq11xx, mediaq | 1 | cacheable | shmem (`doc/zero-copy.md:12`, `media-player.md:247-248`) |
+| mq11xx, mediaq | 1 | cacheable | shmem (`doc/zero-copy.md:12`) |
 | w100, imageon | 1 | cacheable | shmem (`doc/zero-copy.md:13`) |
-| sa1100-lcdc, sa1100_lcdc, sa11x0-lcdc, sa1100 | 1 | write_combined | CMA per `mediaplayer-integration.md:62`; conflicts with `doc/zero-copy.md:14` and the comment at `src/copytype.c:41-43` |
+| sa1100-lcdc, sa1100_lcdc, sa11x0-lcdc, sa1100 | 1 | write_combined | CMA per [mediaplayer-integration.md](../mediaplayer-integration.md) §2.4 (unverified); `doc/zero-copy.md` and the comment in `pw_copytype_driver` now say the same |
 | pxa-lcdc | 0 | write_combined | CMA pool (`doc/zero-copy.md:15`) |
 | anything else, or `drmGetVersion` failed | 0 | write_combined | safe default |
 
 ### 2.2 Why one manager event and not a per-buffer event
 
 - **There is only one allocator.** picowl creates a single allocator (`src/server.c:210`, `wlr_allocator_autocreate`, `include/wlr/render/allocator.h:52`). With the DRM backend and the pixman renderer this is the dumb allocator on a reopened node of the backend's DRM fd (`render/allocator/allocator.c:139-147` in wlroots 0.19). So every buffer has the same driver, and that driver is the one behind `wlr_backend_get_drm_fd` (`include/wlr/backend.h:82`), which `pw_zerocopy_init` already calls (`src/zerocopy.c:403`).
-- **The player needs the value before it allocates.** It fills in its caps in `init` (`media-player.md:207`), before any buffer exists.
-- **A per-buffer event can come later.** If allocators ever differ (multi-GPU, udmabuf), `picowl_buffer_v1.caching` can be added at v3 (§9 Q4).
+- **The player needs the value before it allocates.** It fills in its caps in `init` ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.1), before any buffer exists.
+- **A per-buffer event can come later.** If allocators ever differ (multi-GPU, udmabuf), `picowl_buffer_v1.caching` can be added at v3 (§9, per-buffer `caching`).
 
 ### 2.3 Version negotiation and compatibility
 
@@ -178,7 +178,7 @@ Changes in `src/zerocopy.c`:
 | Old picowl (v1) | The client sees version 1 in the registry and keeps the interim heuristic |
 | Old client (v1) | Nothing is sent (gated) |
 | XML and `PW_ZB_MGR_VERSION` disagree | `wl_global_create` fails and zero-copy is disabled with a log line (§2.3) |
-| Cacheable memory and CPU cache coherency | Unchanged from today. The drm prime exporter has no `begin_cpu_access` (`drivers/gpu/drm/drm_prime.c:827-836`), so `DMA_BUF_IOCTL_SYNC` does not flush. Coherency of the driver's damage copy is the kernel driver's job, as for the KMS front-end, which already treats these buffers as cacheable (`media-player.md:246-248`) |
+| Cacheable memory and CPU cache coherency | Unchanged from today. The drm prime exporter has no `begin_cpu_access` (`drivers/gpu/drm/drm_prime.c:827-836`), so `DMA_BUF_IOCTL_SYNC` does not flush. Coherency of the driver's damage copy is the kernel driver's job, as for the KMS front-end, which already treats these buffers as cacheable |
 
 ## 5. Memory and CPU cost
 
@@ -220,7 +220,7 @@ All are in the copyrel style (`tests/test-copyrel.c`): `assert` plus `printf("ok
 
 - [ ] **Log line on each board.** `zero-copy enabled (copy_type=… caching=… driver '…')` should show: h2210 and h5550 `1 cacheable`, hx4700 `1 cacheable`, h3870 `1 write_combined`, h3970 `0 write_combined`.
 - [ ] **Test client.** `pw-test-client --zerocopy --readback` prints `caching=` matching the log.
-- [ ] **Read-back check.** `readback_us` on `write_combined` boards should be several times that on `cacheable` boards at the same size [est]. If sa1100-lcdc or mq11xx read like the other class, the table is wrong (§9 Q1, Q2).
+- [ ] **Read-back check.** `readback_us` on `write_combined` boards should be several times that on `cacheable` boards at the same size [est]. If sa1100-lcdc or mq11xx read like the other class, the table is wrong (§9).
 - [ ] **Old client on new picowl.** A test client built from the v1 XML runs 5 frames with no protocol error.
 - [ ] **New client on old picowl.** A v2-capable client against a v1 picowl binds 1 and prints `caching=-1`.
 - [ ] **Runtime state.** Blank, unblank and output hot-unplug re-send `copy_type` only (see `WAYLAND_DEBUG=1`).
@@ -231,13 +231,15 @@ All are in the copyrel style (`tests/test-copyrel.c`): `assert` plus `printf("ok
 - **Bind** `min(advertised, 2)`. Always install the `caching` handler; a NULL member aborts on a v2 bind (`connection.c:1237-1239`).
 - **Read the mode after the init roundtrip:**
   - `caching` received: caps say write-combined iff the value is 0.
-  - No `caching` (v1 picowl): keep the interim rule (`mediaplayer-integration.md:62`).
+  - No `caching` (v1 picowl): keep the interim rule ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.4).
   - `wl_shm` fallback: cacheable.
-- **Log** `vo wayland: caching=cacheable|write_combined (picowl v2|copy_type heuristic|wl_shm)`. This is the acceptance line for work item 7 (`mediaplayer-integration.md:133`).
-- **Behaviour.** Only the read-back and decode-into rule depends on caching (`media-player.md:217-219`). Buffer count (`mp_core_want_bufs()`) and the FREE/HELD/PENDING/FRONT transitions (`mediaplayer-integration.md:32-46`) do not change.
+- **Log** `vo wayland: caching=cacheable|write_combined (picowl v2|copy_type heuristic|wl_shm)`. This is the acceptance line for work item 7 ([mediaplayer-integration.md](../mediaplayer-integration.md) §4).
+- **Behaviour.** Only the read-back and decode-into rule depends on caching. Buffer count (`mp_core_want_bufs()`) and the FREE/HELD/PENDING/FRONT transitions ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.2) do not change.
 - **Keep the tables aligned.** The KMS front-end's driver table and picowl's table should agree, sa1100-lcdc included.
 
 ## 8. Effort estimate
+
+The estimate made before the work, kept for reference.
 
 | Part | Estimate |
 |---|---|
@@ -249,11 +251,16 @@ All are in the copyrel style (`tests/test-copyrel.c`): `assert` plus `printf("ok
 
 ## 9. Open questions
 
-1. **sa1100-lcdc memory type.** `doc/zero-copy.md:14` ("persistent buffer, as above") and `src/copytype.c:41-43` imply a shmem shadow plane. `mediaplayer-integration.md:62` and `media-player.md:246-248` say CMA and write-combined. The driver is not in the reference kernel tree (`drivers/gpu/drm` there has only helpers and `tiny/`). The design defaults to `write_combined`, which is safe, and the `--readback` check settles it.
-2. **Do mq11xx and w100 set `map_wc` on their shmem objects?** `drm_gem_shmem_mmap` maps write-combined only if `map_wc` is set (`drivers/gpu/drm/drm_gem_shmem_helper.c:786-787`). The drivers are out of tree, so this is unverified; `--readback` answers it.
-3. **A separate `uncached` value.** Not needed by the player, whose rule is the same for both. It can be added later as an enum entry with `since="3"`.
-4. **Per-buffer `caching`.** Needed only if a second allocator ever appears (multi-GPU, udmabuf): `picowl_buffer_v1.caching` at v3, sent before `done`.
-5. **Ship v2 together with the per-app budget?** They are independent; the budget changes no wire format. Bundling them only saves one docs pass.
+Answered by the code and the documents:
+
+1. **sa1100-lcdc memory type.** The design defaults to `write_combined`, which is safe. The code table says `write_combined`, [mediaplayer-integration.md](../mediaplayer-integration.md) §2.4 says CMA and write-combined, and `doc/zero-copy.md` and the comment in `pw_copytype_driver` now agree. Whether the driver really uses CMA is not verified: the driver is not in the reference kernel tree (`drivers/gpu/drm` there has only helpers and `tiny/`).
+3. **A separate `uncached` value.** Not added; the player's rule is the same for both. It can be added later as an enum entry with `since="3"`.
+5. **Ship v2 together with the per-app budget?** Done: both are implemented.
+
+Still open, in the [roadmap](roadmap.md):
+
+- Whether mq11xx and w100 set `map_wc` on their shmem objects (`drm_gem_shmem_mmap` maps write-combined only if `map_wc` is set, `drivers/gpu/drm/drm_gem_shmem_helper.c:786-787`). The drivers are out of tree, so this is unverified; `pw-test-client --readback` on a board answers it, together with the sa1100-lcdc question above.
+- A per-buffer `caching` event (`picowl_buffer_v1.caching` at version 3, sent before `done`), needed only if a second allocator ever appears (multi-GPU, udmabuf).
 
 ## Implementation notes
 
@@ -264,4 +271,4 @@ All are in the copyrel style (`tests/test-copyrel.c`): `assert` plus `printf("ok
 - **`tests/test-bufproto.c`.** Takes the client binary as `argv[1]` (meson passes `pw_test_client`). Part one is the planned in-process test over a `socketpair`: bind 2, bind 1 with the v2 listener, bind 1 with a NULL `caching` member, and a version 1 global with a version 2 client; each checks the event order against a `wl_display.sync` queued right behind the bind, the proxy version of the manager and of a `create_buffer` child, and that `caching` is not sent again. Part two (not in the plan) serves a real socket from the same server code and runs `pw-test-client --probe` as a child: default against a v2 server, `--bind-version 1` against a v2 server, and default against a v1 server. This is the "v1 client keeps working" test with the real binary. The server side in the test mimics `mgr_bind`; the real `mgr_bind` needs a DRM backend.
 - **Smoke.** `tests/smoke.sh` gained one `--probe` run, which must print `probe bufmgr none` headless; the existing shm-fallback checks are unchanged.
 - **Docs.** `README.md`, `data/picowl.ini.example`, `doc/buffers.md` (steps 1b and 1c, the version negotiation), `doc/zero-copy.md` (caching column, "Caching event" section, hardware checklist) and `doc/mediaplayer-integration.md` (§2.4 marks the picowl half done). The player side (§7) is not part of this repository.
-- **Not done.** The hardware checklist (§6.2) and the open questions of §9 are unchanged.
+- **Not done.** The hardware checklist (§6.2), and the open items of §9 (see the [roadmap](roadmap.md)).

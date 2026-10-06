@@ -1,10 +1,10 @@
 # Per-app buffer budget
 
-**Status:** implemented.
+**Status:** implemented. The behaviour is documented in [README.md](../../README.md#configuration) (`[zerocopy]` and `[app.<app_id>]`), [buffers.md](../buffers.md) and [zero-copy.md](../zero-copy.md). The plan below is kept for its reasoning; where the code differs, the [Implementation notes](#implementation-notes) say so. Line references into `src/`, `tests/` and `protocols/` are against picowl commit b9eac6d, not the current code (function names are current). Line references into wlroots are against wlroots 0.19.0; those into the Linux kernel against the kernel the plan was written for. Evidence tags: [est] estimate, UNVERIFIED not checked.
 
-Implementation: `src/zbquota.h/.c` (pure limits), `src/zerocopy.c` (`rule_for_client`, `mgr_create_buffer`), `src/config.c` and `src/picowl.h` (keys, `[app.*]` pool fields, `pw_config_app`). Details and deviations are in the final section, "Implementation notes".
+Implementation: `src/zbquota.h/.c` (pure limits), `src/zerocopy.c` (`rule_for_client`, `mgr_create_buffer`), `src/config.c` and `src/picowl.h` (keys, `[app.*]` pool fields, `pw_config_app`).
 
-Scope: make the `picowl-buffer-v1` allocation limits configurable, with a per-`app_id` override, so the media player can get up to 7 buffers (work item 7, `doc/mediaplayer-integration.md:133`). The `caching` event (the other half of item 7) is a separate plan. This plan only makes sure the two don't collide.
+Scope: make the `picowl-buffer-v1` allocation limits configurable, with a per-`app_id` override, so the media player can get up to 7 buffers (work item 7 in [mediaplayer-integration.md](../mediaplayer-integration.md) §4). The `caching` event (the other half of item 7) is a separate plan. This plan only makes sure the two don't collide.
 
 ## 1. Problem
 
@@ -14,16 +14,16 @@ Scope: make the `picowl-buffer-v1` allocation limits configurable, with a per-`a
 | The per-client count is a loop over every `pw_zbuf` comparing `wl_resource_get_client()`. There is no per-client struct and no per-client byte total | `src/zerocopy.c:284-288`, struct `:25-37` |
 | One global byte counter `st.total_bytes`, checked as `st.total_bytes + bytes > PW_ZB_BUDGET` | `src/zerocopy.c:46`, `:289` |
 | Bytes are accounted as `w*h*2`, which ignores stride padding and page rounding | `src/zerocopy.c:283` |
-| The player asks for 7 buffers (`--decode-ahead 5`): 1.05 MiB at QVGA, 4.1 MiB on the hx4700 (VGA) | `doc/mediaplayer-integration.md:50-55` |
-| The requested keys are `[zerocopy] max_buffers_per_client`, `budget_kb`, plus an app_id override | `doc/mediaplayer-integration.md:55` |
+| The player asks for 7 buffers (`--decode-ahead 5`): 1.05 MiB at QVGA, 4.1 MiB on the hx4700 (VGA) | [mediaplayer-integration.md](../mediaplayer-integration.md) §2.3 |
+| The requested keys are `[zerocopy] max_buffers_per_client`, `budget_kb`, plus an app_id override | [mediaplayer-integration.md](../mediaplayer-integration.md) §2.3 |
 
-So today the player gets 3 buffers on every board. On copy-type outputs that costs little (`copied` frees FRONT, `doc/mediaplayer-integration.md:56`). On the h3900 scanout path, and for decode-ahead in general, it caps queue depth.
+So today the player gets 3 buffers on every board. On copy-type outputs that costs little (`copied` frees FRONT, [mediaplayer-integration.md](../mediaplayer-integration.md) §2.3). On the h3900 scanout path, and for decode-ahead in general, it caps queue depth.
 
 The budget also matters because **on shmem drivers it is the only guard**:
 - The allocator is wlroots' DRM dumb allocator. It is chosen because the pixman renderer has DATA_PTR caps and the DRM backend has DMABUF caps (`render/allocator/allocator.c:139-152`).
 - `drm_gem_shmem_dumb_create` only creates the object (`linux/drivers/gpu/drm/drm_gem_shmem_helper.c:578-588`). Pages come on fault.
 - wlroots then `mmap`s the buffer and `memset`s all of it (`render/allocator/drm_dumb.c:78`, `:85`). On mq11xx/w100 that memset is where the RAM is actually taken. Under pressure it ends in the OOM killer, not in `-ENOMEM` from `DUMB_CREATE`.
-- On CMA drivers (pxa-lcdc, and sa1100-lcdc per `doc/mediaplayer-integration.md:62`) the kernel fails the allocation cleanly, and that failure already maps to `no_memory` (`src/zerocopy.c:294-305`).
+- On CMA drivers (pxa-lcdc, and sa1100-lcdc per [mediaplayer-integration.md](../mediaplayer-integration.md) §2.4) the kernel fails the allocation cleanly, and that failure already maps to `no_memory` (`src/zerocopy.c:294-305`).
 
 ## 2. Design
 
@@ -233,7 +233,7 @@ No change to `view.c`, `input.c`, `power.c` or the wlroots patches. Only wlroots
 | Situation | Result |
 |---|---|
 | No `[app.*]` and no new keys | Identical to today: 3 per client, 2 MiB shared |
-| Over count, pool or ceiling | `failed(no_memory)` as today (`:291`); DEBUG log naming which limit was hit, with pid, app_id and used/cap. No new reason code, since the player handles `no_memory` and `too_large` alike (`doc/mediaplayer-integration.md:54`) |
+| Over count, pool or ceiling | `failed(no_memory)` as today (`:291`); DEBUG log naming which limit was hit, with pid, app_id and used/cap. No new reason code, since the player handles `no_memory` and `too_large` alike ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.3) |
 | Kernel allocation fails (CMA exhausted on pxa-lcdc) | `failed(no_memory)` via `:299-304`; pool untouched |
 | shmem pages can't be faulted during wlroots' `memset` (`drm_dumb.c:85`) | OOM killer, as today. The budget is the only protection, so don't set app pools above free RAM |
 | app_id set after some buffers | Those buffers stay in the default pool; later requests use the app pool |
@@ -253,7 +253,7 @@ Frame sizes, RGB565, 4 KiB pages:
 |---|---|---|---|---|
 | h2200, h5550 / mq11xx | shmem (`doc/zero-copy.md:12`) | 240x320 = 152 KiB (38 pages) | 456 KiB | 1064 KiB |
 | hx4700 / w100 | shmem (`doc/zero-copy.md:13`) | 480x640 = 600 KiB | 1800 KiB | 4200 KiB (4.1 MiB) |
-| h3800-class / sa1100-lcdc | CMA, write-combined (`doc/mediaplayer-integration.md:62`) | 152 KiB | 456 KiB | 1064 KiB, if the CMA pool allows (UNVERIFIED size) |
+| h3800-class / sa1100-lcdc | CMA, write-combined ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.4) | 152 KiB | 456 KiB | 1064 KiB, if the CMA pool allows (UNVERIFIED size) |
 | h3970 / pxa-lcdc | 1 MiB CMA pool, shared with picowl's swapchain (`doc/zero-copy.md:15`, `:283-285`) | 152 KiB | kernel-limited | kernel-limited |
 
 - **shmem boards.** The pages are resident from allocation (memset) and unswappable on swapless iPAQs. They are mapped by both picowl (`drm_dumb.c:78`) and the client, so they appear in **picowl's** RssShmem and VmHWM. On the hx4700 the player rule adds about 2.4 MiB over the default (4.1 MiB in total), around 5% of about 50 MiB usable (`doc/zero-copy.md:4`) [est]. The headless `rss_ceiling_kb` test (`doc/zero-copy.md:225-233`) never sees this; check it on the device.
@@ -294,20 +294,25 @@ Hardware-only checklist (hx4700 and h2200 at least, plus the h3970 for the CMA p
 
 ## 7. Mediaplayer side
 
-- Keep the init order already planned (`doc/mediaplayer-integration.md:24`): toplevel with `app_id = "mediaplayer"` → first configure → then `create_buffer`. The new XML text makes `set_app_id` before `create_buffer` a requirement.
-- Request `mp_core_want_bufs()`, stop at the first `failed`, and destroy the failed `picowl_buffer_v1` object. That is already the plan in §2.3 of that doc; nothing new.
+- Keep the init order already planned ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.1): toplevel with `app_id = "mediaplayer"` → first configure → then `create_buffer`. The new XML text makes `set_app_id` before `create_buffer` a requirement.
+- Request `mp_core_want_bufs()`, stop at the first `failed`, and destroy the failed `picowl_buffer_v1` object. That is already the plan in §2.3 of that document; nothing new.
 - Ship a commented `[app.mediaplayer]` snippet with `zerocopy_buffers = 7` and `exe = <install path>` in the player's packaging notes, not in picowl's defaults.
 - Never assume a count. On the h3970 expect 2-3 buffers.
 
 ## 8. Open questions
 
-1. **OOM attribution.** picowl maps every client buffer, so a larger budget raises picowl's OOM badness as much as the player's. Should picowl set `oom_score_adj` negative? Lowering it needs CAP_SYS_RESOURCE, which picowl may not have under seatd.
-2. **Tell clients their quota.** A v2 manager event `budget(max_buffers, bytes)` would save the probe-until-failed loop. Fold it into the `caching` v2 plan, or skip it, since a rejection costs one event and no allocation?
-3. **Trusted spawn.** Should picowl launch configured apps over a `socketpair` and tag the `wl_client` (no pid or exe guessing, and it also fixes the `WAYLAND_SOCKET` caveat)? It needs `pw_spawn` to pass an fd through the double fork (`src/server.c:144-163`).
-4. **The sa1100-lcdc CMA pool size** on the h3800-class boards, and whether 7 QVGA buffers fit next to the persistent copy-type buffer.
-5. **Default pool when GTK2/GDK uses picowl-buffer.** If the future GDK2 backend allocates with picowl-buffer for every app, is 2 MiB shared enough, or should the default be per-client (`client_kb`)?
+Answered by the code: the default pool stays a fixed pool shared by clients without a rule (question 5 asked for a per-client alternative; none was added).
+
+Still open, in the [roadmap](roadmap.md):
+
+- OOM attribution: picowl maps every client buffer, so a larger budget raises picowl's OOM badness as much as the player's. Whether picowl should set `oom_score_adj` negative (it needs CAP_SYS_RESOURCE, which picowl may not have under seatd).
+- Telling clients their quota with a version 2 manager event `budget(max_buffers, bytes)`, to save the probe-until-failed loop (a rejection costs one event and no allocation).
+- Trusted spawn: launching configured apps over a `socketpair` and tagging the `wl_client`, which would also fix the `WAYLAND_SOCKET` caveat of the `exe` check (it needs `pw_spawn` to pass an fd through the double fork).
+- The sa1100-lcdc CMA pool size on the h3800-class boards, and whether 7 QVGA buffers fit next to the persistent copy-type buffer (needs a board).
 
 ## 9. Effort estimate
+
+The estimate made before the work, kept for reference.
 
 | Part | Effort |
 |---|---|
@@ -326,5 +331,5 @@ Hardware-only checklist (hx4700 and h2200 at least, plus the h3970 for the CMA p
 - **Real size.** The charge is the larger of the page-rounded request and the rounded `lseek(fd, 0, SEEK_END)` size (a smaller `lseek` result is not trusted). A buffer which only exceeds a limit by its real size is dropped and answered `no_memory`. Without a usable `lseek` the size is `stride * h`, rounded.
 - **`rule_for_client`** follows the plan. It does not walk `server->views`. With an `exe` rule that does not match, the loop goes on to the client's other toplevels instead of returning.
 - **DEBUG log.** One line per rejection with pid, app_id, the limit hit and used/cap. The plan's extra DEBUG line at refund was not added.
-- **Not done.** The open questions (OOM attribution, a `budget` event, trusted spawn) are unchanged.
+- **Not done.** OOM attribution, a `budget` event and trusted spawn (see [Open questions](#8-open-questions)).
 - **Tests.** `tests/test-zbquota.c` (the plan's cases, plus `pw_zb_pool_cap`, `pw_zb_round` and `pw_zb_exe_match`); `tests/test-config.c` `test_zerocopy_limits` with `tests/test-config-zb.ini`; `tests/pw-test-client.c` gets `--zerocopy-count N` and `--app-id ID`, and `tests/smoke.sh` runs `--zerocopy-count 7 --app-id mediaplayer` headless (wl_shm fallback). `rule_for_client`, the real-size path and the pools need a DRM allocator; they are on the hardware checklist in `doc/zero-copy.md`.

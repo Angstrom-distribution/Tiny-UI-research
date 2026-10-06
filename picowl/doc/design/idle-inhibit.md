@@ -1,15 +1,14 @@
 # Idle-inhibit
 
-**Status:** implemented.
+**Status:** implemented. The behaviour is documented in the "Idle inhibit" section of [power.md](../power.md) and in [README.md](../../README.md#configuration) (the `inhibit` key of the three power profiles). Line references into `src/` and `tests/` in the plan below are against picowl commit b9eac6d (the plan's baseline), not against the current code; the function names are current. Line references into wlroots are against wlroots 0.19.0, those into labwc and dwl against the versions the plan was written for. Where the code differs from the plan, the [Implementation notes](#implementation-notes) say so.
 
-The code is in `src/idle.c` (inhibitors, visibility rule), `src/dim.c` (`pw_dim_set_inhibited`) and `src/power.c` (`pw_power_inhibit`); the user documentation is the "Idle inhibit" section of `doc/power.md`. Deviations from this plan are listed under [Implementation notes](#implementation-notes).
-
+The code is in `src/idle.c` (inhibitors, visibility rule), `src/dim.c` (`pw_dim_set_inhibited`) and `src/power.c` (`pw_power_inhibit`); the user documentation is the "Idle inhibit" section of `doc/power.md`. 
 picowl offers `zwp_idle_inhibit_manager_v1`. An inhibitor counts only while its surface is visible: the focused toplevel, or a layer surface whose scene node is enabled. While at least one inhibitor counts, `power.c` stops its dim and blank timers. The power key and the output-power protocol can still blank the screen. A per-profile key, `[power.<profile>] inhibit`, lets the user disable inhibitors per profile (for example on LOW).
 
 ## Problem
 
 - The player draws frames but gets no input during playback. picowl dims after `dim_after_s` and blanks after `blank_after_s` (BATTERY: 20 s / 60 s, `src/config.c:209`). A film on battery goes dark after one minute.
-- `doc/mediaplayer-integration.md:97-100` (§2.8) and work items 5 and 6 (`:131-132`) ask picowl to "honour inhibitors from a visible surface in `power.c` (no dim, no blank)". Acceptance: "No dim or blank during playback with an inhibitor; normal timeouts after it is destroyed".
+- [mediaplayer-integration.md](../mediaplayer-integration.md) §2.8 and work items 5 and 6 (§4) ask picowl to "honour inhibitors from a visible surface in `power.c` (no dim, no blank)". Acceptance: "No dim or blank during playback with an inhibitor; normal timeouts after it is destroyed".
 - Only picowl's own timer drives dim and blank. `dim_timer_cb` calls `pw_dim_tick` (`src/power.c:119-125`), and the only thing that restarts it is input through `pw_power_activity` (`src/power.c:225-235`, called from `activity()` in `src/input.c:95-100`). ext-idle-notify feeds nothing into `power.c`: `src/idle.c:13-18` only notifies clients. So `wlr_idle_notifier_v1_set_inhibited()` on its own would not stop dimming. The inhibit has to reach `dim.c`.
 - Nothing about inhibit exists today. `dim.c` has no such concept (`src/dim.h:46-51`), and nothing in `src/` calls `wlr_idle_inhibit_v1_create`.
 
@@ -108,7 +107,7 @@ void pw_power_inhibit(struct pw_server *server, unsigned reason, bool on);
 - `struct pw_power` (`src/power.c:16-26`) gains `unsigned inhibit_mask`.
 - The effective value is `(mask & PW_INHIBIT_CLIENT && config->power[profile].inhibit) || (mask & ~PW_INHIBIT_CLIENT)`.
 - `apply_inhibit(p)` computes the effective value. If it differs from `p->dim.inhibited`, it calls `sync_blanked(p)`, then `run_actions(p, pw_dim_set_inhibited(...))`, then `rearm(p)`. `rearm` disarms the timer when the deadline is -1 (`src/power.c:96-99`), so playback costs no wakeups.
-- **`PW_INHIBIT_SESSION`** (optional, about 15 lines, for Path B step 1 in `doc/mediaplayer-integration.md` §3.1):
+- **`PW_INHIBIT_SESSION`** (optional, about 15 lines, for Path B step 1 in [mediaplayer-integration.md](../mediaplayer-integration.md) §3.1):
   - Today, while `mediaplayer-drm` owns the display on another VT, picowl gets no input, but its dim timer keeps running. It then writes the sysfs backlight under the other program's video (`src/power.c:65-79`).
   - Fix: listen to `server->session->events.active` (`include/wlr/backend/session.h:60`; `server->session` is filled at `src/server.c:197` and is NULL on headless). Set the bit while `!session->active`.
 
@@ -153,7 +152,7 @@ struct pw_inhibitor {                /* one per zwp_idle_inhibitor_v1 */
 | `src/config.c`, `src/powerprofile.h` | The `inhibit` key in the `power.` branch (`config.c:533-557`), `parse_bool_strict`, and the updated initializers (`:208-210`) | `pw_config_default`, `pw_config_load` |
 | `data/picowl.ini.example` | Commented `inhibit = yes` lines in `[power.ac]`, `[power.battery]` and `[power.low]` (`:131-150`) | |
 | `doc/power.md` | New "Idle inhibit" section with the rule tables; `inhibit` rows in the three profile tables | |
-| `README.md` | Add `zwp_idle_inhibit_manager_v1` to the protocol list. Fix `:291`, which names `org_kde_kwin_idle_notify`; picowl actually offers `ext_idle_notifier_v1` (`src/idle.c:7`) | |
+| `README.md` | Add `zwp_idle_inhibit_manager_v1` to the protocol list. Fix the line that named `org_kde_kwin_idle_notify`; picowl offers `ext_idle_notifier_v1` (done: the README protocol list names it) | |
 | `tests/…` | See [Tests](#tests) | |
 
 **Visibility walk.** Every function used here exists in wlroots 0.19: `wlr_surface_get_root_surface` (`wlr_compositor.h:368`), `wlr_xdg_popup_try_from_wlr_surface` (`wlr_xdg_shell.h:557`), `wlr_xdg_toplevel_try_from_wlr_surface` (`:548`), `wlr_layer_surface_v1_try_from_wlr_surface` (`wlr_layer_shell_v1.h:147`) and `wlr_scene_node_coords` (`wlr_scene.h:317`).
@@ -195,12 +194,12 @@ Unchanged: `src/input.c` (activity and swallow handling stay as they are) and `s
 | `calloc` of `pw_inhibitor` fails | The `new_inhibitor` signal cannot fail the request, so it is logged and the inhibitor is ignored (`data` stays NULL) |
 | Client crashes or disconnects | wlroots destroys the resource, then the inhibitor, then the destroy event fires, and the timers restart from now |
 | Surface destroyed before the inhibitor | wlroots destroys the inhibitor on surface destroy (`types/wlr_idle_inhibit_v1.c:52-57,95-96`). Same path as above |
-| A hung but connected client keeps a visible inhibitor | The screen stays on. Remedies: the power key, or switching to another app. A cap on inhibit duration is an open question |
+| A hung but connected client keeps a visible inhibitor | The screen stays on. Remedies: the power key, or switching to another app. A cap on inhibit duration is not implemented (see [Open questions](#open-questions)) |
 | Player sent to the background (alt-tab, panel launch) | The inhibit drops, and the normal timeouts start from that moment. Audio keeps playing; the player's frame callbacks stop when the outputs are disabled |
 | Any client can keep the screen on while it is visible | This is the Wayland norm (cage, labwc, dwl). No allowlist |
 | Panel applet "caffeine" style inhibitor | Doesn't count while autohide hides the panel. Documented as a limitation |
 | VT switched away (Path B step 1) | Without `PW_INHIBIT_SESSION`, picowl's timer dims the backlight under the other VT's video. With it, the timers are frozen and restart from now when the session becomes active again |
-| DRM lease (Path B step 2) | Out of scope here. A `PW_INHIBIT_LEASE` bit fits this reason mask; see the DRM-lease design |
+| DRM lease (Path B step 2) | Out of scope here. A `PW_INHIBIT_LEASE` bit fits this reason mask; see [drm-lease.md](drm-lease.md) |
 | Config typo, e.g. `inhibit = ye` | WLR_INFO log; the default `yes` is kept |
 
 ## Memory/CPU cost on 64 MiB boards
@@ -260,18 +259,26 @@ Boards: h3870 (`pwm-backlight`), h5550 (on/off backlight: the blank-only path), 
 - Audio-only playback should not hold an inhibitor, so the screen can blank and save power. The player may offer a switch for this.
 - Don't fake input (for example through virtual-keyboard) to keep the screen awake. Don't use `zwlr_output_power_management_v1` for this either.
 - Expect the first tap after a blank to be swallowed (`src/dim.c:27-32`), and expect frame callbacks to stop while blanked: pace from the audio clock (§2.6).
-- **Path B:** before a VT switch, nothing extra is needed beyond the optional `PW_INHIBIT_SESSION` on the picowl side. For lease mode, see the DRM-lease design.
+- **Path B:** before a VT switch, nothing extra is needed beyond the optional `PW_INHIBIT_SESSION` on the picowl side. For lease mode, see [drm-lease.md](drm-lease.md).
 
 ## Open questions
 
-1. **UNDIM when an inhibitor appears while DIMMED.** Chosen: yes (a client may undim, never unblank). The alternative is to keep it dimmed until input.
-2. **LOW default.** `yes`, or a three-way `inhibit = yes|no|dim` (allow dimming, prevent blanking)? The `dim` value costs about 10 lines in `dim.c` [est].
-3. **Maximum inhibit duration.** For example `[power] inhibit_max_s`, as protection against hung clients. Not planned unless it is seen in the field.
-4. **Panel-applet inhibitors** while the panel is auto-hidden. They could count while hidden, or a keybinding action `toggle_inhibit` could set a third reason bit (`PW_INHIBIT_USER`) instead.
-5. **Whether to ship `PW_INHIBIT_SESSION` with this work** or with the Path B step 1 hardware checks (`doc/mediaplayer-integration.md:105-111`).
-6. **Dead `server->idle_timer`.** It is never assigned in `src/`, only removed (`src/picowl.h:267`, `src/server.c:353-356`). It could be removed in the same change as cleanup.
+Answered by the implementation:
+
+1. **UNDIM when an inhibitor appears while DIMMED.** Yes: a client may undim, never unblank.
+2. **LOW default.** `yes`; the key takes `yes|no` only. A third value `dim` (allow dimming, prevent blanking) was not added.
+5. **`PW_INHIBIT_SESSION`.** Shipped with this work (`session_active_cb` in `src/power.c`).
+
+Still open, in the [roadmap](roadmap.md):
+
+- A maximum inhibit duration against hung clients. The plan suggested a `[power] inhibit_max_s` key; that key is a proposal and does not exist in `src/config.c`.
+- Panel-applet inhibitors while the panel is auto-hidden (count while hidden, or a `toggle_inhibit` key action with a `PW_INHIBIT_USER` reason bit).
+- The `dim` value for `inhibit` on LOW.
+- The unused `server->idle_timer` (`src/picowl.h`, `pw_server_finish` in `src/server.c`): it is never assigned, only removed.
 
 ## Effort estimate
+
+The estimate made before the work, kept for reference.
 
 | Part | Effort |
 |---|---|
@@ -286,7 +293,7 @@ Boards: h3870 (`pwm-backlight`), h5550 (on/off backlight: the blank-only path), 
 
 ## Implementation notes
 
-Deviations from the plan above. Line references in the plan are against the old commit; everything was re-located in the current code.
+Deviations from the plan above. The plan's line references are against commit b9eac6d; the code was re-located by function name.
 
 - **Strict bool parsing.** The current `src/config.c` already has `parse_bool_log()`, which returns false and keeps the old value on unknown text (the plan's `parse_bool` problem no longer exists). The `inhibit` key uses it, so no `parse_bool_strict` was added. It logs at WLR_ERROR, like the other boolean keys, not at WLR_INFO.
 - **`pw_idle_inhibit_update()` runs at the end of `pw_panel_update()`**, not as its first statement. Called first, it would see the panel state from before the change, so a panel that autohide has just hidden would still count. It now runs after the panel node is enabled or disabled, on every call (also when the hidden state did not change).

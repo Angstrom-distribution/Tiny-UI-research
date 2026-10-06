@@ -1,10 +1,10 @@
 # DRM lease support
 
-**Status:** implemented.
+**Status:** implemented in picowl; not verified on a board or under vkms (the vkms test exists but has never run, see the Implementation notes). The behaviour is documented in [lease.md](../lease.md) and in [README.md](../../README.md#configuration) (the `[lease]` section). Line references into picowl's own files (`src/`, `tests/`) are against picowl commit b9eac6d, the plan's baseline, not against the current code; the function names are current. Line references into wlroots are against wlroots 0.19.0 (see "How sources are cited"). Where the code differs from the plan, the [Implementation notes](#implementation-notes) say so.
 
-The code is in `src/lease.c` and `src/leasepolicy.c` with hooks in `src/output.c`, `src/input.c`, `src/view.c`, `src/power.c` and `src/config.c`, plus wlroots patch 0004; the user documentation is `doc/lease.md`. Deviations from this plan are listed under [Implementation notes](#implementation-notes).
+The code is in `src/lease.c` and `src/leasepolicy.c` with hooks in `src/output.c`, `src/input.c`, `src/view.c`, `src/power.c` and `src/config.c`, plus wlroots patch 0004;
 
-picowl offers its DRM output through `wp_drm_lease_device_v1` (wlroots `wlr_drm_lease_v1`). The media player (`--vo drm:lease`) can then drive KMS directly, without a VT switch, and picowl takes the output back when the lease ends. This is work item 9 of `doc/mediaplayer-integration.md` §4, and Path B step 2 in §3.2 of that document.
+picowl offers its DRM output through `wp_drm_lease_device_v1` (wlroots `wlr_drm_lease_v1`). The media player (`--vo drm:lease`) can then drive KMS directly, without a VT switch, and picowl takes the output back when the lease ends. This is work item 9 in [mediaplayer-integration.md](../mediaplayer-integration.md) §4, and Path B step 2 in §3.2 of that document.
 
 How sources are cited:
 - `wlroots …` is the 0.19.0 tree used for this design. It already has picowl patches 0001 to 0003 applied (`backend/drm/drm.c:1443` is `wlr_drm_connector_set_copy_type`).
@@ -19,7 +19,7 @@ Path A (`--vo wayland`) cannot reach these hardware paths:
 - MediaQ C8 and pixel doubling;
 - GC0C tear-free flips.
 
-Only a KMS client can drive them (`doc/mediaplayer-integration.md` §1, §3). Today the only way to give the player KMS is a VT switch (Path B step 1). That costs:
+Only a KMS client can drive them ([mediaplayer-integration.md](../mediaplayer-integration.md) §1, §3). Today the only way to give the player KMS is a VT switch (Path B step 1). That costs:
 - **No input in picowl:** the libinput backend suspends while the session is inactive (`wlroots backend/libinput/backend.c:172-174`). The player must open evdev itself and handle the power key.
 - **Dimming with nobody watching:** picowl's dim timer keeps running. It can dim the backlight (sysfs) under the player, because no input reaches picowl.
 - **No recovery from a player crash:** the device stays on the player's VT. An iPAQ has no keyboard to switch back with.
@@ -37,7 +37,7 @@ A lease gives the player the same KMS objects:
 | Does wlroots only lease non-desktop connectors? | No. `wlr_drm_lease_v1_manager_offer_output` checks only that the output is a DRM output of a backend with a lease device (`wlroots types/wlr_drm_lease_v1.c:525-577`). Restricting is compositor policy: cage offers only `non_desktop` outputs (`cage/output.c:238-246`), and labwc offers every DRM output (`labwc/src/output.c:663-676`). |
 | Can picowl lease its only connector? | Yes. When the lease is granted, wlroots destroys the `wlr_output` (`wlroots backend/drm/drm.c:2321-2327` → `disconnect_drm_connector` :2219-2229). It skips the connector on rescans while the lease lives (:1929-1931) and re-creates it through `new_output` when the lease ends (:2344-2366). picowl runs with zero outputs in between. |
 | Can only a plane (e.g. the overlay) be leased? | No. The kernel requires at least one CRTC and one connector (`linux drivers/gpu/drm/drm_lease.c:346-375`), and the wlroots API leases whole outputs. The player always takes the whole output. |
-| What objects does wlroots lease? | The connector, its CRTC, the CRTC's primary plane and the cursor plane if one exists (`wlroots backend/drm/drm.c:2270-2298`). **Overlay planes are not leased.** `struct wlr_drm_crtc` knows only `primary` and `cursor` (`wlroots include/backend/drm/drm.h:84-85`; assignment at `drm.c:250-266`). With universal planes on, which wlroots sets at `drm.c:73`, the kernel adds no plane implicitly (`linux drm_lease.c:439-455`). An unleased object is invisible to the lessee. So `mediaplayer-integration.md` §3.2 is wrong: the "w100 overlay" is **not** in a stock 0.19 lease. |
+| What objects does wlroots lease? | The connector, its CRTC, the CRTC's primary plane and the cursor plane if one exists (`wlroots backend/drm/drm.c:2270-2298`). **Overlay planes are not leased.** `struct wlr_drm_crtc` knows only `primary` and `cursor` (`wlroots include/backend/drm/drm.h:84-85`; assignment at `drm.c:250-266`). With universal planes on, which wlroots sets at `drm.c:73`, the kernel adds no plane implicitly (`linux drm_lease.c:439-455`). An unleased object is invisible to the lessee. So the "w100 overlay" is **not** in a stock 0.19 lease (an earlier version of [mediaplayer-integration.md](../mediaplayer-integration.md) §3.2 said it was; it now names patch 0004). |
 | Kernel driver support needed? | None beyond `DRIVER_MODESET`. Leasing lives in the DRM core: it is built unconditionally (`linux drivers/gpu/drm/Makefile:57`) and gated only on `DRIVER_MODESET` (`drm_lease.c:491-492`). The four iPAQ drivers are out of tree, so their object sets (one CRTC? overlay `possible_crtcs`?) are **unverified**. |
 | What does the lessee get? | A new `drm_file` cloned from picowl's (`linux drm_lease.c:551-561`, `is_master = 1`). Client caps are per file, so the player must set `UNIVERSAL_PLANES` and `ATOMIC` again. |
 | Who may still touch leased objects? | The top-level lessor holds every object (`linux drm_lease.c:88-94`). wlroots uses this right after creating the lease: destroying the output runs `dealloc_crtc`, which commits the CRTC off (`wlroots drm.c:1271`, `:1493-1510`). The player always starts from a disabled CRTC. |
@@ -180,7 +180,7 @@ The fix is to keep no connector pointers in the lease, since those connectors ar
 | VT switch while leased | picowl revokes in the pause handler, while it is still master. The rescan's `new_output` is parked and adopted on resume. |
 | Lease ends while switched away | `drmModeRevokeLease` fails with EACCES (logged by wlroots, `drm.c:2336-2339`). The kernel lessee goes away anyway when the fd closes. The output is parked, then adopted on resume. |
 | picowl exits or crashes while leased | `pw_lease_finish` revokes. If picowl crashes, the kernel revokes all leases when picowl's master file closes (`linux drm_auth.c:353-358`). The player sees EACCES or ENOENT and a Wayland disconnect. |
-| Overlay plane not leased (no patch 0004, or the driver's `possible_crtcs` does not match) | The player's `set_overlay` commit fails and it falls back to the software path for the run (`media-player.md` §5.6). C8, doubling and flips are on the primary plane and still work. |
+| Overlay plane not leased (no patch 0004, or the driver's `possible_crtcs` does not match) | The player's `set_overlay` commit fails and it falls back to the software path for the run (the player's behaviour, not verified here). C8, doubling and flips are on the primary plane and still work. |
 | Lease while blanked | Granted. The hold sets ACTIVE, and the player modesets. |
 | Existing blank mismatch across a VT switch | Today `output_new` enables a re-created output while `server->blanked` stays true (`output.c:402`, `:578-585`). `PW_HOLD_SESSION` sets ACTIVE on pause, which removes the mismatch. |
 
@@ -277,16 +277,23 @@ Runtime:
 
 ## 8. Open questions
 
-1. Is the grant use-after-free fixed upstream after 0.19.0? Backport the upstream fix, or carry part (c) of patch 0004.
-2. What objects do the out-of-tree drivers expose? One CRTC each? The w100 overlay's `possible_crtcs`? Do mq11xx and w100 need the primary plane enabled in the same commit as the overlay? Check with `modetest -p` on each board.
-3. Power key while leased: revoke and blank (proposed), or turn off only the backlight and let audio-only playback continue?
-4. Touch frame: native pixels (proposed), or picowl's last logical frame? Native matches the player's KMS code on both hardware- and software-rotation boards.
-5. Does the OE rootfs run a udev daemon whose monitor wlroots receives? It matters only for the close-fd-only case.
-6. Should layer surfaces (panel, OSK) survive output loss, instead of being closed (`output.c:305-315`)? This is shared with the VT-switch path; it is out of scope here.
-7. Should a lock-screen layer surface created while leased revoke the lease? Today it is closed (`layer.c:300-304`), and the hold stops idle locking anyway.
-8. Is a vkms CI runner with root available? Only that test catches wlroots-level regressions.
+Answered by the implementation (see the Implementation notes):
+
+3. Power key while leased: it revokes the lease, then blanks.
+4. Touch frame: native pixels.
+5. udev: nothing is done for it; the player contract (§7) avoids the case that needs it.
+6. and 7. Layer surfaces (panel, OSK, a lock screen) are closed with the output, as in the VT-switch path; a lock-screen surface created while leased does not revoke the lease.
+
+Still open, in the [roadmap](roadmap.md):
+
+- Whether the grant use-after-free in wlroots 0.19.0 is fixed upstream after 0.19.0 (then backport the upstream fix instead of carrying part (c) of patch 0004); not checked.
+- What objects the out-of-tree drivers expose: one CRTC each, the w100 overlay's `possible_crtcs`, and whether mq11xx and w100 need the primary plane enabled in the same commit as the overlay (check with `modetest -p` on each board).
+- A CI runner with root and vkms for `tests/lease-vkms.sh` (only that test catches wlroots-level regressions).
+- The ASan confirmation of the grant fix, and the hardware checklist in §6.
 
 ## 9. Effort estimate
+
+The estimate made before the work, kept for reference.
 
 | Item | Effort [est] |
 |---|---|
@@ -299,7 +306,7 @@ Runtime:
 
 ## Implementation notes
 
-Deviations from the plan above. The line references in the plan are against the old commit; everything was re-located in the current code.
+Deviations from the plan above. The plan's line references are against commit b9eac6d; the code was re-located by function name.
 
 - **No `pw_power_hold`.** The idle-inhibit work had already added a source mask: `pw_power_inhibit(server, reason, on)` with `PW_INHIBIT_CLIENT` and `PW_INHIBIT_SESSION` (`src/power.h`), and `power.c` already listens to the session `active` signal. The lease is one more bit, `PW_INHIBIT_LEASE`, and the plan's `PW_HOLD_*` names do not exist. The plan's "holding from BLANKED unblanks" does not hold for that mask (an inhibitor never unblanks), so the grant calls `pw_power_set_blanked(false)` before it grants. `PW_HOLD_SESSION`'s other job, removing the blank mismatch across a VT switch, was not needed: `output_adopt` already disables a re-created output while `server->blanked` is set (the "Hotplugged while blanked" branch), which keeps the two consistent. The power tests are therefore lease sequences in `tests/test-dim.c` (unblank, hold, release; undim and a profile switch while held), not a new `pw_power_hold` test. The bit mask itself lives in `power.c`, which has no unit test; `power-e2e` covers it for the client reason.
 - **`pw_lease_init` runs at the end of `pw_server_init`** (after `pw_power_init`), not after `pw_output_init`. It still runs before `wlr_backend_start`, so the first output is offered. The request handler needs the views, the layers and the power module, which exist by then. `pw_output_finish` is new: wlroots asserts that nothing listens to `session->events.active` when the session is destroyed, so `output.c` removes its listener like `power.c` does. `pw_lease_finish` runs before `wl_display_destroy_clients`, after `pw_zerocopy_finish`.
@@ -313,5 +320,5 @@ Deviations from the plan above. The line references in the plan are against the 
 - **Patch 0004 (c).** The lease keeps `connectors = NULL`, `n_connectors = 0`. Whether upstream fixed the use-after-free after 0.19.0 was not checked: the build container has no network access. `objects[]` has `3 * n_outputs + drm->num_planes + 1` entries as planned, and an overlay plane that is possible on several leased CRTCs is added once, because the kernel rejects a duplicate object.
 - **Tests that could not run here.** There is no `/dev/dri`, no vkms and no kernel module support in the build container, so `tests/lease-vkms.sh` (with `tests/pw-lease-client.c`, suite `vkms`, exit 77 without root, `/dev/dri` and the module) was compiled but never run. The grant path, the parking path, the touch mapping and the key policy at run time were reviewed but not exercised; the ASan confirmation of the grant fix is open. The `meson test` run under `-Db_sanitize=address,undefined` passes (except `rss`, whose ceiling the sanitizer exceeds). The `lease-vkms` script treats a picowl that cannot start (no seat) as a skip, not a failure. Its close-fd-only case runs only when `/run/udev` exists.
 - **The vkms test is opt-in.** The plan says it is not in default CI. `lease-vkms` is registered in suite `vkms`, but as root with `/dev/dri` it would load the `vkms` module and start a DRM compositor on a VT in every `meson test`, so the script skips (exit 77) unless `PW_LEASE_VKMS=1`.
-- **Open questions** are answered as proposed: power key and cycle key revoke (question 3), touch in native pixels (4), nothing for udev (5), layer surfaces are closed with the output as in the VT-switch path (6, 7). Questions 1, 2 and 8 are open: they need upstream, the boards and a CI runner.
+- **Open questions** are answered as proposed: power key and cycle key revoke (question 3), touch in native pixels (4), nothing for udev (5), layer surfaces are closed with the output as in the VT-switch path (6, 7). Questions 1, 2 and 8 are open (see the [roadmap](roadmap.md)): they need upstream, the boards and a CI runner.
 - **No inline comments in the `[lease]` snippet.** The parser (`src/config.c`) takes only whole-line `#`/`;` comments, so a `; ...` after a value would become part of it. §2.2 and `doc/lease.md` put the comments on their own lines.

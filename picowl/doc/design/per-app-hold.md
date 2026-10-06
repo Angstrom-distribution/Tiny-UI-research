@@ -1,6 +1,12 @@
 # Per-app tap-and-hold setting
 
-**Status:** implemented.
+**Status:** implemented. The behaviour is documented in [cursors.md](../cursors.md) ("Per-App Hold Overrides") and in [README.md](../../README.md#touch-input) and [README.md](../../README.md#configuration). Line references into picowl's own files (`src/`, `tests/`, `data/`) are against picowl commit b9eac6d, the plan's baseline, not the current code; the function names are current. Line references into wlroots are against wlroots 0.19.0. Evidence tag: [est] estimate.
+
+What the code does beyond or differently from the plan:
+- The hold rules carry a fifth key, `hold_button` (`right`, `middle`), and `pw_touchhold_set_params` takes a button argument. The plan's four keys are all there.
+- `[app.*]` sections also take unrelated keys (`zerocopy_buffers`, `zerocopy_budget_kb`, `exe`, `aspect`); [buffer-budget.md](buffer-budget.md) describes the buffer keys.
+- picowl ships built-in rules `[layer.wvkbd]` and `[layer.panel]` with `hold_action = none` (`pw_config_default` in `src/config.c`); a user section of the same name merges over them. The panel no longer needs `right-click` for its widget menus, so §1's remark about the panel and the hardware checklist item about a hold on the panel are out of date: a tap opens a row (README, "Panel").
+- There is no built-in rule for `mediaplayer` (open question 2 is answered: no).
 
 Implementation: `src/picowl.h` (enums and structures), `src/config.c` (parser and lookup), `src/touchhold.h/.c` (pw_touchhold_set_params), `src/input.c` (hold_identity and per-app binding).
 
@@ -10,11 +16,11 @@ Adds per-`app_id` (xdg toplevels) and per-namespace (layer-shell) overrides of t
 
 - picowl converts touch to pointer events and advertises only `WL_SEAT_CAPABILITY_POINTER` (`src/input.c:102-110`). Tap-and-hold is the pure state machine in `src/touchhold.c`. It is configured once at startup from `[touch]` (`src/input.c:735-737`), and that one configuration applies to every surface.
 - In the default `right-click` mode, the left press is held back until the finger lifts, moves more than `slop_px`, or reaches `hold_ms` (`src/touchhold.h:20-35`, `src/touchhold.c:58-82`, `:102-123`). At `hold_ms` the state machine sends a `BTN_RIGHT` click and drops everything until lift (`pw_touchhold_tick`, `src/touchhold.c:102-123`, `src/input.c:514-520`).
-- For the media player (`doc/mediaplayer-integration.md:91-93`, work item 11 at `:137`), the default mode causes three problems:
+- For the media player ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.7, work item 11 in §4), the default mode causes three problems:
   - **Seek bar.** A press, pause and drag (scrubbing) turns into a right click at 900 ms, and the drag is lost because the state machine is in TRIGGERED and drops all events (`src/touchhold.c:79-80`).
   - **Latency.** Every tap is delivered only at lift (`src/touchhold.c:94-95`), so the OSD cannot react to touch-down.
   - **Long press.** The player wants to time its own long press (for seeking, and the long-press menu in the player design). picowl's fixed 300/900 ms thresholds and its animation get in the way.
-- `hold_action = none` already gives the right behaviour: an immediate `BTN_LEFT` press at down, motion forwarded, release at lift, and no animation (`src/touchhold.c:48-51`). Today it is global, though, and the panel needs `right-click` for its widget menus (`doc/panel.md:17-18`).
+- `hold_action = none` already gives the right behaviour: an immediate `BTN_LEFT` press at down, motion forwarded, release at lift, and no animation (`src/touchhold.c:48-51`). Before this plan it was global, and the panel then needed `right-click` for its widget menus (it does not any more, see the status).
 
 ## 2. Design
 
@@ -85,7 +91,7 @@ bool pw_config_hold(const struct pw_config *c, enum pw_rule_kind kind,
 	const char *name, struct pw_hold_params *out);
 ```
 
-- **Why a generic `pw_app_rule`.** The per-app buffer budget plan (`doc/mediaplayer-integration.md:55`) can add its own fields and `PW_*_SET_*` bits to the same struct and the same `[app.*]` section (§8).
+- **Why a generic `pw_app_rule`.** The per-app buffer budget plan ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.3) can add its own fields and `PW_*_SET_*` bits to the same struct and the same `[app.*]` section (§8).
 - **Global fields stay.** The existing `hold_*` and `slop_px` fields of `struct pw_config` (`src/picowl.h:108-113`) are kept, so the existing tests and `input.c:735` need no change.
 
 ### 2.3 State machine (`src/touchhold.h` / `.c`)
@@ -269,7 +275,7 @@ Size: about 90 lines in `config.c`, 15 in `touchhold.c`, 35 in `input.c` [est].
 Run `picowl -d 2` with `[app.mediaplayer] hold_action = none`, and the player with `WAYLAND_DEBUG=1`:
 - [ ] A hold on the video sends `wl_pointer.button` 272 pressed at touch-down, no 273 (`BTN_RIGHT`), and no hold animation. The log shows `hold: app 'mediaplayer' -> none`.
 - [ ] Seek bar: press, wait 2 s, then drag. Motion is delivered throughout, with release at lift.
-- [ ] While the player is focused, a hold on the panel still opens the widget menu (right click, animation shown).
+- [ ] While the player is focused, a hold on the panel follows the panel's own rule (the built-in `hold_action = none`; written as a right click in the plan, see the status).
 - [ ] A GTK+2 app without a rule still gets a right click at 900 ms.
 - [ ] A popup menu of an app with a rule follows the app's rule. A popup of the panel follows `[layer.<ns>]` or the globals.
 - [ ] An app that sets `app_id` late, or changes it: the next touch uses the new rule.
@@ -278,7 +284,7 @@ Run `picowl -d 2` with `[app.mediaplayer] hold_action = none`, and the player wi
 
 ## 7. Mediaplayer side
 
-- Call `xdg_toplevel.set_app_id("mediaplayer")` before the first commit (`doc/mediaplayer-integration.md:24`). Under picowl the touch config works without that ordering, but the buffer-budget plan may need it.
+- Call `xdg_toplevel.set_app_id("mediaplayer")` before the first commit ([mediaplayer-integration.md](../mediaplayer-integration.md) §2.1). Under picowl the touch config works without that ordering, but the buffer-budget plan may need it.
 - The player cannot query the mode, so it must handle **both** modes:
   - **`BTN_RIGHT` click** (default mode): treat it as a long press and open the fuller menu.
   - **`BTN_LEFT` held** with motion under the player's own slop for its long-press time: run its own long-press logic (seek, menu). In default mode press and release arrive together at lift, so this timer never fires.
@@ -293,13 +299,20 @@ Run `picowl -d 2` with `[app.mediaplayer] hold_action = none`, and the player wi
 
 ## 8. Open questions
 
-1. **One `[app.*]` namespace for all per-app settings?** The buffer-budget plan should reuse `[app.<app_id>]` and `struct pw_app_rule` (for example a `budget_kb` key) rather than add a separate `[zerocopy.apps]` table. That needs agreement between the two plans.
-2. **Built-in default rule for `mediaplayer`?** That would mean zero setup for the player. Proposed answer: no, keep policy in config.
-3. **Prefix or glob matching for `app_id`** (`org.example.*`)? Not needed now; it can be added later.
-4. **Per-region override by client request** (a small protocol request, so a client disables hold only over the video area)? Not needed while the player implements long press itself in `none` mode.
-5. **Config reload on SIGHUP?** This design is ready for one, but reload is a separate feature.
+Answered by the code:
+
+1. **One `[app.*]` namespace for all per-app settings?** Yes: the buffer budget reuses `[app.<app_id>]` and `struct pw_app_rule`.
+2. **Built-in default rule for `mediaplayer`?** No, policy stays in config. Built-in rules exist only for the layer namespaces `wvkbd` and `panel`.
+
+Still open, in the [roadmap](roadmap.md) (ideas, none needed now):
+
+- Prefix or glob matching for `app_id` (`org.example.*`).
+- A per-region override requested by the client (a small protocol request, so a client disables hold only over the video area). Not needed while the player implements long press itself in `none` mode.
+- Config reload on SIGHUP. The lookup reads `server->config` at every touch-down, so a reload would take effect at once; there is no SIGHUP handling in `src/` today.
 
 ## 9. Effort estimate
+
+The estimate made before the work, kept for reference.
 
 | Part | Effort [est] |
 |---|---|
