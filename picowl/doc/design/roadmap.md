@@ -13,8 +13,8 @@ Verification so far means the headless test suite in a clean `debian:trixie` arm
 | Crisp panel style (no anti-aliasing), `--crisp-font fixed\|dejavu` | implemented, default font `fixed`; containers only | README "Crisp style", `doc/design/panel-text.md` |
 | Tiled pair: second window gets at least half (`[layout] second_min`, default 50) | implemented | README "Tiled layout" |
 | Panel on the short edge of a rotated output (`--edge auto\|top`) | implemented; with software rotation pixel-identical to the portrait bar | README "Rotated output", `doc/panel.md` |
-| Hardware-rotation hint (`picowl-rotation-v1`) so the strip also works under hardware rotation | built, local branch, review fixes in progress | section 3 |
-| Runtime density-based style and bar height (`--style auto`, `--dpi`, `--height auto`, `[output] size_mm`) | built, local branch, review fixes in progress | `doc/design/ipaq-displays.md` |
+| Hardware-rotation hint (`picowl-rotation-v1`) so the strip also works under hardware rotation | implemented and reviewed; headless emulation of the hardware path only | section 3 |
+| Runtime density-based style and bar height (`--style auto`, `--dpi`, `--height auto`, `[output] size_mm`) | implemented and reviewed; containers only | `doc/design/ipaq-displays.md` |
 | havoc per-cell damage (patch 0002) | implemented; fake compositor only | `oe/recipes-graphics/havoc/README.md` |
 | Hold animation, panel hold timings | implemented | README "Tap-and-hold", `doc/cursors.md` |
 | Research: MediaQ C8 and the 2D engine | design only | `doc/design/mediaq-c8.md` (section 8.6, experiments E9 to E14) |
@@ -32,10 +32,10 @@ Verification so far means the headless test suite in a clean `debian:trixie` arm
 - **Display facts.** QVGA iPAQs are 106 to 115 ppi, the hx4700 about 203 ppi; no driver sets the subpixel order. `doc/design/ipaq-displays.md`.
 - **Container testing recipe that works.** Use Apple `container`, always `--rm`; stream `git archive HEAD picowl` into the container's own filesystem and extract it first, before any `apt-get` (apt otherwise consumes the stream and `tar` fails with "Unaligned block"); never build on a bind mount; install `fonts-liberation` (`panel-e2e` fails without a TrueType file); do not end a verification before the container has finished (the suite takes 6 to 10 minutes).
 
-## 3. In progress
+## 3. Just finished, and next
 
-1. **Review fixes for the hint and density work.** An independent review found no blocking problem and eight minor ones: a tap during a pending look change can open a row that is never drawn for about 3 s; a reported density has no plausibility bound (a `size_mm = 5x7` typo gives an 80 px bar); a test seam turns the view twice after blank and unblank; two tests do not exercise the paths they claim; several documents still say the panel always reads a font file; test helper comments are misplaced; two one-off mutation scripts were committed. All are being fixed; the suite is run again afterwards.
-2. After that: push, then ask the build peer for packages of `picowl` and `picowl-panel`, so that one install carries the tiling change, the strip, the DejaVu font, the hint and the density detection.
+1. **The hint and the density work** passed an independent adversarial review (no blocking finding, eight minor ones) and the minor ones were fixed: a tap during a pending look change can no longer open a row that is never drawn; a density outside 60 to 400 ppi, from the compositor or from `size_mm`, falls back to the mode class with a warning (`--dpi` still overrides); the hardware-rotation test path no longer turns the view twice after blank and unblank; the leak check now rebuilds on every change of look; the documents that said the panel always reads a font file were corrected. One gap remains by design of the headless backend: a real density change at run time through the `wl_output` callbacks, and a configure arriving in the same batch as a look change, are covered only by unit tests of the decision and of the stale-configure rule. The full suite on the merged head: 56 OK, 0 FAIL, 1 opt-in skip, 0 compiler warnings.
+2. **Next:** ask the build peer for packages of `picowl` and `picowl-panel`, so that one install carries the tiling change, the strip, the DejaVu font, the hint and the density detection; the install bundle for the board then gets rebuilt around those packages.
 
 ## 4. Planned, in the order proposed
 
