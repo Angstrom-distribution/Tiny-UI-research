@@ -36,8 +36,10 @@
 #  U: --style crisp: over a bare desktop, a window of one colour and a patterned
 #     window the pixels of the bar and of every kind of row are exactly the
 #     colours of the theme (no anti-aliasing, no subpixel text, no colour of any
-#     other kind), the smooth style has hundreds, the 1 px lines of the battery
-#     are whole rows and columns, --font, --font-size and --subpixel are ignored.
+#     other kind), in both pixel fonts (--crisp-font fixed and dejavu: the same
+#     colours, the proportional DejaVu bitmaps add none), the smooth style has
+#     hundreds, the 1 px lines of the battery are whole rows and columns,
+#     --font, --font-size and --subpixel are ignored.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -1209,7 +1211,7 @@ u_scene() {
 		CLIENTPID=$!
 		wait_for "$DIR/client.out" 'mapped' 5 "U client"
 	fi
-	start_panel u --style crisp --popup-alpha 255 --inject "$inj"
+	start_panel u --style crisp --crisp-font "$UFONT" --popup-alpha 255 --inject "$inj"
 	[ "$uh" -gt 18 ] && wait_for "$DIR/u.out" '^row ' 5 "U $name row open"
 	sleep 0.3
 	"$CAPTURE" --palette "0,0,240,$uh" --dump "0,0,240,$uh" >"$DIR/u.cap" 2>&1 || fail "U $name: capture failed: $(head -c 300 "$DIR/u.cap")"
@@ -1219,11 +1221,12 @@ u_scene() {
 	u_got "$DIR/u.cap" >"$DIR/u.got"
 	if ! cmp -s "$DIR/u.want" "$DIR/u.got"; then
 		echo "U $name: wanted"; cat "$DIR/u.want"; echo "got"; cat "$DIR/u.got"
-		fail "U $name: the colours of the panel are not exactly its palette (window: ${win:-none})"
+		fail "U $name: the colours of the panel are not exactly its palette (font: $UFONT, window: ${win:-none})"
 	fi
-	echo "panel-e2e: U $name (window: ${win:-none}): $(wc -l <"$DIR/u.got") colours, exactly the palette"
+	echo "panel-e2e: U $name (font: $UFONT, window: ${win:-none}): $(wc -l <"$DIR/u.got") colours, exactly the palette"
 }
 # One scene per kind of row, each over the three grounds.
+for UFONT in fixed dejavu; do
 for WIN in "" "--color 00ff00" "--pattern"; do
 	u_scene "closed bar" 18 73 Discharging "w1" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL
 	u_scene "backlight row" 54 73 Charging "ibl" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_CHARGING \
@@ -1234,6 +1237,7 @@ for WIN in "" "--color 00ff00" "--pattern"; do
 		$C_HL $C_ROW $C_ROWLINE
 	u_scene "battery row" 54 10 Charging "ibat" "$WIN" $C_BG $C_LINE $C_FG $C_EMPTY $C_LOW \
 		$C_THUMB $C_HL $C_ROW $C_ROWLINE
+done
 done
 
 # The same scene in the smooth style has intermediate colours all over.
@@ -1300,8 +1304,21 @@ has "$DIR/u.out" '^text subpixel=none$' "U crisp text is never subpixel text"
 [ ! -s "$DIR/u.out.err" ] || fail "U: --font and --font-size are ignored with a message: $(cat "$DIR/u.out.err")"
 TH=$(val "$DIR/u.out" row thumb)
 [ "$(comp "$TH" 3)" -eq 21 ] && [ "$(comp "$TH" 4)" -eq 21 ] || fail "U: the thumb is $TH, wanted 21 px"
+has "$DIR/u.out" ' crisp_font=fixed$' "U the style line names the default pixel font"
 dump u.out --style crisp --inject "icl"
 has "$DIR/u.out" '^row kind=date .* size=20 ' "U the date is in the 20 px font"
+# The DejaVu bitmaps: Bold 11 in the bar (a 12 px cell), the date in Bold 12 (13 px),
+# and the font is not the one --font names.
+dump u.out --style crisp --crisp-font dejavu --subpixel rgb --font /nonexistent/font.ttf --inject "icl"
+has "$DIR/u.out" '^style crisp font=pixel size=12 small=12 .* crisp_font=dejavu$' "U the style line of the DejaVu font"
+has "$DIR/u.out" '^text subpixel=none$' "U crisp DejaVu text is never subpixel text"
+has "$DIR/u.out" '^row kind=date .* size=13 ' "U the date is in the 13 px cell of Bold 12"
+[ ! -s "$DIR/u.out.err" ] || fail "U: --crisp-font dejavu printed a message: $(cat "$DIR/u.out.err")"
+"$PANEL" --crisp-font comic --dump-state >"$DIR/u.out" 2>"$DIR/u.err"
+[ $? -eq 2 ] || fail "U: --crisp-font comic is not an error"
+has "$DIR/u.err" "is not fixed or dejavu" "U the message for a bad crisp font"
+dump u.out --style smooth --crisp-font dejavu
+has "$DIR/u.out" '^style font=' "U --crisp-font does nothing in the smooth style"
 dump u.out --style smooth
 has "$DIR/u.out" '^style font=' "U --style smooth is the default style"
 "$PANEL" --style fancy --dump-state >"$DIR/u.out" 2>"$DIR/u.err"

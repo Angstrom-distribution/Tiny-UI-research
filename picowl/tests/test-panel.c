@@ -2160,11 +2160,14 @@ static void test_draw(void)
 
 /* ---- the crisp style ---- */
 
+/* The pixel font the shared crisp checks run with: they run once per font. */
+static enum pl_crisp_font g_cfont = PL_CRISP_FIXED;
+
 static void crisp_env_init(struct env *e, bool row, int bar_h)
 {
 	struct pl_metrics m;
 
-	pl_assets_init_crisp(&e->a, bar_h, 255, 255, PL_CRISP_FIXED);
+	pl_assets_init_crisp(&e->a, bar_h, 255, 255, g_cfont);
 	pl_assets_metrics(&e->a, &m);
 	pl_layout_compute(&e->l, 240, bar_h, row, false, &m);
 	CHECK(pl_assets_prepare(&e->a, &e->l), "the crisp style has nothing to build");
@@ -2323,7 +2326,7 @@ static void test_crisp_formats(void)
 		struct env e;
 		struct pl_metrics m;
 
-		pl_assets_init_crisp(&e.a, BAR, 255, 255, PL_CRISP_FIXED);
+		pl_assets_init_crisp(&e.a, BAR, 255, 255, g_cfont);
 		pl_assets_metrics(&e.a, &m);
 		pl_layout_compute(&e.l, 240, BAR, true, false, &m);
 		canvas_init(&e.b, 240, e.l.h, fmts[k]);
@@ -2528,7 +2531,7 @@ static void test_crisp_fit(void)
 		struct pl_state st = { .est = { PL_EST_TOFULL, 75, false }, .bat_pct = 94,
 			.year = 2026, .mon = 8, .mday = 30, .wday = 3 };
 
-		pl_assets_init_crisp(&a, BAR, 255, 255, PL_CRISP_FIXED);
+		pl_assets_init_crisp(&a, BAR, 255, 255, g_cfont);
 		pl_assets_metrics(&a, &m);
 		pl_layout_compute(&l, w, BAR, true, false, &m);
 		pl_row_text(&l, &a, &st, PL_BTN_CLOCK, &t);
@@ -2882,6 +2885,269 @@ static void test_crisp_no_alloc(void)
 #endif
 }
 
+/* The characters of the bar (the clock, the percentage, AC and --) and of every
+ * date and battery sentence have a glyph with an advance in every face that
+ * text can be set in, and ink unless it is a space. */
+static int proportional_missing_glyphs(const struct pl_font *f)
+{
+	char buf[64];
+	int missing = 0;
+
+	for (int wd = 0; wd < 7; wd++)
+		for (int mon = 0; mon < 12; mon++)
+			for (int md = 1; md <= 31; md++) {
+				pl_date_text(buf, sizeof(buf), 2026, mon, md, wd);
+				for (int face = PL_FACE_ROW; face < PL_FACES; face++)
+					for (const char *c = buf; *c; c++) {
+						const struct pl_pixfont *pf = f->pix[face].f;
+						const uint8_t *g = pl_pixfont_glyph(pf, (unsigned char)*c);
+						int ink = 0;
+
+						for (int r = 0; g && r < pf->h; r++)
+							for (int x = 0; x < pf->w; x++)
+								ink += pl_pixfont_bit(pf, g, r, x);
+						missing += !g || (*c != ' ' && !ink) || !pl_pixfont_adv(pf, *c);
+					}
+			}
+	static const struct pl_estimate kinds[] = {
+		{ PL_EST_NONE, 0, false }, { PL_EST_AC, 0, false }, { PL_EST_FULL, 0, false },
+		{ PL_EST_NOTCHARGING, 0, false }, { PL_EST_CHARGING, 0, false },
+		{ PL_EST_ESTIMATING, 0, false }, { PL_EST_LEFT, 5, false }, { PL_EST_LEFT, 90, false },
+		{ PL_EST_LEFT, 80, true }, { PL_EST_TOFULL, 75, false }, { PL_EST_OVER_LEFT, 0, false },
+		{ PL_EST_OVER_FULL, 0, false },
+	};
+	for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++)
+		for (int v = 0; v < PL_EST_VARIANTS; v++) {
+			pl_est_text(buf, sizeof(buf), &kinds[k], v ? -1 : 94, v);
+			for (int face = PL_FACE_ROW; face < PL_FACES; face++)
+				for (const char *c = buf; *c; c++)
+					missing += pl_pixfont_glyph(f->pix[face].f, (unsigned char)*c) == NULL ||
+						!pl_pixfont_adv(f->pix[face].f, (unsigned char)*c);
+		}
+	for (int face = 0; face < 2; face++)
+		for (const char *c = "0123456789:%-AC"; *c; c++)
+			missing += pl_pixfont_glyph(f->pix[face].f, (unsigned char)*c) == NULL ||
+				!pl_pixfont_adv(f->pix[face].f, (unsigned char)*c);
+	return missing;
+}
+
+/* The leftmost and rightmost x in the rows of band that is not the ground. */
+static void ink_extent(const struct canvas_buf *b, struct pl_rect band, uint32_t ground, int *lo,
+	int *hi)
+{
+	*lo = b->c.w;
+	*hi = -1;
+	for (int y = band.y; y < band.y + band.h; y++)
+		for (int x = 0; x < b->c.w; x++)
+			if (px(b, x, y) != ground) {
+				if (x < *lo)
+					*lo = x;
+				if (x > *hi)
+					*hi = x;
+			}
+}
+
+/* DejaVu Sans, hinted and baked offline: proportional text through the same
+ * fit and scale rules as the fixed fonts. */
+static void test_crisp_dejavu(void)
+{
+	struct pl_font f;
+
+	pl_font_load_crisp(&f, BAR, PL_CRISP_DEJAVU);
+	CHECK(f.crisp && !f.ttf, "a crisp DejaVu font is neither TrueType nor the 5x7 fallback");
+	CHECK_STR(f.pix[PL_FACE_BAR].f->name, "DejaVuSans Bold 11", "the bar is DejaVu Sans Bold 11");
+	CHECK(f.pix[PL_FACE_SMALL].f == f.pix[PL_FACE_BAR].f, "and so is the value in the slider row");
+	CHECK_STR(f.pix[PL_FACE_ROW].f->name, "DejaVuSans Bold 12", "the rows start at Bold 12");
+	CHECK_STR(f.pix[PL_FACE_ROW + 1].f->name, "DejaVuSans Bold 11", "then 11");
+	CHECK_STR(f.pix[PL_FACE_ROW + 2].f->name, "DejaVuSans Bold 10", "then 10");
+	CHECK_STR(f.pix[PL_FACE_ROW + 3].f->name, "DejaVuSans Bold 9", "and 9");
+	for (int i = 0; i < PL_FACES; i++)
+		CHECK_EQ(f.pix[i].scale, 1, "every face of the default bar is at scale 1");
+	CHECK_EQ(f.face[PL_FACE_BAR].digit_h, 8, "the bar's digits are 8 px high");
+	CHECK_EQ(f.face[PL_FACE_BAR].digit_top, 8, "and sit on the baseline");
+	CHECK_EQ(f.face[PL_FACE_ROW].digit_h, 9, "the 12 px digits are 9 px high");
+
+	/* The glyph data is what the generator wrote: the 1 and the colon of the bold 11, and the
+	 * advances that make the digits tabular. */
+	{
+		static const uint8_t one[24] = { 0, 0, 0x3c, 0, 0x0c, 0, 0x0c, 0, 0x0c, 0, 0x0c, 0, 0x0c, 0,
+			0x0c, 0, 0x3f, 0, 0, 0, 0, 0, 0, 0 };
+		static const uint8_t colon[24] = { 0, 0, 0, 0, 0, 0, 0x30, 0, 0x30, 0, 0, 0, 0, 0, 0x30, 0,
+			0x30, 0, 0, 0, 0, 0, 0, 0 };
+		const struct pl_pixfont *b = &pl_pixfont_dv_bold_11;
+
+		CHECK_EQ(b->w, 14, "the bold 11 cell is 14 wide");
+		CHECK_EQ(b->h, 12, "and 12 high");
+		CHECK_EQ(b->ox, 1, "with the pen one column in");
+		CHECK(!memcmp(pl_pixfont_glyph(b, '1'), one, sizeof(one)), "the 1 of the bold 11 is as generated");
+		CHECK(!memcmp(pl_pixfont_glyph(b, ':'), colon, sizeof(colon)), "and the colon");
+		CHECK_EQ(pl_pixfont_adv(b, '0'), 8, "digits advance 8");
+		CHECK_EQ(pl_pixfont_adv(b, ':'), 4, "the colon 4");
+		CHECK_EQ(pl_pixfont_adv(b, '%'), 11, "the percent sign 11");
+		CHECK_EQ(pl_pixfont_adv(b, 0x1f), 0, "a character the font lacks does not advance");
+		CHECK(pl_pixfont_glyph(b, 0x7f) == NULL, "only printable ASCII is in the font");
+		CHECK(pl_pixfont_adv(&pl_pixfont_10x20, 'M') == 10 && pl_pixfont_adv(&pl_pixfont_10x20, 'i') == 10,
+			"a fixed font advances by its cell");
+	}
+	for (int face = 0; face < PL_FACES; face++) {
+		const struct pl_pixfont *pf = f.pix[face].f;
+
+		for (int d = '1'; d <= '9'; d++)
+			CHECK_EQ(pl_pixfont_adv(pf, d), pl_pixfont_adv(pf, '0'), "digits are tabular, the clock does not jitter");
+		CHECK(pf->w <= 16 && pf->w > pf->ox, "a cell fits its 16 bit rows");
+		for (int c = PL_PIX_FIRST; c <= PL_PIX_LAST; c++)
+			CHECK(pl_pixfont_adv(pf, c) > 0 && pl_pixfont_adv(pf, c) <= pf->w, "an advance is 1 to the cell width");
+	}
+
+	/* Proportional: widths follow the glyphs. */
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "88:88"), 36, "the clock is 36 px wide");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "100%"), 35, "100% is 35 px");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "20:22"), 36, "and every time is as wide as every other");
+	CHECK(pl_font_text_w(&f, PL_FACE_ROW, "iiiiii") < pl_font_text_w(&f, PL_FACE_ROW, "MMMMMM"), "i is narrower than M");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, "Monday"), 56, "Monday in Bold 12");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, ""), 0, "nothing is nothing");
+	CHECK_EQ(proportional_missing_glyphs(&f), 0, "every character of every date, battery sentence and bar text renders");
+
+	/* The characters of the panel's text are all different from each other. */
+	for (int face = 0; face < PL_FACES; face++) {
+		const struct pl_pixfont *pf = f.pix[face].f;
+
+		for (const char *c = "0123456789ACDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; *c; c++)
+			for (const char *d = c + 1; *d; d++)
+				CHECK(memcmp(pl_pixfont_glyph(pf, (unsigned char)*c), pl_pixfont_glyph(pf, (unsigned char)*d),
+					(size_t)pf->h * pf->bpr), "no two characters of the text look the same");
+	}
+	pl_font_free(&f);
+
+	/* Whole-number scales, widths scale with them. */
+	pl_font_load_crisp(&f, 38, PL_CRISP_DEJAVU);
+	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 2, "a 38 px bar has the bar font twice as big");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "88:88"), 72, "and twice as wide");
+	CHECK_EQ(pl_font_face_px(&f, PL_FACE_BAR), 24, "and tall");
+	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 1, "its row is still the normal size");
+	pl_font_free(&f);
+	pl_font_load_crisp(&f, 64, PL_CRISP_DEJAVU);
+	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 3, "a 64 px bar: scale 3");
+	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 2, "and the row: scale 2");
+	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, "Monday"), 112, "Monday at scale 2");
+	pl_font_free(&f);
+
+	/* Layout: the same bar and rows, sized by the text. The x positions that depend on the
+	 * text widths move; nothing else does, and nothing overlaps. */
+	struct pl_metrics mf, mv;
+	struct pl_assets af, av;
+	struct pl_layout lf, lv;
+
+	pl_assets_init_crisp(&af, BAR, 255, 255, PL_CRISP_FIXED);
+	pl_assets_init_crisp(&av, BAR, 255, 255, PL_CRISP_DEJAVU);
+	pl_assets_metrics(&af, &mf);
+	pl_assets_metrics(&av, &mv);
+	pl_layout_compute(&lf, 240, BAR, true, false, &mf);
+	pl_layout_compute(&lv, 240, BAR, true, false, &mv);
+	CHECK_EQ(lv.h, lf.h, "the surface is as high");
+	CHECK_EQ(lv.row_h, lf.row_h, "the row is as high");
+	CHECK(!memcmp(&lv.row, &lf.row, sizeof(lv.row)) && !memcmp(&lv.row_in, &lf.row_in, sizeof(lv.row_in)) &&
+		!memcmp(&lv.text, &lf.text, sizeof(lv.text)) && !memcmp(&lv.row_icon, &lf.row_icon, sizeof(lv.row_icon)),
+		"the row and its text area are where they were");
+	CHECK_EQ(lv.slider.thumb_d, lf.slider.thumb_d, "the thumb is as big");
+	CHECK_EQ(lv.slider.track_h, lf.slider.track_h, "and the track as high");
+	for (int i = 0; i < PL_BUTTONS; i++) {
+		CHECK(lv.button[i].h == lf.button[i].h && lv.button[i].y == lf.button[i].y,
+			"a touch target is as high and in the same row");
+		CHECK(lv.button[i].x >= 0 && lv.button[i].x + lv.button[i].w <= 240, "and inside the surface");
+		if (i != PL_BTN_CLOCK && i != PL_BTN_BATTERY)
+			CHECK_EQ(lv.button[i].w, lf.button[i].w, "an icon button is as wide");
+		for (int j = i + 1; j < PL_BUTTONS; j++)
+			CHECK(lv.button[i].x + lv.button[i].w <= lv.button[j].x ||
+				lv.button[j].x + lv.button[j].w <= lv.button[i].x, "touch targets do not overlap");
+	}
+	printf("test-panel: crisp DejaVu bar: clock %d px (fixed %d), battery text %d px (fixed %d), battery button x=%d (fixed %d), backlight button x=%d (fixed %d)\n",
+		mv.clock_w, mf.clock_w, mv.bat_text_w, mf.bat_text_w, lv.button[PL_BTN_BATTERY].x,
+		lf.button[PL_BTN_BATTERY].x, lv.button[0].x, lf.button[0].x);
+	pl_assets_free(&af);
+	pl_assets_free(&av);
+
+	/* Fit: each date and each estimate wording at the default width takes the first face and is
+	 * not clipped by the row's text area; narrower outputs step down the sizes. */
+	struct env e;
+	int widest_date = 0, widest_est = 0, worst_lo = 1000, worst_hi = -1;
+
+	g_cfont = PL_CRISP_DEJAVU;
+	crisp_env_init(&e, true, BAR);
+	CHECK_EQ(e.l.text.w, 224, "the row's text is 224 px wide");
+	for (int wd = 0; wd < 7; wd++)
+		for (int mon = 0; mon < 12; mon++)
+			for (int md = 1; md <= 31; md += 3) {
+				struct pl_rowtext t;
+				int lo, hi;
+
+				e.st.wday = wd; e.st.mon = mon; e.st.mday = md;
+				pl_row_text(&e.l, &e.a, &e.st, PL_BTN_CLOCK, &t);
+				CHECK_EQ(t.face, PL_FACE_ROW, "every date is set in the largest face");
+				CHECK(t.w <= e.l.text.w, "and fits");
+				if (t.w > widest_date)
+					widest_date = t.w;
+				patterned(&e.b);
+				pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_BTN_CLOCK);
+				CHECK(guards_intact(&e.b), "the text stays inside the buffer");
+				ink_extent(&e.b, (struct pl_rect){ 0, e.l.row_in.y + 2, 240, e.l.row_in.h - 4 },
+					pl_pixel(&e.b.c, PL_COL_ROW, 255), &lo, &hi);
+				CHECK(lo >= e.l.text.x && hi < e.l.text.x + e.l.text.w,
+					"no ink outside the text area: nothing is clipped at 240 px");
+				if (lo < worst_lo)
+					worst_lo = lo;
+				if (hi > worst_hi)
+					worst_hi = hi;
+			}
+	static const struct pl_estimate ests[] = {
+		{ PL_EST_LEFT, 90, false }, { PL_EST_LEFT, 80, true }, { PL_EST_LEFT, 5, false },
+		{ PL_EST_TOFULL, 75, false }, { PL_EST_OVER_LEFT, 0, false }, { PL_EST_OVER_FULL, 0, false },
+		{ PL_EST_FULL, 0, false }, { PL_EST_NOTCHARGING, 0, false }, { PL_EST_CHARGING, 0, false },
+		{ PL_EST_ESTIMATING, 0, false }, { PL_EST_AC, 0, false }, { PL_EST_NONE, 0, false },
+	};
+	for (size_t k = 0; k < sizeof(ests) / sizeof(ests[0]); k++)
+		for (int pct = 0; pct <= 100; pct += 50) {
+			struct pl_rowtext t;
+			int lo, hi;
+
+			e.st.est = ests[k];
+			e.st.bat_pct = pct;
+			pl_row_text(&e.l, &e.a, &e.st, PL_BTN_BATTERY, &t);
+			CHECK_EQ(t.face, PL_FACE_ROW, "every battery sentence is set in the largest face");
+			CHECK(t.w <= e.l.text.w, "and fits");
+			if (t.w > widest_est)
+				widest_est = t.w;
+			patterned(&e.b);
+			pl_render_all(&e.b.c, &e.l, &e.a, &e.st, PL_BTN_BATTERY);
+			ink_extent(&e.b, (struct pl_rect){ 0, e.l.row_in.y + 2, 240, e.l.row_in.h - 4 },
+				pl_pixel(&e.b.c, PL_COL_ROW, 255), &lo, &hi);
+			CHECK(lo >= e.l.text.x && hi < e.l.text.x + e.l.text.w, "no battery text outside the text area");
+		}
+	printf("test-panel: crisp DejaVu: widest date %d px, widest battery sentence %d px, date ink from x=%d to x=%d of 240\n",
+		widest_date, widest_est, worst_lo, worst_hi);
+	env_free(&e);
+	g_cfont = PL_CRISP_FIXED;
+	for (int w = 100; w <= 240; w += 20) {
+		struct pl_metrics m;
+		struct pl_layout l;
+		struct pl_assets a;
+		struct pl_rowtext t;
+		struct pl_state st = { .est = { PL_EST_TOFULL, 75, false }, .bat_pct = 94,
+			.year = 2026, .mon = 8, .mday = 30, .wday = 3 };
+
+		pl_assets_init_crisp(&a, BAR, 255, 255, PL_CRISP_DEJAVU);
+		pl_assets_metrics(&a, &m);
+		pl_layout_compute(&l, w, BAR, true, false, &m);
+		pl_row_text(&l, &a, &st, PL_BTN_CLOCK, &t);
+		CHECK(t.w <= l.text.w || t.face == PL_FACES - 1, "a date fits or has run out of sizes");
+		if (w == 160)
+			CHECK(t.face > PL_FACE_ROW, "a narrow output steps down a size");
+		pl_row_text(&l, &a, &st, PL_BTN_BATTERY, &t);
+		CHECK(t.w <= l.text.w || t.face == PL_FACES - 1, "an estimate fits or has run out of sizes");
+		pl_assets_free(&a);
+	}
+}
+
 static void test_crisp(void)
 {
 	test_crisp_wordings();
@@ -2889,11 +3155,18 @@ static void test_crisp(void)
 	test_crisp_layout();
 	test_crisp_icons();
 	test_crisp_shapes();
-	test_crisp_row_geometry();
 	test_crisp_centering();
-	test_crisp_palette();
-	test_crisp_formats();
-	test_crisp_no_alloc();
+	test_crisp_dejavu();
+	/* What does not depend on the font runs once per font: the palette is the same exact set. */
+	for (int k = 0; k < 2; k++) {
+		g_cfont = k ? PL_CRISP_DEJAVU : PL_CRISP_FIXED;
+		printf("test-panel: crisp palette checks with the %s font\n", k ? "DejaVu" : "fixed");
+		test_crisp_row_geometry();
+		test_crisp_palette();
+		test_crisp_formats();
+		test_crisp_no_alloc();
+	}
+	g_cfont = PL_CRISP_FIXED;
 }
 
 /* ---- sysfs ---- */
