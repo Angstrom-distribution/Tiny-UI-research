@@ -18,6 +18,7 @@
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
@@ -72,6 +73,8 @@ struct pw_input_state {
 	struct wl_listener touch_motion;
 	struct wl_listener touch_cancel;
 	struct wl_listener touch_frame;
+	struct wl_listener new_virtual_pointer;
+	bool virtual_pointer;          /* PICOWL_TEST_VIRTUAL_POINTER: the listener is on */
 };
 
 static struct pw_input_state st;
@@ -1044,6 +1047,29 @@ static struct pw_touch_dev *absolute_dev_add(struct pw_server *server,
 	return t;
 }
 
+static void pointer_add(struct pw_server *server, struct wlr_input_device *dev)
+{
+	struct pw_pointer_dev *p = calloc(1, sizeof(*p));
+	if (!p)
+		return;
+	p->destroy.notify = pointer_dev_destroy;
+	wl_signal_add(&dev->events.destroy, &p->destroy);
+	wlr_cursor_attach_input_device(server->cursor, dev);
+	st.n_pointers++;
+	update_capabilities(server);
+}
+
+/* A test fixture, offered only when PICOWL_TEST_VIRTUAL_POINTER is set: the
+ * headless backend has no pointer, and a test that has to put the pointer at a
+ * place of the output (to see where a rotated surface really is) needs one.
+ * Any client could inject input through it, so it is not for sessions. */
+static void handle_new_virtual_pointer(struct wl_listener *l, void *data)
+{
+	(void)l;
+	struct wlr_virtual_pointer_v1_new_pointer_event *ev = data;
+	pointer_add(st.server, &ev->new_pointer->pointer.base);
+}
+
 static void handle_new_input(struct wl_listener *l, void *data)
 {
 	struct pw_server *server = wl_container_of(l, server, new_input);
@@ -1053,17 +1079,9 @@ static void handle_new_input(struct wl_listener *l, void *data)
 	case WLR_INPUT_DEVICE_KEYBOARD:
 		keyboard_add(server, wlr_keyboard_from_input_device(dev), false);
 		break;
-	case WLR_INPUT_DEVICE_POINTER: {
-		struct pw_pointer_dev *p = calloc(1, sizeof(*p));
-		if (!p)
-			break;
-		p->destroy.notify = pointer_dev_destroy;
-		wl_signal_add(&dev->events.destroy, &p->destroy);
-		wlr_cursor_attach_input_device(server->cursor, dev);
-		st.n_pointers++;
-		update_capabilities(server);
+	case WLR_INPUT_DEVICE_POINTER:
+		pointer_add(server, dev);
 		break;
-	}
 	case WLR_INPUT_DEVICE_TOUCH: {
 		struct pw_touch_dev *t = absolute_dev_add(server, dev, false);
 		if (!t || t->blocked)
@@ -1164,6 +1182,18 @@ bool pw_input_init(struct pw_server *server)
 	wl_signal_add(&server->virtual_keyboard_mgr->events.new_virtual_keyboard,
 		&server->new_virtual_keyboard);
 
+	const char *vp = getenv("PICOWL_TEST_VIRTUAL_POINTER");
+	if (vp && *vp && strcmp(vp, "0")) {
+		struct wlr_virtual_pointer_manager_v1 *vpm =
+			wlr_virtual_pointer_manager_v1_create(server->display);
+		if (vpm) {
+			st.new_virtual_pointer.notify = handle_new_virtual_pointer;
+			wl_signal_add(&vpm->events.new_virtual_pointer, &st.new_virtual_pointer);
+			st.virtual_pointer = true;
+			pw_log(WLR_INFO, "test fixture: zwlr_virtual_pointer_manager_v1 offered");
+		}
+	}
+
 	st.cursor_motion.notify = cursor_handle_motion;
 	wl_signal_add(&server->cursor->events.motion, &st.cursor_motion);
 	st.cursor_motion_abs.notify = cursor_handle_motion_abs;
@@ -1225,6 +1255,10 @@ void pw_input_finish(struct pw_server *server)
 	wl_list_remove(&st.touch_frame.link);
 	wl_list_remove(&server->new_input.link);
 	wl_list_remove(&server->new_virtual_keyboard.link);
+	if (st.virtual_pointer) {
+		wl_list_remove(&st.new_virtual_pointer.link);
+		st.virtual_pointer = false;
+	}
 	wl_list_remove(&server->request_set_cursor.link);
 	wl_list_remove(&server->request_set_selection.link);
 	wl_list_remove(&server->request_set_primary_selection.link);

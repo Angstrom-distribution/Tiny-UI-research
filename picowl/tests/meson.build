@@ -118,6 +118,14 @@ vk_client_c = custom_target('virtual-keyboard-client-code',
   input: vk_xml, output: 'virtual-keyboard-unstable-v1-client-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 
+vp_xml = files('../protocols/wlr-virtual-pointer-unstable-v1.xml')
+vp_client_h = custom_target('wlr-virtual-pointer-client-header',
+  input: vp_xml, output: 'wlr-virtual-pointer-unstable-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+vp_client_c = custom_target('wlr-virtual-pointer-client-code',
+  input: vp_xml, output: 'wlr-virtual-pointer-unstable-v1-client-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+
 # One process, a few toplevels and a keyboard stand-in: the configure sizes of
 # the tiled layout.
 pw_tile_client = executable('pw-tile-client',
@@ -131,6 +139,12 @@ pw_osk_fake = executable('pw-osk-fake', 'pw-osk-fake.c')
 pw_key_client = executable('pw-key-client',
   'pw-key-client.c', vk_client_h, vk_client_c,
   dependencies: [wayland_client, xkbcommon])
+
+# Puts the pointer at a place of the output through a virtual pointer, which
+# picowl offers to tests only (PICOWL_TEST_VIRTUAL_POINTER=1).
+pw_pointer_client = executable('pw-pointer-client',
+  'pw-pointer-client.c', vp_client_h, vp_client_c,
+  dependencies: [wayland_client])
 
 test('osk-e2e', find_program('sh'),
   args: [files('osk-e2e.sh'), picowl_exe, pw_key_client, pw_osk_fake],
