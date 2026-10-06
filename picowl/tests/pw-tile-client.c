@@ -17,6 +17,11 @@
  *                              wl_keyboard focus stays with tile-a, alt+Tab
  *                              moves it, a third app takes it
  *   pw-tile-client focus-default  the same without the key: tile-b takes it
+ *   pw-tile-client second50    240x320 panel, portrait or (turned by 90 degrees)
+ *   pw-tile-client second25    landscape: a 4:3 and a 16:9 first window, and one
+ *                              which asks for less than half; the second keeps
+ *                              at least [layout] second_min (default 50, the
+ *                              25 variant sets it to 25 for the old rule)
  *   pw-tile-client pixels DIR  portrait pair drawn red (tile-a) and blue
  *                              (tile-b), keyboard green; stops at each step for
  *                              tests/pan-e2e.sh, which takes a screenshot and
@@ -611,6 +616,69 @@ static void portrait(void)
 	wl_display_roundtrip(dpy);
 }
 
+/* The second window keeps second_min of the split axis. min is that
+ * percentage; the output is the 240x320 panel, as it is or turned by 90
+ * degrees, which the size of a window alone tells. The first window has a fixed
+ * 4:3 and 16:9 size in turn, and then one which wants less than the second's
+ * share and must get exactly that. */
+static void second(int min)
+{
+	struct win a, b;
+	int ext, side_a, side_b;
+	bool land;
+
+	open_win(&a, "tile-a");
+	while (!a.cfg_w && !a.cfg_h)
+		pump(50);
+	land = a.cfg_w > a.cfg_h;
+	if (!((land && a.cfg_w == 320 && a.cfg_h == 240) ||
+			(!land && a.cfg_w == 240 && a.cfg_h == 320)))
+		fail("second: output is %dx%d, expected the 240x320 panel", a.cfg_w, a.cfg_h);
+	ext = 320;	/* the long side of the panel is the split axis either way */
+	open_win(&b, "tile-b");
+
+	/* 4:3 wants all of the width in landscape and 180 rows in portrait, 16:9
+	 * more than all of the width and 135 rows, the third 120 either way;
+	 * what is above the cap is cut to leave the second its share */
+	for (int step = 0; step < 3; step++) {
+		static const char *const names[] = { "4:3", "16:9", "small" };
+		int cap = ext - (ext * min + 99) / 100;
+		int want = step == 0 ? (land ? 320 : 180) : step == 1 ? (land ? 427 : 135)
+			: 120;
+		char label[32];
+
+		if (step == 0)
+			set_fixed(&a, 4, 3);
+		else if (step == 1)
+			set_fixed(&a, 16, 9);
+		else if (land)
+			set_fixed(&a, 120, 240);
+		else
+			set_fixed(&a, 240, 120);
+		if (want > cap)
+			want = cap;
+		side_a = want;
+		side_b = ext - want;
+		snprintf(label, sizeof label, "%s %s", land ? "land" : "port", names[step]);
+		if (land) {
+			expect_size(label, &a, side_a, 240);
+			expect_size(label, &b, side_b, 240);
+		} else {
+			expect_size(label, &a, 240, side_a);
+			expect_size(label, &b, 240, side_b);
+		}
+		if (side_b * 100 < ext * min)
+			fail("%s: the second window has %d of %d, below %d percent",
+				label, side_b, ext, min);
+		/* a window which wants less than its cap keeps exactly that */
+		if (step == 2 && side_a != 120)
+			fail("%s: the first window got %d, not its own 120", label, side_a);
+	}
+	close_win(&b);
+	close_win(&a);
+	wl_display_roundtrip(dpy);
+}
+
 /* The keyboard takes 100 rows at the bottom of the 720x1280 portrait output. */
 #define KBD_ZONE 100
 
@@ -759,7 +827,7 @@ static void pixels(const char *dir)
 int main(int argc, char **argv)
 {
 	static const char *const modes[] = { "landscape", "portrait", "pan", "pan-zone",
-		"nopan", "pan-landscape", "pixels", "pixels-zone", "focus-keep",
+		"nopan", "pan-landscape", "second50", "second25", "pixels", "pixels-zone", "focus-keep",
 		"focus-default" };
 	bool known = false;
 
@@ -767,7 +835,7 @@ int main(int argc, char **argv)
 		known |= !strcmp(argv[1], modes[i]);
 	if (!known || argc != (!strncmp(argv[1], "pixels", 6) ? 3 : 2)) {
 		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|pan-zone|"
-			"nopan|pan-landscape|focus-keep|focus-default|pixels DIR|pixels-zone DIR\n");
+			"nopan|pan-landscape|second50|second25|focus-keep|focus-default|pixels DIR|pixels-zone DIR\n");
 		return 2;
 	}
 	alarm(30);
@@ -789,6 +857,8 @@ int main(int argc, char **argv)
 		pan();
 	else if (!strcmp(argv[1], "focus-keep") || !strcmp(argv[1], "focus-default"))
 		focus(!strcmp(argv[1], "focus-keep"));
+	else if (!strcmp(argv[1], "second50") || !strcmp(argv[1], "second25"))
+		second(argv[1][6] == '5' ? 50 : 25);
 	else if (!strcmp(argv[1], "nopan"))
 		nopan();
 	else if (!strcmp(argv[1], "pan-landscape"))

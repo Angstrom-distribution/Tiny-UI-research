@@ -118,5 +118,39 @@ run focus-default "$DIR/pan.ini"
 [ "$(logged tile-b pair)" -ge 1 ] || fail "focus-default: expected a 'tile-b (pair)' log line"
 [ "$(logged tile-a rule)" -eq 0 ] || fail "focus-default: the rule fired without the key"
 
+# the second window keeps at least [layout] second_min (50 by default) of the
+# split axis whatever the first one's aspect, on a 240x320 panel in portrait
+# and turned to landscape; second_min = 25 is the old rule
+export PICOWL_HEADLESS_SIZE=240x320
+cat >"$DIR/second-port.ini" <<EOF
+[layout]
+stack = tile-a, tile-b
+EOF
+cat >"$DIR/second-land.ini" <<EOF
+[output]
+* = 90
+
+[layout]
+stack = tile-a, tile-b
+EOF
+cat >"$DIR/second-port25.ini" <<EOF
+[layout]
+stack = tile-a, tile-b
+second_min = 25
+EOF
+cat >"$DIR/second-land25.ini" <<EOF
+[output]
+* = 90
+
+[layout]
+stack = tile-a, tile-b
+second_min = 25
+EOF
+run second50 "$DIR/second-port.ini"
+run second50 "$DIR/second-land.ini"
+run second25 "$DIR/second-port25.ini"
+run second25 "$DIR/second-land25.ini"
+unset PICOWL_HEADLESS_SIZE
+
 rm -rf "$DIR"
 echo "tile-e2e: ok"
