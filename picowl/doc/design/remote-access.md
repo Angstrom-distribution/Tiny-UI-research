@@ -1,7 +1,6 @@
 # Remote access to picowl on the h2200: options, recommendation, design
 
-**Status:** research and design proposal, nothing implemented. Written from five independent online and source sweeps, a skeptic's check of the decisive claims, and a read of the picowl source. Everything about CPU cost on the PXA255 is an extrapolation (nobody has published zlib, ZRLE or JPEG speeds for an ARMv5 core), and every Bluetooth figure comes from other hardware of the era. Nothing was run on the h2200. The tags [read], [inf] and [unknown] are explained in the first line of the text below.
-
+**Status:** research and decision record with a design proposal; design only, nothing is implemented in picowl (the capture that exists today is documented in [README.md#configuration](../../README.md#configuration) under `[capture]`). Written from five independent online and source sweeps, a skeptic's check of the decisive claims, and a read of the picowl source. Everything about CPU cost on the PXA255 is an extrapolation (nobody has published zlib, ZRLE or JPEG speeds for an ARMv5 core), and every Bluetooth figure comes from other hardware of the era. Nothing was run on the h2200. The tags [read], [inf] and [unknown] are explained in the Tags paragraph below. What is scheduled from this document (the stages of section 2, the experiments of section 5 and the open questions of section 6) is tracked in the [roadmap](roadmap.md). The `[remote]` section of section 4.1 is a proposal: `src/config.c` parses no such key.
 
 The claim-by-claim evidence, with each source URL and the skeptic's review, is in [remote-access-sources.md](remote-access-sources.md).
 
@@ -146,7 +145,7 @@ listen       = bnep0         # builtin only; else bind in the wayvnc unit
 ### 4.2 Why the swap is needed
 
 - wlr-screencopy reads the buffer from the output's commit event, and that buffer is already in RAM, so capture never touches video memory [read: `subprojects/wlroots/types/wlr_screencopy_v1.c`].
-- A disabled output cannot be captured. Screencopy fails the frame when `!output->enabled`, checked at lines 290, 364 and 525 of the local wlroots 0.19.0 tree. picowl's blank path disables every DRM output and stops rendering.
+- A disabled output cannot be captured. Screencopy fails the frame when `!output->enabled`, checked at lines 290, 364 and 525 of `types/wlr_screencopy_v1.c` in wlroots 0.19.0 as vendored by picowl. picowl's blank path disables every DRM output and stops rendering.
 - Stock wayvnc forces the output power on while a client is connected, which would light the local panel [read: wayvnc `src/main.c`].
 - So the capture source must be an always-enabled RAM output. Option 1 is a headless output, using public wlroots API with no patch. Option 2 is a DRM patch that skips the atomic commit. Option 2 does not darken the panel by itself and needs the present events faked.
 
@@ -183,7 +182,7 @@ listen       = bnep0         # builtin only; else bind in the wayvnc unit
 
 | Case | Behaviour | Notes |
 |---|---|---|
-| DRM lease to the media player | The lease is revoked at session start. New lease requests are rejected while parked, because rule 5 in doc/lease.md requires picowl to have that output. | A leased player's scanout never passes through the compositor, so a viewer cannot see it. Video visibly interrupts. Player recovery from "finished" mid-playback is [unknown]. The player's Path A works on a non-copy-type output (buffers answered "retained", double-buffered). |
+| DRM lease to the media player | The lease is revoked at session start. New lease requests are rejected while parked, because rule 5 in [doc/lease.md](../lease.md) requires picowl to have that output. | A leased player's scanout never passes through the compositor, so a viewer cannot see it. Video visibly interrupts. Player recovery from "finished" mid-playback is [unknown]. The player's Path A works on a non-copy-type output (buffers answered "retained", double-buffered). |
 | Hardware rotation | The headless output is upright (NORMAL), so there is no rotation work and no software-rotation case. | A runtime rotate during a session must either resize the RFB framebuffer (ExtendedDesktopSize) or be ignored. Viewer behaviour is unknown. On restore, `output_enable_rotated` reapplies hardware rotation. |
 | Panel strip, tiled layout | `pw_view_arrange_all` reruns on adopt, and the panel surface is recreated, as on lease teardown. | Check that no window keeps the old output size. |
 | Direct scanout | While a screencopy is pending, `attach_render` is locked, so direct scanout is off. The headless output is not copy-type, so zero-copy clients are composited. | An idle screen costs nothing because wayvnc uses copy_with_damage. |
@@ -213,7 +212,7 @@ listen       = bnep0         # builtin only; else bind in the wayvnc unit
 **Stays:**
 - pixman composition, capture copy (stage 2), encoding and the network stack.
 
-**Honest limit:** picowl's own CPU accounting shows only 3.7 ticks/s between a full-surface client (16.5 ticks/s) and a 16x16-damage client (12.8) at 30 fps on the h2200 [read: doc/rotation-results.md]. The bus time may not be charged to picowl's utime and stime. The CPU saving is therefore unproven. Measure it with `mq11xx_copy_stats` before promising a number.
+**Honest limit:** picowl's own CPU accounting shows only 3.7 ticks/s between a full-surface client (16.5 ticks/s) and a 16x16-damage client (12.8) at 30 fps on the h2200 [read: [doc/rotation-results.md](../rotation-results.md)]. The bus time may not be charged to picowl's utime and stime. The CPU saving is therefore unproven. Measure it with `mq11xx_copy_stats` before promising a number.
 
 ## 5. Experiments before building (cheapest first)
 
@@ -237,7 +236,7 @@ listen       = bnep0         # builtin only; else bind in the wayvnc unit
   - Per client: encodings, Fence and ContinuousUpdates support. Not checked for Screen Sharing, Jump Desktop, Screens, RealVNC and bVNC.
   - Whether macOS Screen Sharing completes the handshake against neatvnc with DES or Apple-DH.
 - Whether a Mac can reach the device over USB (EEM or any ECM-class driver) or only via bt-pan or an intermediate.
-- Whether the picowl or wlroots 0.19.0 behaviour matches the local tree on other builds. Only the local tree was verified.
+- Whether the picowl or wlroots 0.19.0 behaviour matches the vendored tree on other builds. Only the vendored tree was verified.
 - TLS and RSA-AES cost on the PXA255.
 - Whether the player survives lease revocation and the output swap.
 - Whether the real CPU saving from skipping the upload is visible beyond the bus.

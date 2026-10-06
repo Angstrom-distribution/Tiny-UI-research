@@ -1,6 +1,8 @@
 # Text on the handheld: what WinCE did, what we can match, and what is worth accelerating
 
-**Status:** research and a decision record. The compiled-in pixel fonts of `picowl-panel --style crisp` are implemented, and so is the hinted-TrueType bake of section 5 as `--crisp-font dejavu` (the default stays `fixed`). Nothing here was measured on a board unless it says so.
+**Status:** research and a decision record, partly implemented. Implemented: the compiled-in pixel fonts of `picowl-panel --style crisp` (`panel/panel-pixfont-data.c`) and the hinted DejaVu bake of section 5 as `--crisp-font dejavu` (`panel/panel-pixfont-dejavu.c`, the default stays `fixed`); see [README.md#panel](../../README.md#panel). Not implemented: the engine mono expansion (section 6) and the havoc bitmap-font backend (section 8). Nothing here was measured on a board unless it says so.
+
+What is scheduled from this document is tracked in the [roadmap](roadmap.md).
 
 ## 1. Evidence tags
 
@@ -8,7 +10,7 @@
 |---|---|
 | **[decomp]** | Read from the decompile of the WinCE (Pocket PC 2003, CE 4.20 build 13100) ROMs of the h2200 and the h5550: `gwes.exe`, the MediaQ `ddi.dll`, the registry fragments and the font files. Nothing was run on a device |
 | **[doc]** | Stated in the MediaQ MQ1132 programming documentation, as read by the MediaQ revival work |
-| **[meas]** | Measured on a board, by the MediaQ revival work |
+| **[meas]** | Measured: on a board by the MediaQ revival work, or (where the line says so) by a harness of this repository in a container |
 | **[host]** | Rendered on a development host in a debian:trixie arm64 container and looked at; not the device |
 | **[inf]** | Inference from the above |
 | **[est]** | Estimate, not measured |
@@ -53,10 +55,10 @@ A standalone prototype (not part of the panel build) rendered Liberation Sans, D
 
 ## 6. Where text time really goes, and what is worth accelerating
 
-- **Bytes first.** Before havoc's per-cell damage a typed character sent the whole frame through the bus-limited copy path (7.9 to 9.1 MB/s [meas]); with it, one character damages 1,440 bytes at 80x24 cells of 10x18 pixels [meas, container; `oe/recipes-graphics/havoc/README.md`]. That is a far bigger win than any faster glyph blit.
-- **pixman on this CPU.** On ARMv5TE pixman runs only its portable C paths, and havoc does not use pixman for its glyphs [read: pixman and havoc sources, in the research]. Patching pixman would help the compositor's blends, not terminal text.
+- **Bytes first.** Before havoc's per-cell damage a typed character sent the whole frame through the bus-limited copy path (7.9 to 9.1 MB/s [meas]); with it, one character damages 1,440 bytes at 80x24 cells of 10x18 pixels [meas, in a container; `oe/recipes-graphics/havoc/README.md`]. That is a far bigger win than any faster glyph blit.
+- **pixman on this CPU.** On ARMv5TE pixman runs only its portable C paths, and havoc does not use pixman for its glyphs [read: pixman and havoc sources]. Patching pixman would help the compositor's blends, not terminal text.
 - **Order of work, by expected payoff** [est]: per-cell damage (done) first; then opaque cell blits and a flat glyph array (no blending when the background is a solid colour); then a 1-bit fast path (bi-level text needs no blend at all); a pre-blended cell cache last.
-- **The engine's mono expansion** is the same path WinCE used for its default text. Evidence from the MediaQ revival work: the MQ1132 has no alpha blending [doc], and the h2200's MQ1188 driver shows none [decomp]. On the h2200 under Linux, solid fills of 240x224 ran at 185 MB/s and VRAM-to-VRAM copies at 135 MB/s against 7.84 MB/s for the CPU [meas]. **Not run under Linux, so unverified:** host-to-screen blits through the source FIFO, the mono expansion, an off-screen mono source, colour key. A cell of 6x11 pixels is 66 bits, 3 words, about 8 bus writes per glyph on the same bus that limits CPU copies [inf]; the engine wins only if a register write on that 16-bit bus costs about 1 microsecond or less, which nobody has measured. Needs a driver-side path (DRM has no 2D interface), bounded waits and a read-cache setting [inf]. Test it before designing around it.
+- **The engine's mono expansion** is the same path WinCE used for its default text. Evidence from the MediaQ revival work: the MQ1132 has no alpha blending [doc], and the h2200's MQ1188 driver shows none [decomp]. On the h2200 under Linux, solid fills of 240x224 ran at 185 MB/s and VRAM-to-VRAM copies of 240x112 at 135 MB/s against about 8 MB/s for host writes (7.84 MB/s for the CPU in the revival measurement; [mediaq-c8.md](mediaq-c8.md) section 3.1 quotes the same figures) [meas]. **Not run under Linux, so unverified:** host-to-screen blits through the source FIFO, the mono expansion, an off-screen mono source, colour key. A cell of 6x11 pixels is 66 bits, 3 words, about 8 bus writes per glyph on the same bus that limits CPU copies [inf]; the engine wins only if a register write on that 16-bit bus costs about 1 microsecond or less, which nobody has measured. Needs a driver-side path (DRM has no 2D interface), bounded waits and a read-cache setting [inf]. Test it before designing around it.
 
 ## 7. Open questions
 

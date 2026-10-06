@@ -1,6 +1,8 @@
 # MediaQ C8 (8 bpp palettised) output: what it is, what it buys, how picowl could use it
 
-**Status:** design only, nothing implemented in picowl. Line references are against picowl commit 8b0aaf8, wlroots 0.19.0 as vendored in `subprojects/wlroots`, havoc commit 73e3467 (the revision the meta-handhelds recipe builds), and the WinCE decompile `h22xx-ddi.c` named in the Sources.
+**Status:** design and research record; partly implemented. Implemented: stage 1 of section 9, havoc per-cell damage and the opaque region (havoc patch 0002, `oe/recipes-graphics/havoc/`, see [README.md#companion-pieces](../../README.md#companion-pieces)), and the DRM lease the player would use for C8 video ([README.md#companion-pieces](../../README.md#companion-pieces)). Not implemented: every C8 mode of picowl, the `[output] depth` and `[app.*] output_depth` keys (proposals, neither is parsed in `src/config.c`), the C8 protocol extension and every kernel work item of section 8.5 (whether any of the kernel work is done cannot be verified from this repository). Line references are against picowl commit 8b0aaf8, wlroots 0.19.0 as vendored in `subprojects/wlroots`, havoc commit 73e3467 (the revision the meta-handhelds recipe builds), and the WinCE decompile `h22xx-ddi.c` named in the Sources.
+
+What is scheduled from this document is tracked in the [roadmap](roadmap.md).
 
 ## 1. Summary and recommendation
 
@@ -24,6 +26,8 @@ Every factual statement carries one tag:
 | **[read]** | I read it in the named file or URL (path and lines given) |
 | **[decomp]** | I read it in the Ghidra decompile of the h2200 WinCE display driver `ddi.dll` (`h22xx-ddi.c`, function and line given) |
 | **[meas\*]** | a measurement on a real board reported by a source (the revival MediaQ reference, or picowl's own `doc/rotation-results.md`); not repeated by me |
+| **[meas, container]** | a count made by the damage harness of this repository (`oe/recipes-graphics/havoc/tests`) with a fake compositor in a container; bytes, not bus time, and not a board |
+| **[decomp\*]** | a statement about the WinCE decompile as quoted by the revival MediaQ reference; not repeated by me |
 | **[datasheet\*]** | an MQ-1100/1132 datasheet statement as quoted by the revival MediaQ reference; I did not see the datasheet itself |
 | **[code\*]** | the current `mq11xx.c` on the kernel development branch as described by the revival MediaQ reference; I did not read that source (the patch in the meta-handhelds checkout is an older version, see 3.6) |
 | **[inf]** | my inference from the above |
@@ -81,16 +85,16 @@ From the description of the current `mq11xx.c` (kernel branch `unified-mainline-
 | wlroots 0.19's pixman renderer has no C8 or RGB332 entry in its format table (`render/pixman/pixel_format.c` lines 1-98), so it can neither import a C8 buffer as a texture nor render into one; `get_pixman_format_from_drm()` logs "has no pixman equivalent" | [read] `render/pixman/pixel_format.c` lines 102-111 |
 | The wlroots generic pixel-format table has `DRM_FORMAT_R8` but no `C8`; the dumb and shm allocators size buffers from that table, so they cannot allocate a C8 buffer today | [read] `render/pixel_format.c` lines 43-46; `render/allocator/drm_dumb.c` lines 41-62; `render/allocator/shm.c` lines 61-75 |
 | wlroots commits `GAMMA_LUT` as a blob in atomic mode (or the legacy `drmModeCrtcSetGamma` when the property is absent); the ramp is three `uint16_t` arrays of `wlr_output_get_gamma_size()` entries, set with `wlr_output_state_set_gamma_lut()` | [read] `backend/drm/atomic.c` lines 267-283; `backend/drm/drm.c` lines 1043-1068; `include/wlr/types/wlr_output.h` lines 125-126, 531-539 |
-| pixman 0.46 has `PIXMAN_c8` with `pixman_indexed_t { color; rgba[256]; ent[32768]; }` (a 15-bit RGB to index table for stores), `PIXMAN_r3g3b2`, and destination dithering (`PIXMAN_DITHER_ORDERED_BAYER_8`, `PIXMAN_DITHER_ORDERED_BLUE_NOISE_64`, `pixman_image_set_dither()`) | [read] `/opt/homebrew/include/pixman-1/pixman.h` (0.46.4) lines 349-355, 985-996, 1103, 1108, 1223-1227. How the c8 store uses `ent[]` and how fast the dither path is: [unverified], the source fetch failed |
+| pixman 0.46 has `PIXMAN_c8` with `pixman_indexed_t { color; rgba[256]; ent[32768]; }` (a 15-bit RGB to index table for stores), `PIXMAN_r3g3b2`, and destination dithering (`PIXMAN_DITHER_ORDERED_BAYER_8`, `PIXMAN_DITHER_ORDERED_BLUE_NOISE_64`, `pixman_image_set_dither()`) | [read] pixman 0.46.4 `pixman/pixman.h` lines 349-355, 985-996, 1103, 1108, 1223-1227. How the c8 store uses `ent[]` and how fast the dither path is: [unverified], the source fetch failed |
 
 ### 3.4 What picowl and its clients do today
 
 | Fact | Tag and source |
 |---|---|
-| picowl renders RGB565 (configurable) with pixman, gives copy-type outputs a one-slot picowl-owned swapchain, and commits only frame damage | [read] `src/output.c` lines 82-111, 213-252, 292-317 |
+| picowl renders RGB565 (`[render] format`) with pixman, gives copy-type outputs a one-slot picowl-owned swapchain, and commits only frame damage | [read] `src/output.c` (`copy_swapchain_create`, `copy_swapchain_sync`, `output_frame`) |
 | picowl-buffer-v1 accepts only RGB565 (`create_buffer`) and has no palette concept | [read] `protocols/picowl-buffer-v1.xml` |
 | Hardware rotation is the default on MediaQ (`[rotation] auto`); measured at 90 degrees with a full-surface client at 30 fps: picowl CPU 16.5 ticks/s (hw) against 21.9 (sw), 25.4 frames per second presented; with a 16x16 blinking square 12.8 against 13.1 ticks/s; small damage uploads nothing because the driver fills it with the engine | [meas\*] `doc/rotation-results.md` |
-| picowl-panel draws subpixel (LCD) text when `wl_output` advertises a subpixel layout | [read] `README.md` ([output] `subpixel`) |
+| picowl-panel draws subpixel (LCD) text when `wl_output` advertises a subpixel layout | [read] `README.md`, sections Configuration (`[output] subpixel`) and Panel |
 | havoc creates its buffers as `WL_SHM_FORMAT_ARGB8888`, two of them | [read] havoc `main.c` lines 598-600, 618-641 |
 | havoc skips cells whose age is not newer than the buffer's, but then damages the **whole surface** on every redraw: `wl_surface_damage_buffer(term.surf, 0, 0, term.width, term.height)` | [read] havoc `main.c` lines 707-708, 776-799 (line 791) |
 | havoc sets no opaque region (no `wl_region` use), so the compositor must treat the ARGB8888 surface as translucent and blend it | [read] havoc `main.c` (no occurrence of `set_opaque_region` or `wl_region`) [inf for the compositor consequence] |
@@ -104,11 +108,11 @@ From the description of the current `mq11xx.c` (kernel branch `unified-mainline-
 |---|---|---|---|
 | h2200 family | MediaQ MQ1188, `mq11xx` | C8 implemented and passing at register level, upright only | [code\*, meas\*] §3.2 above |
 | h5550 | MediaQ MQ1132, `mq11xx` | C8 with row-scan transforms, doubled C8 and 8 bpp engine fills in the driver, build-verified only; no frame interrupt, so the vblank comes from a timer and GC0C is written only after the beam has left the window | [code\*] MediaQ reference §5.1 |
-| hx4700 | ATI W3220, `w100` | No palette mode is known to the project; the useful hardware path is the YUV overlay through the lease. Treat as RGB565 only | [unverified] for any 8 bpp mode; overlay per the research `hardware.md` §4 [read] |
+| hx4700 | ATI W3220, `w100` | No palette mode is known to the project; the useful hardware path is the YUV overlay through the lease. Treat as RGB565 only | [unverified] for any 8 bpp mode; overlay per [hardware.md](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md) §4 [read] |
 | h3870 | SA-1110 LCD controller, `sa1100-lcdc` | The SA-1110 LCD controller has palettised 8 bpp modes in general, but whether the driver offers C8 is unknown; the copy there is a memcpy into uncached DMA memory, which C8 would halve | [unverified] |
 | h3970 | PXA250 LCD controller, `pxa-lcdc` | Same: the PXA25x controller supports 8 bpp with a palette in general; the driver's formats are unknown. Direct scanout means no bus copy to save, only DMA fetch and CMA memory | [unverified] |
 
-No board in the project uses an MQ1100: the hackndev name "mq1100" for the h5xxx chip is wrong, the chip identifies as `0x0120`, an MQ1132 [meas\*, MediaQ reference §1.1]. The h3xxx boards use the SoC LCD controllers, not a MediaQ [read: research `hardware.md` §1].
+No board in the project uses an MQ1100: the hackndev name "mq1100" for the h5xxx chip is wrong, the chip identifies as `0x0120`, an MQ1132 [meas\*, MediaQ reference §1.1]. The h3xxx boards use the SoC LCD controllers, not a MediaQ [read: [hardware.md](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md) §1].
 
 ### 3.6 Where sources disagree
 
@@ -197,7 +201,7 @@ A scroll in havoc redraws every cell (libtsm resets the screen age) and damages 
 
 ### 6.1 What the player has today
 
-The player repository was not found on this machine (scoped searches of `~/Projects` to depth 6 for `kms_state.c`, `ovplan.c` and `media-player.md`, and of the build volume's `work` directory to depth 4, found nothing), so its C8 code, palette, dither kernels, measured conversion costs and its backlog section could not be read [unverified]. What picowl's own documents say: the bare-DRM output drives "MediaQ C8 / pixel doubling / GC0C tear-free flips" and a full-frame RGB565 flip is upload-bound at about 28 Hz while C8 and pixel-doubled flips reach about 56 Hz (`doc/mediaplayer-integration.md` lines 14 and 85) [read]; the same document still says "C8 when implemented" (line 121) [read]. The player converts and dithers to RGB565 with ordered (Bayer) dither kernels in a fused convert-scale-rotate pass that costs 5.8-8.4 ms per shown frame at rotation 90 and about 2.1 ms at rotation 0 on the h2210 [meas\*, MediaQ reference §5.3; `doc/rotation-measurement.md`].
+The player lives in its own repository, which is not part of this one and was not read, so its C8 code, palette, dither kernels, measured conversion costs and its backlog section could not be read [unverified]. What picowl's own documents say: the bare-DRM output drives "MediaQ C8 / pixel doubling / GC0C tear-free flips" and a full-frame RGB565 flip is upload-bound at about 28 Hz while C8 and pixel-doubled flips reach about 56 Hz (`doc/mediaplayer-integration.md`, the path table and the notes on the mq11xx vblank) [read]. The player converts and dithers to RGB565 with ordered (Bayer) dither kernels in a fused convert-scale-rotate pass that costs 5.8-8.4 ms per shown frame at rotation 90 and about 2.1 ms at rotation 0 on the h2210 [meas\*, MediaQ reference §5.3; `doc/rotation-measurement.md`].
 
 ### 6.2 Path: lease, not Wayland
 
@@ -279,8 +283,8 @@ The hardware has one palette for the whole window [datasheet\*]. So:
 
 | Trigger | Assessment |
 |---|---|
-| `[output] depth = 8` config key | simplest; useful for kiosks and measurement; always on |
-| Per-app rule, for example `[app.havoc] output_depth = 8`, active while that app is focused and full screen (panel auto-hidden) | **recommended first policy**: reuses the `[app.*]` section; the switch costs one full upload (the format change voids the damage clips for one commit, 3.2) plus the palette write, about 10 ms [est]; add hysteresis so a popup or the OSK does not flip the depth back and forth |
+| `[output] depth = 8` config key (proposed, not parsed today) | simplest; useful for kiosks and measurement; always on |
+| Per-app rule, for example the proposed `[app.havoc] output_depth = 8` (not parsed today; the `[app.*]` sections exist for other keys), active while that app is focused and full screen (panel auto-hidden) | **recommended first policy**: reuses the `[app.*]` section; the switch costs one full upload (the format change voids the damage clips for one commit, 3.2) plus the palette write, about 10 ms [est]; add hysteresis so a popup or the OSK does not flip the depth back and forth |
 | Client opt-in through a protocol request | stage 4, together with client-indexed buffers |
 | Automatic, when only palette-friendly content is visible | rejected: picowl cannot tell from RGB565 pixels whether quantisation will hurt [inf] |
 
@@ -301,7 +305,7 @@ Rotation: C8 is upright only on the MQ1188 today, so in a rotated configuration 
 ### 8.2 Option C in detail
 
 - **Buffers.** Keep picowl's one-slot RGB565 swapchain as the render target, but no longer attach it to the plane. Add a one-slot swapchain of C8 dumb buffers (`wlr_swapchain_create()` with a C8 `wlr_drm_format`, which needs the wlroots pixel-format entry) for scanout. On the copy-type MQ1188 one C8 buffer suffices: the driver copies from the shmem shadow and double-buffers in video memory itself [code\*].
-- **Frame.** In `output_frame()` (`src/output.c` lines 292-317) replace `wlr_scene_output_commit()` by `wlr_scene_output_build_state()` into the RGB565 swapchain, take the state's damage, quantise those boxes from the RGB565 buffer into the C8 buffer, then replace the state's buffer with the C8 buffer (`wlr_output_state_set_buffer()`) and commit with the same damage.
+- **Frame.** In `output_frame()` (`src/output.c`) replace `wlr_scene_output_commit()` by `wlr_scene_output_build_state()` into the RGB565 swapchain, take the state's damage, quantise those boxes from the RGB565 buffer into the C8 buffer, then replace the state's buffer with the C8 buffer (`wlr_output_state_set_buffer()`) and commit with the same damage.
 - **Palette.** On entering C8, commit `wlr_output_state_set_gamma_lut()` with the 256-entry palette (16-bit components, the driver keeps the top six bits) in the same commit as the first C8 buffer; wlroots sends it as the `GAMMA_LUT` blob [read]. The scene's own gamma-control handling (`types/scene/wlr_scene.c` lines 2020-2038) must be kept out of the way: picowl does not offer `wlr-gamma-control` today, which keeps it so [read: no gamma in `src/`].
 - **Quantiser.** A 4,096-byte table from RGB444 to index, built once from the palette by nearest-colour search with the colour difference weighted for the eye; a 4x4 Bayer matrix added per channel before truncation to 4 bits; a second table that marks exact palette colours so they are not dithered (needed for clean text in the 16 ANSI colours) [inf]. Loop over 32-bit words (two RGB565 pixels in, two indices out), ARM mode, no allocation per frame.
 - **Direct scanout** of client buffers is impossible in C8 mode (they are RGB565), so `copied` events stop and picowl-buffer-v1 clients receive `retained`, which they already handle [read: protocol].
@@ -337,7 +341,7 @@ picowl-buffer-v1 version 3: the manager advertises `format` C8 in addition to RG
 
 ### 8.6 An engine back end: what the 2D engine could do for picowl
 
-The question this answers: with video memory holding more than the scanout frame, could picowl keep several buffers or surfaces there and compose them with the 2D engine, in C8 or in RGB565? Source for everything in the next two tables: the revival MediaQ reference, §1.4, 2.3, 3.2, 4.1 to 4.8 and 5.1, as sent by its session; none of it was run by me.
+The question this answers: with video memory holding more than the scanout frame, could picowl keep several buffers or surfaces there and compose them with the 2D engine, in C8 or in RGB565? Source for everything in the next two tables: the revival MediaQ reference, §1.4, 2.3, 3.2, 4.1 to 4.8 and 5.1, as quoted; none of it was run by me.
 
 **Established or documented.**
 
@@ -382,9 +386,9 @@ The question this answers: with video memory holding more than the scanout frame
 | Stage | Content | Decides | Effort [est] |
 |---|---|---|---|
 | 0 | Experiments E1 (quantise benchmark, pure CPU) and E2 (C8 commit, palette and switch timing with a small DRM test client) on the h2200 | whether option C saves anything; switch and palette costs | 1-1.5 days |
-| 1 | havoc: per-cell damage and an opaque region (or RGB565 buffers); upstream them | the terminal's largest win; baseline for everything after | 1 day |
+| 1 (done: havoc patch 0002, section 7.2) | havoc: per-cell damage and an opaque region (or RGB565 buffers); upstream them | the terminal's largest win; baseline for everything after | 1 day |
 | 2 | Player: C8 over the lease with a fixed palette and ordered dither (player work); kernel K1, K3 | video C8 frame rate and quality on the panel | player-side unknown; kernel 1-2 days |
-| 3 | picowl option C behind `[output] depth` and `[app.*] output_depth`, with the wlroots pixel-format patch, the headless preview and unit tests of the quantiser and damage handling | compositor C8 in practice for a full-screen havoc | 4-6 days |
+| 3 | picowl option C behind the proposed keys `[output] depth` and `[app.*] output_depth` (neither exists today), with the wlroots pixel-format patch, the headless preview and unit tests of the quantiser and damage handling | compositor C8 in practice for a full-screen havoc | 4-6 days |
 | 3b | Alternatively option K in the driver (K5), if E4 shows conversion hidden behind the bus | no picowl change at all | 1-2 days kernel |
 | 4 | picowl-buffer-v1 C8 and `palette` event; havoc renders indices | removes the quantise pass for the terminal | 5-8 days |
 | 5 | K2, K4, K6 as measurements justify | engine fills in C8, landscape C8, scroll detection | 4-7 days |
@@ -436,7 +440,7 @@ Cheap and risk-free first. All need the current driver (K1).
 
 ## 12. Open questions
 
-1. Where is the player's C8 implementation, its palette and its measured dither and conversion costs (the backlog section the owner mentioned)? Not readable here.
+1. Where is the player's C8 implementation, its palette and its measured dither and conversion costs ? Not readable here.
 2. Does the palette byte order on the panel match the datasheet (red in [7:2])? E5.
 3. Does the MQ1188 engine draw 8 bpp surfaces correctly? K2, E7.
 4. What are the 8 bpp rules for decrementing-X and column scans (start address, stride)? Section 4, question 6; K4.
@@ -458,4 +462,4 @@ Cheap and risk-free first. All need the current driver (K1).
 - "MediaQ MQ1188 and MQ1132" chip reference from the h2200-revival project (sections 1.4, 3.2-3.6, 4, 5.1-5.6, 6, 7), which in turn cites the MediaQ MQ-1100/1132 datasheet (document 12-00026 Rev D), the WinCE decompiles and board measurements.
 - The Ghidra decompile of the h2200 WinCE display driver `ddi.dll` (`mq1188ddi.pdb`), `h22xx-ddi.c`, functions `FUN_02571778`, `FUN_025719b4`, `FUN_02571ab8`, `FUN_02571c28`, `FUN_02572b54`, `FUN_02572c94`, `FUN_025766e4`, `FUN_0257677c`.
 - havoc (github.com/ii8/havoc, commit 73e3467): `main.c`, `tsm/tsm-screen.c`, `tsm/tsm-vte.c`; the meta-handhelds recipe `havoc_git.bb`.
-- The ipaq-ui research notes, branch `docs/ipaq-ui-research`: `docs/ipaq-ui/hardware.md`.
+- The ipaq-ui research notes: [hardware.md](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md).
