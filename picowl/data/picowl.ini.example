@@ -1,9 +1,12 @@
-# picowl configuration. Copy to ~/.config/picowl/picowl.ini or /etc/picowl.ini.
-# Lines starting with '#' or ';' are comments.
+# picowl configuration. Copy to ~/.config/picowl/picowl.ini or /etc/picowl.ini
+# (the OE package installs this file as /etc/picowl.ini). Every key is listed,
+# commented out at its default unless this file sets it; README.md,
+# Configuration, is the reference. Lines starting with '#' or ';' are comments;
+# there are no comments after a value. Booleans: yes/no, true/false, 1/0, on/off.
 
 [render]
-# Preferred render/scanout format: RGB565 (default), XRGB8888, ARGB8888.
-# If the backend cannot do it, picowl falls back to the backend default.
+# Render and scanout format of every output: RGB565 (default), XRGB8888, ARGB8888
+# (case-sensitive). If an output rejects it, picowl uses XRGB8888 there.
 format = RGB565
 
 [output]
@@ -15,7 +18,7 @@ format = RGB565
 # Subpixel layout of the panel (wl_output.subpixel), in its native orientation:
 # unknown (default: the backend's value), none, horizontal_rgb, horizontal_bgr,
 # vertical_rgb, vertical_bgr. Clients such as picowl-panel use it to draw
-# subpixel text; rotation is taken care of (see README, [output] section).
+# subpixel text; rotation is taken care of (see README, [output]).
 # Per board, as told by the owner and not checked against datasheets:
 #   iPAQs (h2200 and the other portrait panels)  horizontal_rgb
 #   h3900 (a landscape panel in hardware)        vertical_rgb
@@ -30,7 +33,7 @@ format = RGB565
 #   h2200                         53x71
 #   h5xxx (older kernels say 53x71)  57x77
 #   h3800, h3900 (landscape scan frame)  77x57
-#   hx4700 (both modes)           60x80
+#   hx4700 (both modes)           60x80 (provisional, not measured)
 # size_mm = 57x77
 # DSI-1.size_mm = 60x80
 # With hardware rotation wl_output says the transform normal; picowl-panel learns
@@ -41,36 +44,40 @@ format = RGB565
 # Legacy: milliseconds of inactivity before the screen is blanked; 0 disables.
 # Used as blank_after_s (rounded up to seconds) for all power profiles unless
 # a [power.*] blank_after_s is set. Prefer the [power.*] sections below.
+# It is set here, so with this file every profile blanks after 60 s (without
+# it the [power.*] defaults are 600, 60 and 30 s).
 timeout_ms = 60000
 
 [background]
-# Background colour as RGB hex.
+# Background colour, #RRGGBB, always opaque. Without this key it is 0.1 in
+# each channel (about #1a1a1a).
 color = #101010
 
 [autostart]
-# One shell command per line, run once at startup.
+# One shell command per cmd line, run once at startup, in order. picowl does
+# not restart them. The keyboard belongs in [osk], not here.
 # The panel: a slim bar with clock, battery and backlight and volume buttons; a
 # tap on a button pops a row out under the bar (a slider for the backlight and
-# the volume, the weekday and date for the clock, the time left for the battery;
-# it covers windows, it does not move them) and closes it again 3 s after the last touch. It is hidden
-# while an app has the focus, and with it the row, unless [zerocopy]
-# panel_autohide is false. Options: --height N (18..80, default 18), --bottom,
-# --font PATH and --font-size PX (the text is rasterized from a TrueType font,
-# by default the first Liberation Sans or DejaVu Sans file that exists, else a
-# built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
-# translucent), --style auto|smooth|crisp (default auto: the panel works out the
-# density of the output when it runs and takes crisp below 150 ppi, the QVGA
-# iPAQs, and smooth from there, the hx4700; crisp draws no anti-aliasing at
-# all, with built-in pixel fonts and icons on whole pixels, and ignores --font,
-# --font-size and --subpixel; smooth and crisp win over the density), --dpi N
-# (use this density, 20..1000, for a board whose size is unknown), --height
-# N|auto (default auto: 18 for crisp, scaled with the density for smooth), --crisp-font fixed|dejavu (default fixed; the
-# pixel font of the crisp style: the monospaced misc-fixed set or DejaVu Sans
-# Bold, proportional), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
-# (default auto: LCD text in the order [output] subpixel advertises, in
-# grayscale where the ground is translucent or the stripes do not run across)
-# and --battery-mah N (the battery's capacity, the last resort for the time left
-# when the driver exports neither charge_full nor charge_full_design).
+# the volume, the weekday and date for the clock, the time left for the
+# battery), which covers windows without moving them and closes 3 s after the
+# last touch. It is hidden while an app has the focus, unless [zerocopy]
+# panel_autohide is false. Options (README, Panel, Options):
+#   --style auto|smooth|crisp  default auto: crisp below 150 ppi (the QVGA
+#       iPAQs: pixel fonts compiled in, no anti-aliasing, no font file),
+#       smooth from 150 ppi (the hx4700: TrueType text, by default the first
+#       Liberation Sans or DejaVu Sans file that exists)
+#   --height N|auto            default auto: 18 for crisp, scaled with the
+#       density for smooth; N is clamped to 18..80
+#   --dpi N                    use this density, 20..1000, instead of the output's
+#   --edge auto|top            default auto: on an output turned by 90 or 270
+#       the bar is a strip on the physical top of the device
+#   --bottom                   anchor at the bottom edge
+#   --crisp-font fixed|dejavu  pixel font of the crisp style (default fixed)
+#   --font PATH, --font-size PX (8..48)       smooth style only
+#   --subpixel auto|rgb|bgr|none              smooth style only (default auto)
+#   --popup-alpha N, --bar-alpha N            0..255, defaults 224 and 255
+#   --battery-mah N            battery capacity, the last resort for the time
+#       left when the driver exports neither charge_full nor charge_full_design
 # cmd = picowl-panel
 # cmd = picowl-panel --bottom --height 24 --popup-alpha 255
 # with the capacity printed on the battery pack, for a gauge that does not report it:
@@ -110,10 +117,10 @@ code:155 = rotate
 # hold_button: right (default) or middle. The button the hold sends; middle pastes the
 #   primary selection in a terminal. Not used when hold_action = none.
 # hold_delay_ms: start animation after this delay (default 300 ms).
-# hold_ms: send right-click after this duration from touch-down (default 900 ms).
-#   Must be greater than hold_delay_ms. Range: integers.
+# hold_ms: send the click after this duration from touch-down (default 900 ms).
+#   Must be greater than hold_delay_ms, else both are reset to 300 and 900.
 # slop_px: movement tolerance before hold is triggered; if exceeded, triggers drag instead
-#   (default 8 px). Range: 0..64.
+#   (default 8 px). Range: 0..64, else reset to 8.
 # hold_action = right-click
 # hold_button = right
 # hold_delay_ms = 300
@@ -129,7 +136,7 @@ code:155 = rotate
 #   a*x + b*y + c, y' = d*x + e*y + f, all in 0..1). Overrides everything. An
 #   explicit identity '1 0 0 0 1 0' marks a panel that really is calibrated.
 # pointercal: tslib file written by ts_calibrate (default /etc/pointercal,
-#   empty = do not use one). Format: a b c d e f scale xres yres rotation, e.g.
+#   an empty value = do not use one). Format: a b c d e f scale xres yres rotation, e.g.
 #   22841 -68 -3658260 -491 -28324 25242144 65536 240 320 0
 #   xres and yres are required and rotation must be 0.
 # calibration = 1.487044 -0.004427 -0.232586 -0.023975 -1.383008 1.203639
@@ -137,8 +144,10 @@ code:155 = rotate
 
 # Per-app tap-and-hold overrides: [app.<app_id>] (xdg toplevels, exact match)
 # and per-layer overrides: [layer.<namespace>] (layer-shell surfaces).
-# Keys are the same as [touch]; unset keys are inherited from [touch], wherever
-# [touch] appears in the file. Bad timings revert to the [touch] values.
+# The hold keys are those of [touch] (not calibration or pointercal); unset keys
+# are inherited from [touch], wherever [touch] appears in the file. Bad timings
+# revert to the [touch] values. [app.*] also takes the buffer keys and aspect
+# (below).
 # Example: a media player that times its own long press. hold_action = none
 # sends the left press at touch-down, with no right-click and no animation.
 # [app.mediaplayer]
@@ -163,8 +172,8 @@ code:155 = rotate
 # fill, outline: builtin animation dot and outline colours in #RRGGBB format.
 #   Colours are compared at 6 bits per component; for example #2050c0 and
 #   #2353c3 count as the same colour. Default: fill=#2050c0, outline=#ffffff.
-# frame_interval_ms: animation frame duration in milliseconds. Range: 20..1000.
-#   Default: 83 ms (~12 fps).
+# frame_interval_ms: animation frame duration in milliseconds. Range: 20..1000,
+#   else reset to 83. Default: 83 ms (~12 fps).
 # hold_animation = builtin
 # fill = #2050c0
 # outline = #ffffff
@@ -173,26 +182,30 @@ code:155 = rotate
 [rotation]
 # Per-output rotation mode override.
 # "<output name> = <mode>" or "* = <mode>".
-# Modes: auto (default, uses hardware rotation when available), hardware, software.
-# auto uses the DRM plane rotation property when the plane supports it (e.g., MediaQ),
-# else software rotation. hardware asks for the plane rotation and falls back to software
-# rotation (with an error in the log) if it is not available. software always uses software rotation in the renderer.
+# Modes (case-insensitive): auto (default), hardware, software.
+# auto uses the DRM plane rotation property when the plane supports the
+# transform (the MediaQ mq11xx driver), else software rotation; it was measured
+# on an h2200 (doc/rotation-results.md). hardware does the same but logs an
+# error before it falls back to software. software always rotates in the renderer.
 # DSI-1 = hardware
 # * = auto
 
 [copytype]
 # Per-output copy-type override (damage-clip framebuffer copies to VRAM).
 # "<output name> = <type>" or "* = <type>".
-# Types: auto (default, enabled for drivers that benefit), yes, no.
+# Types (case-insensitive): auto (default, from the DRM driver name), yes, no.
 # Requires a kernel with DRM_IOCTL_MODE_CLOSEFB (Linux 6.9 or a backport);
 # without it auto disables copy-type, and yes is honoured but logs an error.
-# Copy-type drivers should also support FB_DAMAGE_CLIPS. Drivers: mq11xx, w100, sa1100-lcdc (copy-type);
-# pxa-lcdc (scans DMA buffers, no copy).
+# Off with WLR_DRM_NO_ATOMIC=1. Copy-type drivers should also honour
+# FB_DAMAGE_CLIPS. Copy-type: mq11xx (mediaq), w100 (imageon), sa1100-lcdc
+# (sa1100_lcdc, sa11x0-lcdc, sa1100); every other driver, pxa-lcdc among them,
+# scans buffers out by DMA.
 # DSI-1 = auto
 # * = auto
 
 [zerocopy]
-# Zero-copy and single-buffer client support.
+# Zero-copy and single-buffer client support. Needs the DRM backend and a
+# dmabuf-capable allocator; otherwise the log says "zero-copy disabled".
 # enable: advertise picowl-buffer-v1 and DMA-BUF feedback (default true).
 # single_buffer: allow single-buffer (non-double-buffered) clients on
 #   copy-type outputs where they are safe (default true).
@@ -202,9 +215,10 @@ code:155 = rotate
 # budget_kb: memory shared by all clients without an [app.*] buffer rule.
 #   Range 0..65536 (default 2048); 0 = none of them may allocate.
 # total_kb: ceiling over all pools. 0 = no extra limit (default), else 1..65536.
+#   A ceiling below the sum of the pools is accepted (logged).
 # caching: what the caching event (picowl-buffer-v1 version 2) tells clients about
 #   the CPU mapping of the buffers: auto (default, from the DRM driver: cacheable for
-#   mq11xx and w100, write_combined for everything else, sa1100-lcdc included),
+#   mq11xx and w100 (shmem), write_combined for everything else, sa1100-lcdc included),
 #   cacheable or write_combined. Case-insensitive; an invalid value keeps auto.
 #   Clients never read back from, or decode into, write_combined buffers.
 # Sizes are counted in whole pages as allocated. A request over a limit gets
@@ -248,7 +262,8 @@ code:155 = rotate
 # second_min: the share of the split axis (the height in portrait, the width in
 # landscape) the second window keeps at least, 25..75 percent, default 50. A
 # wide player clip then cannot take the room the terminal needs. 25 gives the
-# older rule, where only a quarter was guaranteed. A bad value keeps the default.
+# older rule, where only a quarter was guaranteed. A bad value is logged and
+# the previous value kept.
 # second_min = 50
 #
 # focus: one of the two stack apps keeps the keyboard when the other one maps,
@@ -265,7 +280,8 @@ code:155 = rotate
 # the height of the keyboard, so the lower window ends where
 # the keyboard starts and the upper one slides off the top. Everything else
 # (one app alone, other apps, a side by side split, panels) is resized as usual.
-# Comma separated, default wvkbd; an empty value turns the panning off.
+# Comma separated, default wvkbd; an empty value turns the panning off. At most
+# 8 names, each shorter than 64 characters, without spaces.
 # pan = wvkbd
 #
 # [app.mediaplayer]
@@ -286,12 +302,15 @@ code:155 = rotate
 [capture]
 # Screen capture through zwlr_screencopy_manager_v1 (grim, wf-recorder).
 # Off by default: any client of the session can read the whole screen, including
-# other applications. Enabled here so development images can take screenshots;
-# leave it off on production images. See doc/capture.md.
+# other applications. Enabled here (so also in the /etc/picowl.ini of the OE
+# package) so that development images can take screenshots; set it false on
+# production images. See doc/capture.md.
 enabled = true
 
 [memory]
-# Memory allocator tuning (M_* malloc() environment variables).
+# glibc malloc tuning through mallopt() (the M_* parameters), applied before
+# and after the config is read. Values outside the ranges are logged and the
+# default kept.
 # arena_max: M_ARENA_MAX, number of malloc arenas. Range: 1..8 (default 1).
 # trim_threshold_kb: M_TRIM_THRESHOLD in kB, the amount of free memory at the
 #   top of the heap that glibc free() returns to the OS (default 256).
@@ -299,8 +318,7 @@ enabled = true
 # top_pad_kb: extra bytes reserved at the top of the heap in kB (default 16).
 # trim_after_start: call malloc_trim(0) once from an idle callback after
 #   startup (default true).
-# Ranges: trim_threshold_kb 0..65536, mmap_threshold_kb 16..4096, top_pad_kb 0..65536;
-# out-of-range values are rejected and the default is kept.
+# Ranges: trim_threshold_kb 0..65536, mmap_threshold_kb 16..4096, top_pad_kb 0..65536.
 # arena_max = 1
 # trim_threshold_kb = 256
 # mmap_threshold_kb = 128
@@ -308,7 +326,8 @@ enabled = true
 # trim_after_start = true
 
 [power]
-# Power supply aware backlight dimming configuration.
+# Power supply aware backlight dimming (doc/power.md). Numbers are read with
+# atoi; out of range is logged and the default kept. Other keys are ignored.
 # backlight: auto (prefer type firmware > platform > raw, first by name),
 #   or an explicit backlight device name in /sys/class/backlight/. Default: auto.
 # low_capacity: battery capacity threshold (%): LOW is used when the lowest
@@ -364,6 +383,6 @@ enabled = true
 [core]
 # Legacy [core] section (deprecated; alias of [idle] timeout_ms).
 # idle_timeout_ms: if set and no [power.*] blank_after_s is configured,
-#   it becomes the blank timeout for all profiles (converted to seconds).
+#   it becomes the blank timeout for all profiles (rounded up to seconds).
 #   This section exists for backwards compatibility with older configs.
 # idle_timeout_ms = 60000
