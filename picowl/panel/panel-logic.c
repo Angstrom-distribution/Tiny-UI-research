@@ -897,6 +897,23 @@ void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out)
 		out->crisp ? PL_HEIGHT_DEFAULT : pl_height_for_ppi(ppi);
 }
 
+bool pl_configure_stale(int cfg_w, int cfg_h, bool thick_axis_w, int req_h, bool relook,
+	int bar_h, bool *req_pending)
+{
+	if (cfg_w <= 0 || cfg_h <= 0)
+		return false;
+	/* Nothing has been asked for the new look yet, so what is configured is
+	 * the old size: drawn, it would put the new layout in the old buffer. */
+	if (relook && req_h != pl_surface_height(bar_h, false))
+		return true;
+	if (*req_pending) {
+		if ((thick_axis_w ? cfg_w : cfg_h) != req_h)
+			return true;
+		*req_pending = false;
+	}
+	return false;
+}
+
 bool pl_look_same(const struct pl_look *a, const struct pl_look *b)
 {
 	return a->ppi == b->ppi && a->src == b->src && a->vga == b->vga &&

@@ -3831,6 +3831,40 @@ static void test_look(void)
 
 /* The turn and the panel's layout an output has for the panel: the hint when it
  * says the display turns the output, else geometry. */
+static void test_configure_stale(void)
+{
+	bool pend;
+
+	/* A new look is waiting for its surface and nothing was asked for yet:
+	 * the configure that comes is for the old size. */
+	pend = false;
+	CHECK(pl_configure_stale(240, 18, false, 18, true, 34, &pend), "relook, not asked yet: stale");
+	CHECK(pl_configure_stale(18, 240, true, 18, true, 34, &pend), "the same in a strip");
+	/* Asked for 34: the configure for the old size is stale, the one for 34
+	 * is the answer. */
+	pend = true;
+	CHECK(pl_configure_stale(240, 18, false, 34, true, 34, &pend) && pend, "asked for 34, 18 comes: stale, still waiting");
+	CHECK(!pl_configure_stale(240, 34, false, 34, true, 34, &pend) && !pend, "asked for 34, 34 comes: drawn, answered");
+	/* The reviewed case: a row opened on the old layout made the request
+	 * bar plus row; the configure for it is not stale. */
+	pend = true;
+	CHECK(!pl_configure_stale(240, 52, false, 52, false, 34, &pend) && !pend, "the row's size when it was asked for: drawn");
+	/* Two looks with a flush between: 34 was asked for, then 18 again; the
+	 * configure for 34 that was already on its way is stale. */
+	pend = true;
+	CHECK(pl_configure_stale(240, 34, false, 18, false, 18, &pend) && pend, "asked for 34 then 18, 34 comes: stale");
+	CHECK(!pl_configure_stale(240, 18, false, 18, false, 18, &pend) && !pend, "then 18: drawn");
+	/* Nothing outstanding: whatever the compositor says is taken. */
+	pend = false;
+	CHECK(!pl_configure_stale(240, 40, false, 18, false, 18, &pend), "no request outstanding: not stale");
+	CHECK(!pl_configure_stale(0, 0, false, 18, true, 34, &pend), "no size from the compositor: not stale");
+	pend = true;
+	CHECK(!pl_configure_stale(0, 18, false, 34, true, 34, &pend) && pend, "a zero side: not stale, still waiting");
+	pend = true;
+	CHECK(pl_configure_stale(18, 240, true, 34, false, 34, &pend) && pend, "a strip: the width is the thickness, 18 is stale");
+	CHECK(!pl_configure_stale(34, 240, true, 34, false, 34, &pend) && !pend, "a strip: 34 is the answer");
+}
+
 static void test_rot_hint(void)
 {
 	struct pl_rot_hint none = { 0 };
@@ -3939,6 +3973,7 @@ int main(void)
 	test_strip();
 	test_rot_hint();
 	test_look();
+	test_configure_stale();
 	test_touch();
 	test_popup();
 	test_text_buttons();

@@ -1723,17 +1723,9 @@ static bool handle_buffer(struct panel *p)
 	 * (drawn, it would put this look's layout into a buffer of the other
 	 * size for a frame). While a new look waits for its surface nothing has
 	 * been asked for yet, so what is configured is the old size. */
-	if (p->cfg_w > 0 && p->cfg_h > 0) {
-		int thick = p->strip != PL_STRIP_NONE ? p->cfg_w : p->cfg_h;
-
-		if (p->relook && p->req_h != pl_surface_height(p->height, false))
-			return true;
-		if (p->req_pending) {
-			if (thick != p->req_h)
-				return true;
-			p->req_pending = false;
-		}
-	}
+	if (pl_configure_stale(p->cfg_w, p->cfg_h, p->strip != PL_STRIP_NONE, p->req_h,
+			p->relook, p->height, &p->req_pending))
+		return true;
 	int sw = p->cfg_w > 0 ? p->cfg_w :
 		p->strip != PL_STRIP_NONE ? pl_surface_height(p->height, false) : 240;
 	int sh = p->cfg_h > 0 ? p->cfg_h :

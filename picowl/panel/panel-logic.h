@@ -543,6 +543,16 @@ int pl_height_for_ppi(int ppi);
  * scales) and pl_height_for_ppi for smooth. */
 void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out);
 
+/* A configure that is answered but not drawn for: it was sent before the
+ * surface was asked for the size the current look needs. cfg_w x cfg_h is the
+ * configured size (0 when the compositor left it to the client: never stale),
+ * thick_axis_w says the thickness is the width (a strip), req_h the thickness
+ * asked for last, relook that the look's buffer has not been rebuilt yet and
+ * bar_h the bar of the look (a row is never open then). *req_pending is the
+ * request nobody has answered yet; it is cleared by the configure that does. */
+bool pl_configure_stale(int cfg_w, int cfg_h, bool thick_axis_w, int req_h, bool relook,
+	int bar_h, bool *req_pending);
+
 bool pl_look_same(const struct pl_look *a, const struct pl_look *b);
 const char *pl_dpi_src_name(enum pl_dpi_src s);
 

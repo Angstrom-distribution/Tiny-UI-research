@@ -1960,6 +1960,21 @@ dump x.out2 --subpixel none
 [ "$(grep '^look ' "$DIR/x.out2" | sed 's/ mode=.*//')" = "$(echo "$XLOOK" | sed 's/ mode=.*//')" ] || fail "X: the look after a rotation is not the one before"
 stop_panel X
 stop_picowl
+# by the display the mode itself changes while the panel runs: wl_output sends
+# the other mode (the current one, flagged) and done, the panel's record of the
+# output follows, and since the diagonals are the same there is no new decision
+VHW=1
+v_picowl normal
+start_panel x --subpixel none
+sleep 0.3
+has "$DIR/x.out" '^look style=crisp ppi=106 source=reported class=qvga height=18 mode=240x320 ' "X hardware: the mode at the start"
+"$KEYS" 397 || fail "X: key client failed"
+wait_for "$DIR/x.out" '^placement edge=right transform=1 surface=18x240 ' 5 "X hardware rotating to 90"
+sleep 0.3
+has "$DIR/x.out" '^look style=crisp ppi=106 source=reported class=qvga height=18 mode=320x240 ' "X hardware: the panel has the new mode after the rotation"
+[ "$(x_infos "$DIR/x.err")" = 1 ] || fail "X: a change of mode with the same density made a new decision: $(grep info: "$DIR/x.err")"
+stop_panel X
+stop_picowl
 unset PICOWL_TEST_VIRTUAL_POINTER
 VHW=0
 cp "$DIR/picowl.base.orig" "$DIR/picowl.base"
