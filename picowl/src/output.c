@@ -15,6 +15,7 @@
 #include "picowl.h"
 #include "power.h"
 #include "subpixel.h"
+#include "rotationproto.h"
 
 #ifndef DRM_IOCTL_MODE_CLOSEFB
 struct drm_mode_closefb { uint32_t fb_id; uint32_t pad; };
@@ -46,6 +47,7 @@ static void output_update_background(struct pw_output *output)
 
 void pw_output_update_geometry(struct pw_output *output)
 {
+	pw_rotationproto_output_changed(output);
 	output_update_background(output);
 	pw_layer_arrange(output);
 }
@@ -68,6 +70,21 @@ static bool headless_size(int *w, int *h)
 	return true;
 }
 
+/* PICOWL_TEST_HW_ROTATION=1 (headless only, needs PICOWL_HEADLESS_SIZE, the
+ * panel's native size): the output takes the path hardware rotation takes
+ * (the mode is the rotated one, wl_output says the transform normal, the
+ * subpixel layout goes out as the client sees it, hw_rotation is set) with
+ * nothing turning the picture, because the headless backend has no plane to do
+ * it. A capture then is the rotated frame as clients see it, which the test
+ * turns back by the plane's rotation to get what a display would show. */
+static bool test_hw_rotation(const struct pw_output *o)
+{
+	const char *e = getenv("PICOWL_TEST_HW_ROTATION");
+	int w, h;
+	return e && !strcmp(e, "1") && wlr_output_is_headless(o->wlr_output) &&
+		headless_size(&w, &h);
+}
+
 /* The subpixel layout goes out with every commit that sets a transform, so the
  * two stay a pair: clients combine them (wl_output.geometry). */
 static void output_set_subpixel(struct pw_output *o, struct wlr_output_state *state,
@@ -88,8 +105,15 @@ static void output_build_enable(struct pw_output *o, struct wlr_output_state *st
 	int hw, hh;
 	if (mode)
 		wlr_output_state_set_mode(state, mode);
-	else if (wlr_output_is_headless(wo) && headless_size(&hw, &hh))
+	else if (wlr_output_is_headless(wo) && headless_size(&hw, &hh)) {
+		/* hw_rotation is only ever set here by the test path. */
+		if (o->hw_rotation && pw_rot_swaps_axes(o->rotation)) {
+			int t = hw;
+			hw = hh;
+			hh = t;
+		}
 		wlr_output_state_set_custom_mode(state, hw, hh, 0);
+	}
 	wlr_output_state_set_transform(state, transform);
 	output_set_subpixel(o, state, transform);
 
@@ -134,8 +158,9 @@ static bool output_commit_disable(struct pw_output *o)
 /* Hardware rotation for t is possible on this output. */
 static bool output_hw_possible(struct pw_output *o, enum wl_output_transform t)
 {
-	return o->rot_mode != PW_ROT_SOFTWARE && wlr_output_is_drm(o->wlr_output) &&
-		wlr_drm_connector_supports_hw_rotation(o->wlr_output, t);
+	return o->rot_mode != PW_ROT_SOFTWARE && (test_hw_rotation(o) ||
+		(wlr_output_is_drm(o->wlr_output) &&
+		wlr_drm_connector_supports_hw_rotation(o->wlr_output, t)));
 }
 
 /* Return to software rotation: disables the output if needed, resets the
@@ -169,14 +194,15 @@ static bool output_enable_rotated(struct pw_output *o)
 		pw_log(WLR_ERROR, "output %s: disable before hardware rotation "
 			"failed", wo->name);
 
-	if (hw && wlr_drm_connector_set_hw_rotation(wo, t)) {
+	bool test_hw = hw && test_hw_rotation(o);
+	if (hw && (test_hw || wlr_drm_connector_set_hw_rotation(wo, t))) {
 		/* The patch nulled current_mode: MODE is not stripped. */
 		struct wlr_output_mode *mode = wlr_output_preferred_mode(wo);
 		o->hw_rotation = true;
 		/* wo->width/height come from the swapped mode, so the size cannot
 		 * tell whether the kernel applied the rotation: only a failed
 		 * commit falls back to software rotation. */
-		if (mode && output_commit_enable(o, mode,
+		if ((mode || test_hw) && output_commit_enable(o, mode,
 				WL_OUTPUT_TRANSFORM_NORMAL))
 			return true;
 		pw_log(WLR_ERROR, "output %s: hw rotation commit failed, "
@@ -357,6 +383,7 @@ static void output_destroy(struct wl_listener *listener, void *data)
 
 	pw_input_output_removed(output->server, output);
 	pw_zerocopy_output_removed(output);
+	pw_rotationproto_output_removed(output);
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->present.link);
 	wl_list_remove(&output->request_state.link);

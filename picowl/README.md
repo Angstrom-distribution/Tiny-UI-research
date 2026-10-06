@@ -555,6 +555,7 @@ Picowl advertises and implements (via wlroots 0.19):
 
 **Output & Rendering:**
 - `wl_output`: output geometry, mode, subpixel, transform.
+- `picowl_rotation_manager_v1` (`protocols/picowl-rotation-v1.xml`, `src/rotationproto.c`): how an output is turned, including by the display. `get_rotation(wl_output)` gives a `picowl_rotation_v1` that sends `rotation(transform, hardware, subpixel)` at once and on each change: the `wl_output.transform` that turns the panel as built, whether the display does it, and the panel's native `wl_output.subpixel`. It is additive: it does not change `wl_output`, so a client that does not bind it sees what it saw before. picowl-panel is the one client that uses it (see Panel).
 - `wp_presentation`: frame timing hints (via wlr_presentation).
 - `wp_viewporter`: scaling and cropping (via wlr_viewporter).
 - `zxdg_output_manager_v1`: the logical position and size of each output, from the output layout (via wlr_xdg_output_v1). Screenshot tools such as grim need it; without it they guess a zero-sized output. With hardware rotation the logical size is the rotated one, as clients see it.

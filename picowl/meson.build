@@ -65,6 +65,7 @@ protocol_xmls = {
   'wlr-layer-shell-unstable-v1': files('protocols/wlr-layer-shell-unstable-v1.xml'),
   'wlr-output-power-management-unstable-v1': files('protocols/wlr-output-power-management-unstable-v1.xml'),
   'picowl-buffer-v1': files('protocols/picowl-buffer-v1.xml'),
+  'picowl-rotation-v1': files('protocols/picowl-rotation-v1.xml'),
   'tablet-v2': wl_proto_dir / 'unstable' / 'tablet' / 'tablet-unstable-v2.xml',
   'cursor-shape-v1': wl_proto_dir / 'staging' / 'cursor-shape' / 'cursor-shape-v1.xml',
   'content-type-v1': wl_proto_dir / 'staging' / 'content-type' / 'content-type-v1.xml',
@@ -93,6 +94,13 @@ picowl_buffer_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+picowl_rotation_code = custom_target(
+  'picowl-rotation-v1-server-code',
+  input: files('protocols/picowl-rotation-v1.xml'),
+  output: 'picowl-rotation-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 sources = files(
   'src/main.c',
   'src/server.c',
@@ -117,6 +125,7 @@ sources = files(
   'src/copyrel.c',
   'src/zerocopy.c',
   'src/zbproto.c',
+  'src/rotationproto.c',
   'src/zbquota.c',
   'src/mem.c',
   'src/backlight.c',
@@ -138,7 +147,7 @@ pwcursorfit = static_library(
 
 picowl_exe = executable(
   'picowl',
-  sources, protocol_headers, picowl_buffer_code,
+  sources, protocol_headers, picowl_buffer_code, picowl_rotation_code,
   link_with: pwcursorfit,
   dependencies: [wlroots, wayland_server, xkbcommon, pixman, libdrm, libinput, libudev,
     cc.find_library('m', required: false)],

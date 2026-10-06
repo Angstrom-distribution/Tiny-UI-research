@@ -26,6 +26,7 @@
 #include "picowl.h"
 #include "mem.h"
 #include "zerocopy.h"
+#include "rotationproto.h"
 
 /* File-local state; the header has no room for these and there is only ever
  * one server per process. */
@@ -291,6 +292,7 @@ bool pw_server_init(struct pw_server *server, struct pw_config *config)
 
 	if (!pw_zerocopy_init(server))
 		goto fail;
+	pw_rotationproto_init(server);
 
 	/* Module inits; input creates the seat/cursor and must precede idle. */
 	pw_output_init(server);
@@ -380,6 +382,7 @@ void pw_server_finish(struct pw_server *server)
 	 * was told to, not because it lost its connection, and is not restarted. */
 	pw_osk_finish(server);
 	pw_zerocopy_finish(server);
+	pw_rotationproto_finish(server);
 	pw_lease_finish(server);
 
 	wl_display_destroy_clients(server->display);
