@@ -1,6 +1,8 @@
 # Hardware versus software rotation: measurement plan
 
-picowl defaults to hardware rotation (`[rotation] auto`). The only data so far comes from the media player on the h2200, which is a different workload. The player's paired on/off runs showed, at 320 wide with ordered dither, about +2.5% process CPU and roughly double the dropped frames with hardware rotation, because the physical Bayer phase forced the general dither kernel. At 240 wide it was neutral, and it saved no bus bytes. Those figures predate the player's Bayer-aware kernels. This plan measures the compositor itself. The default stays hardware unless the results below show a regression.
+**Status:** historical record, written on 2026-10-04 (picowl commits 985571e and 55002c6) as the plan for the measurement whose results are in [rotation-results.md](rotation-results.md). It was run on an h2200 (PXA255, mq11xx) only. The setup below describes the kernel builds of that day (builds #201 and #202 are the ones with the damage-clip bug). The current behaviour of the `[rotation]` section is in [README.md](../README.md#configuration). The items still open are listed at the end.
+
+picowl defaults to hardware rotation (`[rotation] <output> = auto`, which uses the DRM primary plane's `rotation` property when the driver supports it and software rotation otherwise). The only data so far comes from the media player on the h2200, which is a different workload. The player's paired on/off runs showed, at 320 wide with ordered dither, about +2.5% process CPU and roughly double the dropped frames with hardware rotation, because the physical Bayer phase forced the general dither kernel. At 240 wide it was neutral, and it saved no bus bytes. Those figures predate the player's Bayer-aware kernels. This plan measures the compositor itself. The default stays hardware unless the results below show a regression.
 
 ## Question
 
@@ -11,7 +13,7 @@ For a compositor workload on mq11xx boards, does `hardware` cost or save CPU, fr
 - **Boards:** h2200 first (mq11xx, known quirks). Then any other board whose primary plane exposes `rotation`.
 - **Kernel:** one build with the damage-clip fix (commit `daf8e6712ae1`). Builds #201 and #202 ignore `FB_DAMAGE_CLIPS` after any rotation or format change and would bias the result against hardware rotation. Record `uname -r` with every run.
 - **Fixed conditions:** same picowl binary, same config apart from `[rotation]`, same backlight and CPU frequency governor (pin it), battery or mains held the same, 5 minutes of idle warm-up before each run.
-- **Switch:** `* = hardware` versus `* = software`, restarting picowl for each run. Do not use the runtime `rotate` action, which would mix transitions into the numbers.
+- **Switch:** `[rotation] * = hardware` versus `* = software`, restarting picowl for each run. Do not use the runtime `rotate` action, which would mix transitions into the numbers.
 - **Design:** paired and interleaved (hw, sw, hw, sw, ...), 5 pairs per cell, as the player did.
 
 ## Matrix
@@ -69,7 +71,11 @@ The deltas are between consecutive `presented` timestamps. `late` counts deltas 
   - If compositor cells regress, switch the default to software and update the README, `data/picowl.ini.example` and `tests/test-config.c`.
 - Write the results to `doc/rotation-results.md`, with the kernel build and picowl commit.
 
-## Open items before running
+## Open items
 
-- Repeat the comparison on a kernel with the `mq11xx_vram_flush` alignment fix, and with correct flip timestamps.
-- Optional hardening: log the kernel release at startup (`uname`), so every picowl log is attributable to a kernel build.
+Done when the results were written: the comparison on a kernel with the `mq11xx_vram_flush` alignment fix and with correct flip timestamps (see [rotation-results.md](rotation-results.md)). Still open, and tracked in the [roadmap](design/roadmap.md):
+
+- Workloads W1 (idle with clock panel), W2 (terminal scrolling) and W5 (media player under picowl, Path A, with ordered dither) were not run.
+- The 270 degree transform and boards other than the h2200 were not measured.
+- Touch correctness at each transform, and with hardware rotation, was not checked.
+- Logging the kernel release at picowl start-up, so every picowl log is attributable to a kernel build, is not implemented.

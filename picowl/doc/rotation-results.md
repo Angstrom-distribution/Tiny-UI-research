@@ -1,6 +1,8 @@
 # Hardware versus software rotation: h2200 results
 
-Results of the plan in `doc/rotation-measurement.md`, measured on an h2200 (PXA255, mq11xx, 240x320 panel) with picowl at commit 3f74900 or later (it includes the fix that makes hardware rotation take effect at all, see below), a kernel build with the mq11xx flush alignment fix, and a libdrm 2.4.131 package with an 8-byte aligned event read buffer. Each cell is 5 paired runs of 60 s, alternating which mode runs first, with the compositor restarted for every run. The client was `picowl-commit-loop` at 30 fps. Ticks are `/proc/<pid>/stat` utime+stime of the picowl processes in USER_HZ units, assumed to be 100 per second, so a tick rate reads as percent of one CPU. User alignment handling was left at the kernel default.
+**Status:** historical record of measurements taken on 2026-10-04 (picowl commits b867077 and 1799345), on one h2200 (PXA255, mq11xx, 240x320 panel). The numbers are as measured and are not updated. How picowl applies hardware rotation today is in [README.md](../README.md#configuration) (`[rotation]`) and `output_enable_rotated` in `src/output.c`. What was not measured is listed at the end and tracked in the [roadmap](design/roadmap.md).
+
+Results of the plan in [rotation-measurement.md](rotation-measurement.md), measured on an h2200 (PXA255, mq11xx, 240x320 panel) with picowl at commit 3f74900 or later (it includes the fix that makes hardware rotation take effect at all, see below), a kernel build with the mq11xx flush alignment fix, and a libdrm 2.4.131 package with an 8-byte aligned event read buffer. Each cell is 5 paired runs of 60 s, alternating which mode runs first, with the compositor restarted for every run. The client was `picowl-commit-loop` at 30 fps. Ticks are `/proc/<pid>/stat` utime+stime of the picowl processes in USER_HZ units, assumed to be 100 per second, so a tick rate reads as percent of one CPU. User alignment handling was left at the kernel default.
 
 ## Result
 
@@ -22,11 +24,13 @@ Hardware rotation stays the default. At a 90 degree transform with a full-surfac
 
 ## What the measurement found on the way
 
-- **picowl never applied hardware rotation before this work.** The output was already enabled when picowl asked for the rotation, and the patched wlroots only accepts a plane rotation change while the output is disabled. It logged an error and fell back to software rotation, so earlier "hardware" runs were software. picowl now disables the output first.
+- **picowl never applied hardware rotation before this work.** The output was already enabled when picowl asked for the rotation, and the patched wlroots only accepts a plane rotation change while the output is disabled. It logged an error and fell back to software rotation, so earlier "hardware" runs were software. picowl now disables the output first (`output_enable_rotated` in `src/output.c`), and falls back to software rotation only if the hardware commit then fails.
 - **One kernel alignment fault per upload with rotation, now fixed.** With the rotated 642 byte VRAM pitch, `mq11xx_vram_flush` did a 32-bit read at an address that was 2 mod 4, which trapped and was fixed up in the kernel (about 20 faults per second, one per full-frame upload, none without rotation). The kernel now aligns that address down.
 - **Page-flip timestamps were wrong on this board, now fixed.** libdrm's `drmHandleEvent` loaded the seconds and microseconds of each flip event as one 64-bit pair from a buffer that was only 4-byte aligned. On this CPU, with the kernel's default user alignment mode "ignored", both registers received the same word, so the microseconds equalled the seconds and `wp_presentation` timestamps advanced only once a second. The patched libdrm aligns the buffer, and the timestamps now advance in real steps. Any program that reads flip events through an unpatched libdrm on this CPU has the problem, and setting user alignment to fixup (`echo 2 > /proc/cpu/alignment`) is a workaround.
 
 ## Not covered
+
+Tracked in the [roadmap](design/roadmap.md).
 
 - The media player workload (W5) and its dither kernels, which were the reason for the original doubt about hardware rotation at 320 wide.
 - Idle and terminal workloads (W1 and W2), the 270 degree transform and other boards.

@@ -1,8 +1,8 @@
 # Integrating the media player with picowl
 
-This is a handoff plan for the media player work stream. It assumes the player (two binaries over `libmpcore.a`, the `mp_frontend_ops` contract, `drm/kms_state.c`, the hx4700 overlay planner) and picowl as on branch `picowl` (`README.md`, `doc/buffers.md`, `doc/zero-copy.md`, `doc/power.md`, `doc/cursors.md`).
+**Status:** partly implemented. The picowl side is implemented: idle inhibit, the per-app buffer budget, the `caching` event, the DRM lease and the per-app hold override (work items 5, 7, 9 and 11 in section 4), documented in [power.md](power.md), [buffers.md](buffers.md), [lease.md](lease.md) and [README.md](../README.md#configuration). The player side (the Wayland front-end, the lease client, the VT-switch handoff) is not in this repository, so nothing about the player is verified here. Statements about the player's code (`mp_frontend_ops`, `drm/kms_state.c`, `core/ovplan.c`, `x11/vtswitch.c`, `mp_core_want_bufs()`, its options and defaults) come from the player's own work stream and are marked **[player]** where a claim depends on them. No item has been run on a board; the picowl side is covered by headless tests (for example `leasepolicy`, `zbquota`, `bufproto`, `dim`, `lease-vkms`, see [README.md](../README.md#testing)).
 
-Nothing here has been run on hardware. Items marked **[picowl]** are work for the picowl side; everything else is player work.
+This is the plan that was handed to the media player work stream. It assumes the player (two binaries over `libmpcore.a`, the `mp_frontend_ops` contract, `drm/kms_state.c`, the hx4700 overlay planner) and picowl as in this repository ([README.md](../README.md), [buffers.md](buffers.md), [zero-copy.md](zero-copy.md), [power.md](power.md), [cursors.md](cursors.md)). Items marked **[picowl]** are work for the picowl side; everything else is player work and not verified here.
 
 ## 1. Goal and the two paths
 
@@ -13,7 +13,7 @@ Under picowl the player must keep the bare-DRM copy budget: one driver copy of t
 | **A. Wayland front-end** (`--vo wayland`) | Default playback on every board, windowed or full screen, coexisting with the panel, the OSK and notifications | Compositor-allocated RGB565 dmabufs via `picowl-buffer-v1`, attached full screen, so picowl scans the buffer out directly with no compositor copy |
 | **B. KMS handoff** (`--vo drm` under picowl) | hx4700 YUV overlay plane; MediaQ C8 / pixel doubling / GC0C tear-free flips; anything `mediaplayer-drm` does that a Wayland client cannot | Step 1: VT switch (exists today as `fullscreen_mode = vt-switch`). Step 2: DRM lease from picowl (`wp_drm_lease_device_v1`) **[picowl]** |
 
-`mediaplayer-x11` stays for the GPE/X11 session and is not used under picowl. Adding a third front-end goes against decision 1.2 ("no third binary"). Recommendation: a new front-end directory `wayland/` producing `mediaplayer-wayland`. Expect it to replace `mediaplayer-x11` once picowl plus the GDK2 backend replace the X session. That decision is the player owner's.
+`mediaplayer-x11` stays for the GPE/X11 session and is not used under picowl. Adding a third front-end goes against the player's own decision 1.2 ("no third binary") **[player]**. Proposal: a new front-end directory `wayland/` producing `mediaplayer-wayland`, which would replace `mediaplayer-x11` once picowl plus the GDK2 backend replace the X session. That decision is the player owner's.
 
 ## 2. Path A: the Wayland front-end
 
@@ -47,20 +47,20 @@ Extend `tests/kms_state_selftest.c` with a scripted Wayland event model covering
 
 ### 2.3 Buffer count
 
-- **picowl's limits by default:** 3 buffers per client and 2 MiB shared by all clients; configurable per `app_id` (`[zerocopy]` and `[app.<app_id>]`, see the picowl README).
-- **The player's default:** `--decode-ahead 5` asks for 7 buffers. That is 1.05 MiB at QVGA, but 4.1 MiB on the hx4700, which exceeds the total budget.
+- **picowl's limits by default:** 3 buffers per client (`max_buffers_per_client`) and 2048 KiB shared by all clients without an `[app.<app_id>]` rule (`budget_kb`); configurable per `app_id` (`[zerocopy]` and `[app.<app_id>]`, see [README.md](../README.md#configuration)).
+- **The player's default [player]:** `--decode-ahead 5` asks for 7 buffers. That is 1.05 MiB at QVGA, but 4.1 MiB on the hx4700, which exceeds the total budget.
 
 Plan:
-- Request the buffer count from the core (`mp_core_want_bufs()` in the older player tree; the name is unverified on the player's current master, which has its own bounded decode-ahead queue) and accept what is granted: `failed(no_memory)` or `failed(too_large)` ends allocation, and `nbufs` reports the count. The core already degrades to rendering fewer frames ahead, with decoded pictures still queuing N deep.
-- **[picowl]** Done: the limits are configurable (`[zerocopy] max_buffers_per_client`, `budget_kb`, `total_kb`), with an `app_id`-specific override (`[app.mediaplayer] zerocopy_buffers = 7`). The player must call `set_app_id` before `create_buffer`.
+- Request the buffer count from the core (`mp_core_want_bufs()` in an older player tree; not verified on the player's current master, which has its own bounded decode-ahead queue) and accept what is granted: `failed(no_memory)` or `failed(too_large)` ends allocation, and `nbufs` reports the count. The core already degrades to rendering fewer frames ahead, with decoded pictures still queuing N deep.
+- **[picowl]** Implemented: the limits are configurable (`[zerocopy] max_buffers_per_client`, `budget_kb`, `total_kb`), with an `app_id`-specific override (`[app.mediaplayer] zerocopy_buffers = 7`, `zerocopy_budget_kb`; `src/config.c`, `src/zbquota.c`, `src/zerocopy.c`). The player must call `set_app_id` before `create_buffer`, as `protocols/picowl-buffer-v1.xml` says; earlier buffers are answered with `failed(no_memory)`.
 - On copy-type outputs fewer buffers cost little, because `copied` frees FRONT immediately.
 
 ### 2.4 Write-combined versus cacheable
 
 The KMS front-end keys caching off `drmGetVersion()`. A Wayland client has no DRM fd.
 
-- **Interim heuristic:** `copy_type = 1` means a shmem (cacheable) driver, and `copy_type = 0` means treat the buffers as write-combined. That matches all four drivers today: the copy-type ones are mq11xx and w100, which are shmem, plus sa1100-lcdc, which is CMA and write-combined but whose memory is only written. The core's rule (never decode into, never read back from display buffers) holds either way.
-- **[picowl]** Done: an explicit `caching` event in `picowl_buffer_manager_v1` version 2 (`cacheable | write_combined`, taken from the driver name on picowl's side, overridable with `[zerocopy] caching`). The player binds `min(advertised, 2)`, always installs the `caching` handler, and keeps the heuristic above only when no `caching` event arrives (a version 1 picowl). See `doc/buffers.md`.
+- **Interim heuristic:** `copy_type = 1` means a shmem (cacheable) driver, and `copy_type = 0` means treat the buffers as write-combined. That matches the copy-type drivers: mq11xx and w100 are shmem (cacheable), and sa1100-lcdc is CMA and write-combined but its memory is only written. The core's rule (never decode into, never read back from display buffers) holds either way.
+- **[picowl]** Implemented: an explicit `caching` event in `picowl_buffer_manager_v1` version 2 (`cacheable | write_combined`, taken from the driver name on picowl's side (`pw_caching_driver` in `src/copytype.c`), overridable with `[zerocopy] caching`). The player binds `min(advertised, 2)`, always installs the `caching` handler, and keeps the heuristic above only when no `caching` event arrives (a version 1 picowl). See [buffers.md](buffers.md).
 
 ### 2.5 Keeping direct scanout (and the copy budget)
 
@@ -69,15 +69,15 @@ picowl scans a client buffer out only when that buffer is the single visible nod
 1. **Full screen, one surface.**
    - Draw the OSD, subtitles and statistics into the video buffer, as today. No subsurfaces and no separate OSD window.
    - Any second visible surface (subsurface, popup, the picowl panel or OSK) forces composition, which costs a pixman copy of the damage.
-   - picowl auto-hides its panel while an app is focused.
+   - picowl hides its panel while an app is focused (`[zerocopy] panel_autohide`, default true).
 2. **Match the output orientation through `wl_surface.set_buffer_transform`, never through compositor rotation.**
    - If picowl reports an output transform (software portrait on the h3800/h3900), render pre-rotated in the player's fused transform pass and set the matching buffer transform. The scene then sees buffer transform == output transform and keeps direct scanout.
-   - If picowl rotates in hardware (MediaQ `[rotation] mode = hardware`), the output is presented to clients unrotated at the logical size. Render at that logical size with rotation 0; the plane rotates.
+   - If picowl rotates in hardware (`[rotation] <output> = auto|hardware`; `auto` is the default and uses the plane when the driver supports it, in practice mq11xx), `wl_output` advertises the transform `normal` and the rotated mode. Render at that logical size with rotation 0; the plane rotates. A client that needs the real transform can bind `picowl-rotation-v1` ([README.md](../README.md#protocols)).
    - This replaces `--rotate auto`/`--hw-rotation` under Path A: the compositor decides orientation, and the player follows `wl_output.transform` and the configure size.
-3. **Exact damage.** Pass the core's damage rectangles through `damage_buffer`. picowl forwards them as `FB_DAMAGE_CLIPS` in direct scanout, so letterbox bars stay out of the upload as on bare DRM.
-4. **Commit complete frames.** picowl takes no snapshot. If composition starts mid-frame (a notification pops up), the last committed buffer is re-read.
+3. **Exact damage.** Pass the core's damage rectangles through `damage_buffer`. wlroots forwards them as `FB_DAMAGE_CLIPS` in direct scanout ([zero-copy.md](zero-copy.md)), so letterbox bars stay out of the upload as on bare DRM.
+4. **Commit complete frames.** picowl takes no snapshot ([zero-copy.md](zero-copy.md)). If composition starts mid-frame (a notification pops up), the last committed buffer is re-read.
 
-Expected cost: identical bus bytes to `--vo drm`, plus one compositor wakeup and a few protocol messages per frame. Verify with the driver counters (§5).
+Expected cost: identical bus bytes to `--vo drm`, plus one compositor wakeup and a few protocol messages per frame. Verify with the driver counters (§5); this has not been measured.
 
 ### 2.6 Timing and A/V sync
 
@@ -90,14 +90,14 @@ Expected cost: identical bus bytes to `--vo drm`, plus one compositor wakeup and
 - **Touch** arrives as pointer events. picowl converts touch to pointer and applies the libinput calibration matrix, so coordinates are calibrated and rotated. Path A needs no tslib; the player's tslib touch work remains for bare DRM only.
 - **Tap-and-hold:**
   - picowl turns a hold into `BTN_RIGHT` (picowl `doc/cursors.md`). A right click is the natural "open menu / OSD" gesture. A tap is a `BTN_LEFT` press and release delivered together at lift; a drag starts after 8 px.
-  - **[picowl]** Add a per-`app_id` `hold_action` override, so the player can turn hold off if it wants raw long-press timing, for example for seeking.
-- **Keys** arrive as `wl_keyboard` events with an xkb keymap. Map keysyms to the command vocabulary with a keysym column in the existing keymap files (the player's existing keymap files). picowl consumes its own bindings first (power key = blank, app-cycle key), so don't bind those in the player.
+  - **[picowl]** Implemented: a per-`app_id` `hold_action` override (`[app.<app_id>] hold_action = none`, `src/config.c`, `src/input.c`), so the player can turn hold off if it wants raw long-press timing, for example for seeking.
+- **Keys** arrive as `wl_keyboard` events with an xkb keymap. Map keysyms to the command vocabulary with a keysym column in the player's existing keymap files **[player]**. picowl consumes its own bindings first (power key = blank, app-cycle key), so don't bind those in the player.
 - **Bluetooth keyboards** appear as ordinary keyboards through picowl; no inotify needed in this front-end.
 
 ### 2.8 Idle, dimming and blanking
 
-- picowl dims and blanks on idle (`doc/power.md`). During playback the player must hold `zwp_idle_inhibit_manager_v1` on its surface, and drop it when paused or stopped.
-- picowl implements it (`doc/power.md`, "Idle inhibit"): no dim and no blank while the player's surface is visible (the focused toplevel), and normal timeouts from the moment the inhibitor is destroyed. The power key still blanks. With an older picowl, playback longer than `dim_after_s` dims the screen.
+- picowl dims and blanks on idle ([power.md](power.md)). During playback the player must hold `zwp_idle_inhibit_manager_v1` on its surface, and drop it when paused or stopped **[player]**.
+- **[picowl]** Implemented (`src/idle.c`, `src/dim.c`, [power.md](power.md) "Idle inhibit"): no dim and no blank while an inhibitor's surface is visible, and normal timeouts from the moment the inhibitor is destroyed. The power key still blanks. The `inhibit` key of a power profile turns the honouring off. Without the inhibitor, playback longer than `dim_after_s` dims the screen.
 
 ### 2.9 What stays the same
 The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_DIR` exists under picowl), direct ALSA, telemetry, the transform pass and the file browser (optional under Path A, because picowl's panel launcher or a file manager can open files).
@@ -105,55 +105,51 @@ The socket protocol and `ctl` (the Unix socket path is unchanged, `$XDG_RUNTIME_
 ## 3. Path B: KMS handoff for the hardware paths
 
 ### 3.1 Step 1: VT switch (no picowl changes expected)
-- picowl runs on seatd/libseat. `mediaplayer-drm` on another VT takes DRM master once picowl's session is deactivated, and picowl regains it on return.
-- The x11 front-end's `fullscreen_mode = vt-switch` (`x11/vtswitch.c`) already does the switch and state handover, and needs only to be launchable from a Wayland context: a `wayland/vtswitch` call path, or picowl's launcher starting `mediaplayer-drm` with the handed-over arguments.
-- **Check on hardware [picowl]:**
+- picowl runs on seatd/libseat. `mediaplayer-drm` on another VT takes DRM master once picowl's session is deactivated, and picowl regains it on return (not verified).
+- **[player]** The x11 front-end's `fullscreen_mode = vt-switch` (`x11/vtswitch.c`) already does the switch and state handover, and needs only to be launchable from a Wayland context: a `wayland/vtswitch` call path, or picowl's launcher starting `mediaplayer-drm` with the handed-over arguments.
+- **Needs a board [picowl], not verified:**
   - seatd releases the VT and the DRM master on an external `VT_ACTIVATE`;
   - wlroots restores picowl's outputs on reactivation, including picowl's own state: hardware rotation, the copy-type swapchain, the dim state and the cursor.
 
-  If any of these fails, it is a picowl bug to fix.
+  If any of these fails, it is a picowl bug to fix. Tracked in the [roadmap](design/roadmap.md).
 
 ### 3.2 Step 2: DRM lease (seamless, preferred long term)
-- **[picowl]** Implemented: picowl offers `wp_drm_lease_device_v1` for its output (`doc/lease.md`). While a lease is granted, picowl's `wlr_output` is destroyed. It is re-created when the lease ends, and picowl repaints. picowl keeps input and power policy meanwhile: keys go to the player as `wl_keyboard`, touch arrives as pointer events in panel-native pixels, and dimming is held. The power key, the app-cycle key and the other bindings that act on the screen end the lease first.
-- **Player:** a `--vo drm:lease` init path.
-  1. Connect to Wayland, map a fullscreen toplevel with `app_id = "mediaplayer"` (one single-pixel buffer is enough) and wait for the `activated` state. picowl grants only to the owner of the focused toplevel whose `app_id` is in `[lease] allow`.
+- **[picowl]** Implemented: picowl offers `wp_drm_lease_device_v1` for its output ([lease.md](lease.md), `src/lease.c`, `src/leasepolicy.c`). While a lease is granted, picowl's `wlr_output` is destroyed. It is re-created when the lease ends, and picowl repaints. picowl keeps input and power policy meanwhile: keys go to the player as `wl_keyboard`, touch arrives as pointer events in panel-native pixels, and dimming is held. The power key, the app-cycle key and the other bindings that act on the screen end the lease first.
+- **Player [player, not implemented or verified here]:** a `--vo drm:lease` init path.
+  1. Connect to Wayland, map a fullscreen toplevel with `app_id = "mediaplayer"` (one single-pixel buffer is enough) and wait for the `activated` state. picowl grants only to the owner of the focused toplevel whose `app_id` is in `[lease] allow` (default `mediaplayer`).
   2. Bind `wp_drm_lease_device_v1`, close the `drm_fd` it sends, collect the one connector, send `create_lease_request`, `request_connector`, `submit`, and wait for `lease_fd`. On `finished` (it can come twice), fall back to the VT switch or Path A. The connector's `withdrawn` event can arrive before `lease_fd`: destroy that object.
   3. The lease holds the connector, its CRTC, the primary plane, the cursor plane and **the overlay planes** that can scan out on the CRTC (the w100 overlay; wlroots patch 0004, a stock 0.19 does not lease overlay planes). The fd is a new `drm_file`: set `UNIVERSAL_PLANES` and `ATOMIC` again. The CRTC arrives disabled; the first commit is a full `ALLOW_MODESET` that sets every property the player relies on (plane `rotation`, which picowl may have left set on MediaQ, `COLOR_ENCODING`, `COLOR_RANGE`). Everything after that is the existing KMS code: atomic commits, `kms_state`, the overlay planner, `hw_rotation`, C8 when implemented.
   4. There are no VT ioctls and no DRM master handling; the lease fd is already authorised. Do not open evdev: keys, and touch as pointer events, arrive over Wayland.
   5. On `finished`, or EACCES/ENOENT from a commit, stop committing, close the fd and destroy the lease object. On exit or when leaving full screen, close the fd, then destroy the `wp_drm_lease_v1` object and flush: destroying the object returns the output to picowl without depending on udev.
-- **When to choose Path B automatically:** the overlay planner (`core/ovplan.c`) accepts the stream on the hx4700, or a MediaQ C8/doubling mode is requested. Otherwise use Path A. Expose it as `--vo auto` with a log line naming the reason.
+- **When to choose Path B automatically [player]:** the overlay planner (`core/ovplan.c`) accepts the stream on the hx4700, or a MediaQ C8/doubling mode is requested. Otherwise use Path A. Expose it as `--vo auto` with a log line naming the reason.
 
 ## 4. Work items
 
-| # | Item | Owner | Depends on | Acceptance |
-|---|---|---|---|---|
-| 1 | `wayland/` front-end: `init`/`acquire`/`present`/`release`/`fds`/`fini` over `wl_shm` RGB565 first (works under any compositor, including headless picowl) | player | — | Plays a clip under headless picowl; `kms_state` selftest extended with the Wayland event model passes |
-| 2 | `picowl-buffer-v1` buffers + linux-dmabuf wrapping, `copied`/`retained` handling, wl_shm fallback on `no_drm` | player | 1 | Headless: falls back to wl_shm with one log line. On a board: driver copy stats show damage-only uploads; picowl logs `Direct scan-out enabled` |
-| 3 | Buffer-transform rendering (orientation from `wl_output.transform`), damage pass-through | player | 2 | On the h3800/h3900 in portrait, direct scanout stays enabled (no pixman composite) |
-| 4 | `wp_presentation` timing, keysym keymap column, pointer/hold handling | player | 1 | A/V sync within the existing targets; all commands reachable by buttons and stylus |
-| 5 | Idle-inhibit protocol in picowl, honoured by `power.c` | picowl | — | No dim or blank during playback with an inhibitor; normal timeouts after it is destroyed |
-| 6 | Player holds the idle inhibitor while playing | player | 5 | As above |
-| 7 | Configurable buffer budget per `app_id`; `caching` event (buffer protocol v2) | picowl | — | Player gets 7 QVGA buffers; reports the caching mode |
-| 8 | VT-switch handoff under picowl (Path B step 1), launched from the Wayland front-end | player (+ picowl fixes found) | 1 | hx4700 overlay path plays from a picowl session and picowl restores cleanly afterwards |
-| 9 | DRM lease offer in picowl (implemented, `doc/lease.md`) | picowl | — | `wlr_drm_lease_v1` global; output destroyed while leased and restored after |
-| 10 | `--vo drm:lease` and `--vo auto` in the player | player | 8, 9 | Overlay and C8 paths run without a VT switch; automatic choice logged |
-| 11 | Per-`app_id` `hold_action` override | picowl | — | Optional, only if the player wants raw long-press |
+| # | Item | Owner | Depends on | Acceptance | State |
+|---|---|---|---|---|---|
+| 1 | `wayland/` front-end: `init`/`acquire`/`present`/`release`/`fds`/`fini` over `wl_shm` RGB565 first (works under any compositor, including headless picowl) | player | — | Plays a clip under headless picowl; `kms_state` selftest extended with the Wayland event model passes | player-side, not verified here |
+| 2 | `picowl-buffer-v1` buffers + linux-dmabuf wrapping, `copied`/`retained` handling, wl_shm fallback on `no_drm` | player | 1 | Headless: falls back to wl_shm with one log line. On a board: driver copy stats show damage-only uploads; the log shows direct scan-out (the wlroots scene message `Direct scan-out enabled`, not verified here) | player-side, not verified here |
+| 3 | Buffer-transform rendering (orientation from `wl_output.transform`), damage pass-through | player | 2 | On the h3800/h3900 in portrait, direct scanout stays enabled (no pixman composite) | player-side, not verified here |
+| 4 | `wp_presentation` timing, keysym keymap column, pointer/hold handling | player | 1 | A/V sync within the existing targets; all commands reachable by buttons and stylus | player-side, not verified here |
+| 5 | Idle-inhibit protocol in picowl, honoured by `power.c` and `dim.c` | picowl | — | No dim or blank during playback with an inhibitor; normal timeouts after it is destroyed | implemented (`src/idle.c`, `src/power.c`) |
+| 6 | Player holds the idle inhibitor while playing | player | 5 | As above | player-side, not verified here |
+| 7 | Configurable buffer budget per `app_id`; `caching` event (buffer protocol v2) | picowl | — | Player gets 7 QVGA buffers; reports the caching mode | implemented (`src/zbquota.c`, `src/zerocopy.c`, `src/copytype.c`) |
+| 8 | VT-switch handoff under picowl (Path B step 1), launched from the Wayland front-end | player (+ picowl fixes found) | 1 | hx4700 overlay path plays from a picowl session and picowl restores cleanly afterwards | player-side; picowl restore not verified on a board |
+| 9 | DRM lease offer in picowl (implemented, `doc/lease.md`) | picowl | — | `wlr_drm_lease_v1` global; output destroyed while leased and restored after | implemented (`src/lease.c`, [lease.md](lease.md)) |
+| 10 | `--vo drm:lease` and `--vo auto` in the player | player | 8, 9 | Overlay and C8 paths run without a VT switch; automatic choice logged | player-side, not verified here |
+| 11 | Per-`app_id` `hold_action` override | picowl | — | Optional, only if the player wants raw long-press | implemented (`src/config.c`, `src/input.c`) |
 
-**Order:** 1 → 2 → 3 → 4 on the player side, and 5/7 in parallel on picowl. Then 6. Then 8 (it gives hx4700 overlay playback under picowl early). 9 → 10 last.
+**Planned order:** 1 → 2 → 3 → 4 on the player side, and 5/7 in parallel on picowl. Then 6. Then 8 (it gives hx4700 overlay playback under picowl early). 9 → 10 last.
 
-## 5. Measurements to take
+## 5. Acceptance measurements
 
-Use the same clip, kernel and rootfs for `--vo drm` (bare console), `--vo wayland` (Path A) and Path B, using the player telemetry plus picowl's driver counters (`mq11xx_copy_stats`, `w100_2d`):
+None of these has been taken (the open measurements are in the [roadmap](design/roadmap.md)). Use the same clip, kernel and rootfs for `--vo drm` (bare console), `--vo wayland` (Path A) and Path B, using the player telemetry plus picowl's driver counters (`mq11xx_copy_stats`, `w100_2d`):
 - **Per-frame VRAM bytes and present time.** Path A full screen must match `--vo drm` within noise on the h2200/h5550/hx4700/h3800.
 - **Composition.** Count frames where picowl composited instead of direct scanout (picowl debug log or `retained` counts). Expect zero in steady full-screen playback.
 - **Drops and idle CPU per frame,** against the player's own acceptance numbers for its bare-DRM path.
 - **RSS of the player plus picowl,** compared with the player plus X11.
 - **Path B:** the handoff time and picowl's restore time, plus overlay-path drops identical to bare DRM.
 
-## 6. Open questions for the two owners
+## 6. Open questions
 
-- Does Path A replace `mediaplayer-x11` once GPE runs on picowl, or does the player keep three front-ends for a while? (player owner)
-- Should picowl prefer hardware rotation or software rotation with client buffer transforms on the MediaQ boards for video? Hardware rotation removes the player's rotate pass, but on the h2200 it regressed with ordered dither at 320 wide (about +2.5% CPU and roughly double the drops, because the physical Bayer phase forces the general dither kernel) and was neutral at 240 wide. That was measured before the player's Bayer-aware kernels, so the figures are stale, and nobody has measured a compositor workload. picowl keeps hardware rotation as the default until the compositor measurements in `doc/rotation-measurement.md` say otherwise. (both; measure with item 3)
-- Should `--vo auto` pick Path B on the hx4700 whenever the planner accepts the stream, given that the player has not decided rotation 0 versus 90 for landscape clips? (player owner)
-- Should picowl take the output transform from the DRM connector's `panel orientation` property instead of the `[output]` config? On the h3900 (kernel #276) it reads Right Side Up. (picowl; not implemented)
-- Exact `copied` timing relative to the kernel copy on each copy-type driver (picowl `doc/zero-copy.md` hardware checklist). Both Path A's single-buffer win and its correctness depend on it. (picowl, on hardware)
+The questions for the two owners are in the [roadmap](design/roadmap.md). The facts that bear on the rotation question are these. Hardware rotation saved about a quarter of the compositor CPU at 90 degrees with a full-surface client and cost nothing in any measured cell ([rotation-results.md](rotation-results.md)). The player's own paired runs on the h2200 showed that hardware rotation regressed with ordered dither at 320 wide (about +2.5% CPU and roughly double the drops, because the physical Bayer phase forces the general dither kernel) and was neutral at 240 wide **[player]**. That was measured before the player's Bayer-aware kernels, so those figures are stale, and the media player workload (W5 of [rotation-measurement.md](rotation-measurement.md)) has not been run under picowl. picowl keeps hardware rotation as the default.

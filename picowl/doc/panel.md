@@ -1,11 +1,11 @@
 # picowl panel: widget design
 
-**Status:** the clock, battery, backlight and volume widgets are implemented as `picowl-panel`, a plain C layer-shell client without a toolkit; the README section "Panel" describes what it does. It is a slim bar (clock, backlight and volume buttons, battery; 18 px in the crisp style on a QVGA iPAQ, 34 px in the smooth style on the hx4700, from the density of the output) that takes only its own strip: a tap on the backlight or the volume button pops a slider row out under the bar (above it for a bottom panel), a tap on the clock pops out a row with the weekday and the date, a tap on the battery one with the time left (an estimate the panel makes from the sysfs attributes, README "Time left"), and the row closes by itself 3 s after the last touch. The row is not an xdg popup of §1: it is part of the bar's layer surface, which grows by the height of the row while the exclusive zone stays the bar, so windows are covered and not moved; the row is translucent by default. On an output rotated by 90 or 270 degrees the bar is a vertical strip on the edge that is the physical top of a portrait panel, so that landscape keeps its 240 px of height: it is drawn as in portrait and turned onto the strip by `wl_surface.set_buffer_transform` (README, "Rotated output"; `--edge top` keeps it on the top of the rotated view). With hardware rotation (the h2200's default) `wl_output` says the transform `normal`, so picowl tells the panel the turn and the panel's own subpixel layout over `picowl-rotation-v1`, and the strip is used there too; without that global the bar stays on the top. In the smooth style the text is rasterized from a TrueType font (stb_truetype, vendored) when that style is set up and again on every change of look, with subpixel (LCD) coverage on an opaque ground when the compositor advertises horizontal stripes (`--subpixel`, `[output] subpixel`), and the icons and the slider are anti-aliased vector shapes; without a font file the panel falls back to a built-in bitmap font. The crisp style needs no font file. The look follows the density of the output, worked out by the panel at run time (`--style auto`, the default; `--height auto`; `--dpi N` and `[output] size_mm` as overrides; README, "Density"): a QVGA iPAQ gets the crisp style at 18 px (no font file), the hx4700's 480x640 the smooth one at 34 px (the TrueType file), and a change of mode or output is followed while the panel runs. `--style crisp` is a second look without any anti-aliasing: compiled-in pixel fonts (X11 misc-fixed, or with `--crisp-font dejavu` hinted bi-level DejaVu Sans Bold baked offline), 12x12 bitmap icons and shapes of whole pixels, in flat colours only (README, "Crisp style"). The brightness slider writes sysfs directly and picowl adopts the level it left (`doc/power.md`), not through the `picowl-control-v1` protocol of §4, and the clock and the battery have no tap-and-hold actions yet; the buttons have a tap (open or close the row) and no tap-and-hold menu. The rest of this document (the app list, the network and other widgets, popups and menus, the control protocol, the LVGL plan) is design and not implemented.
+**Status:** partly implemented. `picowl-panel` is a plain C layer-shell client without a toolkit with a clock, a battery, a backlight and a volume widget: the bar is the widgets, a tap on a button pops a row out of the bar (a slider for the backlight and the volume, the date for the clock, the time left for the battery), the backlight goes through sysfs and the volume through alsa-lib. Not implemented are the app list, the network, Bluetooth, keyboard, rotation and storage widgets, xdg popups and tap-and-hold menus, `picowl-control-v1`, `panel.ini` and the LVGL plan; the panel has a tap and no tap-and-hold action. The behaviour of the panel as built (options, density, styles, rotated output, rows) is in [README.md](../README.md#panel). The rest of this document is the design of the full panel, and the parts that exist are marked where they differ from it.
 
-The panel is a layer-shell client that picowl starts at session start, at the top or bottom edge. It replaces the matchbox panel from the X/GPE stack. Everything here assumes the iPAQ constraints:
+The full panel is a layer-shell client that picowl starts at session start, at the top or bottom edge. It replaces the matchbox panel from the X/GPE stack. The design assumes the iPAQ constraints:
 - about 50 MiB of usable RAM;
 - no FPU;
-- a display bus where every changed pixel costs CPU time (see `docs/ipaq-ui/hardware.md` §3).
+- a display bus where every changed pixel costs CPU time (see [hardware.md §3](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/hardware.md)).
 
 ## 1. Interaction rules
 
@@ -17,9 +17,11 @@ Every widget follows the same rules, built on picowl's tap-and-hold (see `README
 | **Tap-and-hold** | picowl delivers it as a right click (button 3), which opens the widget's context menu. The menu lists the widget's secondary actions, then **Settings…**, **Move** and **Remove from panel** |
 | **Hold on empty panel space** | Panel menu: **Add widget…**, **Panel settings…** (edge top/bottom, auto-hide, height) |
 
-Popups and menus are xdg popups on the panel's layer surface. picowl handles layer-shell popups, and its hold animation tells the user a context menu is coming.
+Popups and menus are xdg popups on the panel's layer surface. picowl accepts xdg popups on layer surfaces (`handle_new_popup` in src/layer.c), and its hold animation tells the user a context menu is coming. The current panel uses neither: its rows are part of the bar's own surface, and its surface has `hold_action = none`, so a press is a left click at touch-down.
 
 ## 2. Widgets
+
+Implemented in `picowl-panel` today: clock, battery, backlight (called Brightness below) and volume, each with the tap action only and with the interface differences noted after the table. The other rows are design.
 
 | Widget | Kernel / userspace interface | Tap | Tap-and-hold menu |
 |---|---|---|---|
@@ -34,6 +36,8 @@ Popups and menus are xdg popups on the panel's layer surface. picowl handles lay
 | **Rotation** | `picowl-control-v1` (§4) | Rotate 90° | Choose orientation, rotation lock |
 | **Storage** | udev `block` events and `/proc/self/mountinfo`; mounting via `systemd-mount` | List SD/CF cards, with eject | Card details, format… (optional) |
 
+The four implemented widgets differ from the table. The brightness slider writes sysfs directly and picowl adopts the level it left ([power.md](power.md)), since `picowl-control-v1` does not exist. The clock tap opens a row with the weekday and the date, not a month popup. The battery tap opens a row with the time left, an estimate the panel makes from the sysfs attributes, not a popup with voltage and AC state, and the battery is polled every 30 s. The volume tap opens a slider row. All rows are part of the bar's layer surface and close 3 s after the last touch.
+
 ### Network stack notes
 - **iwd associates; networkd configures.** Set `EnableNetworkConfiguration=false` in iwd so networkd owns DHCP and routes on every link. The network widget then has one source of truth for addresses.
 - **systemd-resolved is optional.** Without it, use a static `resolv.conf`, or have networkd write one through `resolvconf`. That saves a daemon.
@@ -42,9 +46,11 @@ Popups and menus are xdg popups on the panel's layer surface. picowl handles lay
   - the hash and cipher modules iwd probes at start.
 
   Add them to the board config fragments.
-- **[check] orinoco/Hermes:** the revived driver is full-MAC, so iwd talks to it through nl80211 `CMD_CONNECT`. Verify that the cfg80211 glue implements `connect` and handles the CCMP keys the way iwd expects (`kernel-general.md` §7). If it doesn't, association fails no matter what the panel does.
+- **[check] orinoco/Hermes:** the revived driver is full-MAC, so iwd talks to it through nl80211 `CMD_CONNECT`. Verify that the cfg80211 glue implements `connect` and handles the CCMP keys the way iwd expects ([kernel-general.md §7](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/kernel-general.md)). If it doesn't, association fails no matter what the panel does.
 
 ## 3. Cost on 64 MiB
+
+The budget the design aims at. The current panel redraws only changed rectangles, has no seconds display, wakes up for a minute-aligned timerfd (`TFD_TIMER_CANCEL_ON_SET`), the mixer's descriptors and a 30 s battery timer, and reads the battery attributes by polling; it has no uevent, D-Bus or rfkill handling.
 
 - **Redraws:** the panel redraws only the widget that changed. There is no seconds display and there are no animated icons. A clock update is about 1.3 KB of damage once a minute, which is negligible even on the MediaQ bus (~8 MB/s).
 - **Wake-ups:** everything is event-driven (uevent netlink, D-Bus signals, `/dev/rfkill`, ALSA control events, a minute-aligned timerfd). Polling is only a fallback for drivers that never emit change events, at 60 s.
@@ -61,6 +67,8 @@ Popups and menus are xdg popups on the panel's layer surface. picowl handles lay
 
 ## 4. Configuration through the UI
 
+None of this exists. The panel is configured by command-line options (README.md#panel) and picowl by `picowl.ini` (README.md#configuration).
+
 ### Panel settings
 - `~/.config/picowl/panel.ini`, in the same INI style as `picowl.ini`, holds the edge, auto-hide, height, widget order and per-widget options.
 - It is edited through each widget's **Settings…** dialog and **Panel settings…**.
@@ -76,14 +84,9 @@ These are the power profiles, tap-and-hold timing, rotation and cursor. They cha
 
 | Option | For | Against |
 |---|---|---|
-| GTK+ 2 layer-shell client | Matches the GPE look | Blocked on the GDK2 Wayland backend (`docs/ipaq-ui/toolkits.md` §1) |
+| GTK+ 2 layer-shell client | Matches the GPE look | Blocked on the GDK2 Wayland backend ([toolkits.md §1](https://github.com/Angstrom-distribution/Tiny-UI-research/blob/docs/ipaq-ui-research/docs/ipaq-ui/toolkits.md)) |
 | **LVGL Wayland client** | Works today, small and fast, RGB565 with per-rectangle damage | Needs a small patch to add layer-shell to LVGL's Wayland driver; popups become overlay layer surfaces |
 
-**Start with LVGL so the panel exists now.** Keep each widget's model (D-Bus and sysfs handling, state) separate from its drawing, so a GTK2 front end can reuse the models later.
+**Proposal: start with LVGL.** The plan was made before the panel was written; the panel that exists is plain C with wl_shm drawing and no toolkit, so LVGL is not used. Keep each widget's model (D-Bus and sysfs handling, state) separate from its drawing, so a GTK2 front end can reuse the models later.
 
-**Build order:**
-1. `picowl-control-v1`.
-2. The LVGL panel with the app list, battery, brightness, clock and keyboard widgets.
-3. Network, Bluetooth, volume and storage as a second step.
-
-All built with meson, inside the picowl tree.
+The panel is built with meson inside the picowl tree, as `picowl-panel` is. Remaining widgets and the control protocol: [roadmap](design/roadmap.md).
