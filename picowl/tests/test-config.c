@@ -443,6 +443,52 @@ static int test_copytype_config(void)
 	return 0;
 }
 
+static int test_size_mm(void)
+{
+	int w = 0, h = 0;
+	struct pw_config *c = pw_config_load("tests/test-config.ini");
+	assert(c != NULL);
+
+	/* its own entry wins over the one for every output, whatever the order */
+	assert(pw_config_size_mm(c, "DSI-1", &w, &h) && w == 60 && h == 80);
+	assert(pw_config_size_mm(c, "HDMI-A-1", &w, &h) && w == 77 && h == 57);
+	assert(pw_config_size_mm(c, "HEADLESS-1", &w, &h) && w == 57 && h == 77);
+	assert(pw_config_size_mm(c, NULL, &w, &h) && w == 57 && h == 77);
+	assert(!pw_config_size_mm(NULL, "DSI-1", &w, &h));
+	/* none of them is an output with a transform */
+	struct pw_output_transform *t;
+	int n = 0;
+	wl_list_for_each(t, &c->transforms, link)
+		n++;
+	assert(n == 2);
+	pw_config_free(c);
+
+	/* nothing set: the connector's size stays */
+	c = pw_config_load("tests/test-config-cal.ini");
+	assert(c && !pw_config_size_mm(c, "DSI-1", &w, &h));
+	pw_config_free(c);
+
+	/* bad values are logged and ignored, the good one after them is read */
+	c = pw_config_load("tests/test-config-sizebad.ini");
+	assert(c != NULL);
+	assert(!pw_config_size_mm(c, "A", &w, &h) && !pw_config_size_mm(c, "B", &w, &h));
+	assert(!pw_config_size_mm(c, "C", &w, &h) && !pw_config_size_mm(c, "D", &w, &h));
+	assert(!pw_config_size_mm(c, "E", &w, &h) && !pw_config_size_mm(c, "F", &w, &h));
+	assert(!pw_config_size_mm(c, "G", &w, &h));
+	assert(pw_config_size_mm(c, "H", &w, &h) && w == 53 && h == 71);
+	assert(!pw_config_size_mm(c, "other", &w, &h));
+	pw_config_free(c);
+
+	assert(pw_size_mm_parse("57x77", &w, &h) && w == 57 && h == 77);
+	assert(pw_size_mm_parse("1x2000", &w, &h) && w == 1 && h == 2000);
+	assert(!pw_size_mm_parse("", &w, &h) && !pw_size_mm_parse("57", &w, &h));
+	assert(!pw_size_mm_parse("57x", &w, &h) && !pw_size_mm_parse("x77", &w, &h));
+	assert(!pw_size_mm_parse("+5x5", &w, &h) && !pw_size_mm_parse(NULL, &w, &h));
+
+	printf("✓ test_size_mm\n");
+	return 0;
+}
+
 static int test_zerocopy_config(void)
 {
 	struct pw_config *c = pw_config_load("tests/test-config.ini");
@@ -1146,6 +1192,7 @@ int main(int argc, char *argv[])
 	failed += test_validation_ranges();
 	failed += test_rotation_config();
 	failed += test_copytype_config();
+	failed += test_size_mm();
 	failed += test_zerocopy_config();
 	failed += test_zerocopy_limits();
 	failed += test_memory_config();

@@ -460,6 +460,7 @@ struct pw_config *pw_config_default(void)
 	/* Rotation, zero-copy, and memory settings */
 	wl_list_init(&c->rotation_modes);
 	wl_list_init(&c->copy_overrides);
+	wl_list_init(&c->output_sizes);
 	c->zerocopy = true;
 	c->caching_override = PW_CACHING_OV_AUTO;
 	c->single_buffer = true;
@@ -618,6 +619,25 @@ struct pw_config *pw_config_load(const char *path)
 				c->subpixel = sp;
 			else
 				pw_log(WLR_ERROR, "Unknown subpixel layout: %s", val);
+		} else if (strcmp(section, "output") == 0 &&
+				(strcmp(key, "size_mm") == 0 ||
+				(strlen(key) > 8 && strcmp(key + strlen(key) - 8, ".size_mm") == 0))) {
+			/* size_mm for every output, NAME.size_mm for one: no connector is
+			 * called either. */
+			int w, h;
+			if (pw_size_mm_parse(val, &w, &h)) {
+				struct pw_output_size *os = calloc(1, sizeof(*os));
+				if (os) {
+					os->name = strcmp(key, "size_mm") == 0 ? strdup("*") :
+						strndup(key, strlen(key) - 8);
+					os->w_mm = w;
+					os->h_mm = h;
+					wl_list_insert(c->output_sizes.prev, &os->link);
+				}
+			} else {
+				pw_log(WLR_ERROR, "Invalid size_mm: %s (use WIDTHxHEIGHT in millimetres, "
+					"each 1..2000, as in 57x77)", val);
+			}
 		} else if (strcmp(section, "output") == 0) {
 			/* output name = transform */
 			struct pw_output_transform *t = calloc(1, sizeof(*t));
@@ -1229,6 +1249,12 @@ void pw_config_free(struct pw_config *config)
 		free(co);
 	}
 
+	struct pw_output_size *os, *os_tmp;
+	wl_list_for_each_safe(os, os_tmp, &config->output_sizes, link) {
+		free(os->name);
+		free(os);
+	}
+
 	struct pw_app_rule *rule, *rule_tmp;
 	wl_list_for_each_safe(rule, rule_tmp, &config->app_rules, link) {
 		free(rule->name);
@@ -1265,6 +1291,51 @@ enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *outpu
 
 	/* Default to AUTO */
 	return PW_ROT_AUTO;
+}
+
+bool pw_size_mm_parse(const char *s, int *w, int *h)
+{
+	char *end;
+	long a, b;
+
+	if (!s || *s < '0' || *s > '9')
+		return false;
+	a = strtol(s, &end, 10);
+	if (*end != 'x' && *end != 'X')
+		return false;
+	if (end[1] < '0' || end[1] > '9')
+		return false;
+	b = strtol(end + 1, &end, 10);
+	if (*end || a < 1 || a > 2000 || b < 1 || b > 2000)
+		return false;
+	*w = (int)a;
+	*h = (int)b;
+	return true;
+}
+
+bool pw_config_size_mm(const struct pw_config *c, const char *output_name, int *w, int *h)
+{
+	const struct pw_output_size *wild = NULL, *os;
+
+	if (!c)
+		return false;
+	/* The exact name wins, "*" is for the outputs without an entry. The last
+	 * entry of a name counts, as for the other keys of the section. */
+	const struct pw_output_size *exact = NULL;
+	wl_list_for_each(os, &c->output_sizes, link) {
+		if (!os->name)
+			continue;
+		if (output_name && strcmp(os->name, output_name) == 0)
+			exact = os;
+		else if (strcmp(os->name, "*") == 0)
+			wild = os;
+	}
+	os = exact ? exact : wild;
+	if (!os)
+		return false;
+	*w = os->w_mm;
+	*h = os->h_mm;
+	return true;
 }
 
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name)

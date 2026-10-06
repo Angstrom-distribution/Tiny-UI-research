@@ -432,6 +432,19 @@ static void output_adopt(struct pw_server *server, struct wlr_output *wlr_output
 	output->native_subpixel = server->config->subpixel >= 0 ?
 		server->config->subpixel : (int)wlr_output->subpixel;
 
+	/* The physical size goes out in wl_output.geometry, which is what clients
+	 * work the density of the display out from. Several kernel drivers say 0x0
+	 * or an old wrong value, so a board can tell what is true; before the
+	 * output is in the layout, where its global is made. */
+	int mm_w, mm_h;
+	if (pw_config_size_mm(server->config, wlr_output->name, &mm_w, &mm_h)) {
+		pw_log(WLR_INFO, "output %s: physical size %dx%d mm from the config (the "
+			"connector said %dx%d)", wlr_output->name, mm_w, mm_h,
+			wlr_output->phys_width, wlr_output->phys_height);
+		wlr_output->phys_width = mm_w;
+		wlr_output->phys_height = mm_h;
+	}
+
 	output->copy_type = false;
 	output->drm_driver[0] = '\0';
 	if (wlr_output_is_drm(wlr_output)) {

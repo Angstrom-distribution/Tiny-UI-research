@@ -20,6 +20,17 @@ format = RGB565
 #   iPAQs (h2200 and the other portrait panels)  horizontal_rgb
 #   h3900 (a landscape panel in hardware)        vertical_rgb
 # subpixel = horizontal_rgb
+# Physical size of the panel in millimetres, WIDTHxHEIGHT, as wl_output.geometry
+# sends it, in the panel's native orientation: for a kernel that reports 0x0 or
+# a wrong size, since picowl-panel works the density of the display out from it
+# (README, Panel, Density). size_mm is for every output, NAME.size_mm for one;
+# a name wins over the general entry. Whole millimetres, 1..2000. Restart needed.
+#   h2200                         53x71
+#   h5xxx (older kernels say 53x71)  57x77
+#   h3800, h3900 (landscape scan frame)  77x57
+#   hx4700 (both modes)           60x80
+# size_mm = 57x77
+# DSI-1.size_mm = 60x80
 # With hardware rotation wl_output says the transform normal; picowl-panel learns
 # the turn (and the layout above, in the panel's own orientation) from
 # picowl-rotation-v1, so the bar is on the short edge there too. No setting.

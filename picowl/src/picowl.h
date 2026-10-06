@@ -93,6 +93,13 @@ struct pw_output_copyover {
 	enum pw_copy_override ov;
 };
 
+/* Per-output physical size override ([output] size_mm, NAME.size_mm). */
+struct pw_output_size {
+	struct wl_list link;       /* pw_config.output_sizes */
+	char *name;                /* output name or "*" */
+	int w_mm, h_mm;            /* as wl_output.geometry sends them: native orientation */
+};
+
 struct pw_autostart {
 	struct wl_list link;       /* pw_config.autostart */
 	char *command;
@@ -179,6 +186,7 @@ struct pw_config {
 	/* Rotation / zero-copy / memory (added by the contract item). */
 	struct wl_list rotation_modes; /* struct pw_output_rotmode */
 	struct wl_list copy_overrides; /* struct pw_output_copyover */
+	struct wl_list output_sizes;   /* struct pw_output_size */
 	bool zerocopy;             /* enable picowl-buffer-v1 + dmabuf (default true) */
 	enum pw_caching_override caching_override; /* [zerocopy] caching (default auto) */
 	bool single_buffer;        /* allow single-buffer clients on copy-type outputs (default true) */
@@ -645,6 +653,11 @@ void pw_panel_toggle(struct pw_server *s);
 /* Rotation mode for the named output (specific entry, then "*", else
  * PW_ROT_AUTO). Implemented in config.c. */
 enum pw_rot_mode pw_config_rot_mode(const struct pw_config *c, const char *output_name);
+/* "WxH" in millimetres, each 1..2000, nothing else. */
+bool pw_size_mm_parse(const char *s, int *w, int *h);
+/* The [output] size_mm override of an output (its own entry, else "*"); false
+ * when there is none and the connector's size stays. */
+bool pw_config_size_mm(const struct pw_config *c, const char *output_name, int *w, int *h);
 
 /* Copy-type override for the named output (else PW_COPY_AUTO). config.c. */
 enum pw_copy_override pw_config_copy_override(const struct pw_config *c, const char *output_name);
