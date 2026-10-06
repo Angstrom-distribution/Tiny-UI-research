@@ -1877,6 +1877,14 @@ x_picowl 640x480 ''
 dump x.out
 x_look "$DIR/x.out" smooth 200 fallback vga 34 640x480 0x0
 stop_picowl
+# a size that parses but gives a density no iPAQ has (a typo: 5x7 for 57x77) is
+# warned about once and the class of the mode decides, not a clamped 80 px bar
+x_picowl 240x320 '[output]\nsize_mm = 5x7'
+dump x.out
+x_look "$DIR/x.out" crisp 110 "implausible, using mode class" qvga 18 240x320 5x7
+has "$DIR/x.out.err" '^picowl-panel: warning: the output says 5x7 mm for mode 240x320, that is 1181 ppi, outside 60 to 400' "X the implausible size is warned about"
+[ "$(grep -c 'warning:' "$DIR/x.out.err")" = 1 ] || fail "X: the implausible size is warned about $(grep -c 'warning:' "$DIR/x.out.err") times, wanted once"
+stop_picowl
 # size_mm for one output wins over the one for all, whichever comes first
 x_picowl 240x320 '[output]\nHEADLESS-1.size_mm = 60x80\nsize_mm = 57x77'
 grep -q 'output HEADLESS-1: physical size 60x80 mm from the config' "$DIR/picowl.log" || fail "X: size_mm for HEADLESS-1 is not used: $(grep 'physical size' "$DIR/picowl.log")"

@@ -495,9 +495,16 @@ void pl_point_to_buffer(enum pl_strip strip, int sx, int sy, int bw, int bh, int
 #define PL_VGA_LONG_SIDE 640
 #define PL_DPI_MIN 20
 #define PL_DPI_MAX 1000
+/* What a density the output reports (or [output] size_mm makes up) may be to
+ * be believed: the iPAQs are 102 to 203 ppi, so a phone-class 400 is already
+ * generous. A typo such as size_mm = 5x7 for 57x77 gives about 1180 ppi and
+ * would size the bar from nonsense. --dpi is the explicit way out of this
+ * range, up to PL_DPI_MAX. */
+#define PL_DPI_PLAUSIBLE_MIN 60
+#define PL_DPI_PLAUSIBLE_MAX 400
 
 enum pl_styleopt { PL_STYLE_AUTO, PL_STYLE_SMOOTH, PL_STYLE_CRISP };
-enum pl_dpi_src { PL_DPI_REPORTED, PL_DPI_FALLBACK, PL_DPI_OVERRIDE };
+enum pl_dpi_src { PL_DPI_REPORTED, PL_DPI_FALLBACK, PL_DPI_OVERRIDE, PL_DPI_IMPLAUSIBLE };
 
 /* What the look is made from: the options (style_opt, dpi_opt 0 for none,
  * height_opt 0 for auto) and the output as the client sees it (the mode in
@@ -529,8 +536,9 @@ int pl_density_ppi(int mode_w, int mode_h, int mm_w, int mm_h);
 int pl_height_for_ppi(int ppi);
 
 /* Resolves the style, the density and the height. The density is the override,
- * else what the output reports, else the class of the mode (see
- * PL_VGA_LONG_SIDE). The style is the option, or crisp below the threshold and
+ * else what the output reports when it is plausible (PL_DPI_PLAUSIBLE_MIN to
+ * _MAX; the source is PL_DPI_IMPLAUSIBLE when it is not), else the class of the
+ * mode (see PL_VGA_LONG_SIDE). The style is the option, or crisp below the threshold and
  * smooth from it. The height is the option, else 18 for crisp (whole-number
  * scales) and pl_height_for_ppi for smooth. */
 void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out);

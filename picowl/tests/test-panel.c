@@ -3750,6 +3750,33 @@ static void test_look(void)
 	l = look_of(PL_STYLE_AUTO, 99999, 0, 240, 320, 0, 0);
 	CHECK_EQ(l.ppi, PL_DPI_MAX, "the override is held to its range (high)");
 
+	/* A reported density outside what the iPAQs and their kin have is a typo or
+	 * a bad EDID, not a display: the class of the mode decides instead. */
+	CHECK_EQ(pl_density_ppi(240, 320, 101, 135), 60, "101x135 mm: 60 ppi");
+	CHECK_EQ(pl_density_ppi(240, 320, 103, 137), 59, "103x137 mm: 59 ppi");
+	CHECK_EQ(pl_density_ppi(480, 640, 30, 41), 400, "30x41 mm: 400 ppi");
+	CHECK_EQ(pl_density_ppi(480, 640, 19, 47), 401, "19x47 mm: 401 ppi");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 101, 135);
+	CHECK(l.src == PL_DPI_REPORTED && l.ppi == 60 && l.crisp, "60 ppi reported: believed (the lower edge)");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 103, 137);
+	CHECK(l.src == PL_DPI_IMPLAUSIBLE && l.ppi == PL_DPI_FALLBACK_QVGA && l.crisp && l.height == 18,
+		"59 ppi reported: the QVGA class");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 480, 640, 30, 41);
+	CHECK(l.src == PL_DPI_REPORTED && l.ppi == 400 && !l.crisp, "400 ppi reported: believed (the upper edge)");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 480, 640, 19, 47);
+	CHECK(l.src == PL_DPI_IMPLAUSIBLE && l.ppi == PL_DPI_FALLBACK_VGA && !l.crisp && l.height == 34,
+		"401 ppi reported: the VGA class");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 5, 7);
+	CHECK(l.src == PL_DPI_IMPLAUSIBLE && l.ppi == PL_DPI_FALLBACK_QVGA && l.crisp && l.height == 18,
+		"size_mm 5x7 for 57x77: the QVGA class, not an 80 px bar");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 2000, 2000);
+	CHECK(l.src == PL_DPI_IMPLAUSIBLE && l.crisp, "an enormous size: the class too");
+	l = look_of(PL_STYLE_AUTO, 1000, 0, 240, 320, 5, 7);
+	CHECK(l.src == PL_DPI_OVERRIDE && l.ppi == 1000, "--dpi stays the explicit override, outside the range too");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 0, 0);
+	CHECK(l.src == PL_DPI_FALLBACK, "no size is a fallback, not implausible");
+	CHECK_STR(pl_dpi_src_name(PL_DPI_IMPLAUSIBLE), "implausible, using mode class", "source name");
+
 	/* The explicit styles win over the density. */
 	l = look_of(PL_STYLE_SMOOTH, 0, 0, 240, 320, 57, 77);
 	CHECK(!l.crisp && l.ppi == 106 && l.height == 18, "--style smooth on a QVGA panel: 18");

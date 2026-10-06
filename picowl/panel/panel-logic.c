@@ -877,13 +877,18 @@ void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out)
 
 	if (ppi) {
 		out->src = PL_DPI_OVERRIDE;
-	} else if ((ppi = pl_density_ppi(in->mode_w, in->mode_h, in->mm_w, in->mm_h)) > 0) {
-		out->src = PL_DPI_REPORTED;
 	} else {
-		int lng = in->mode_w > in->mode_h ? in->mode_w : in->mode_h;
+		int rep = pl_density_ppi(in->mode_w, in->mode_h, in->mm_w, in->mm_h);
 
-		ppi = lng >= PL_VGA_LONG_SIDE ? PL_DPI_FALLBACK_VGA : PL_DPI_FALLBACK_QVGA;
-		out->src = PL_DPI_FALLBACK;
+		if (rep >= PL_DPI_PLAUSIBLE_MIN && rep <= PL_DPI_PLAUSIBLE_MAX) {
+			ppi = rep;
+			out->src = PL_DPI_REPORTED;
+		} else {
+			int lng = in->mode_w > in->mode_h ? in->mode_w : in->mode_h;
+
+			ppi = lng >= PL_VGA_LONG_SIDE ? PL_DPI_FALLBACK_VGA : PL_DPI_FALLBACK_QVGA;
+			out->src = rep > 0 ? PL_DPI_IMPLAUSIBLE : PL_DPI_FALLBACK;
+		}
 	}
 	out->ppi = ppi;
 	out->vga = ppi >= PL_DPI_SMOOTH_MIN;
@@ -900,5 +905,6 @@ bool pl_look_same(const struct pl_look *a, const struct pl_look *b)
 
 const char *pl_dpi_src_name(enum pl_dpi_src s)
 {
-	return s == PL_DPI_REPORTED ? "reported" : s == PL_DPI_FALLBACK ? "fallback" : "override";
+	return s == PL_DPI_REPORTED ? "reported" : s == PL_DPI_FALLBACK ? "fallback" :
+		s == PL_DPI_IMPLAUSIBLE ? "implausible, using mode class" : "override";
 }

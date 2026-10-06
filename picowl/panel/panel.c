@@ -99,7 +99,7 @@ struct panel {
 	struct picowl_rotation_manager_v1 *rot_mgr;
 	struct wl_output *surf_out;
 	enum pl_sub sub;
-	bool assets_ready, font_warned;
+	bool assets_ready, font_warned, dpi_warned;
 	/* The look (style, height) follows the density of the bar's output and is
 	 * worked out again whenever the output says it is done. relook: the assets
 	 * are the new look's, the buffer and layout are still the old one's, so
@@ -974,6 +974,13 @@ static void look_update(struct panel *p)
 	say("info: %d ppi (%s: %dx%d mm, mode %dx%d), %s class, style %s, height %d",
 		nl.ppi, pl_dpi_src_name(nl.src), in.mm_w, in.mm_h, in.mode_w, in.mode_h,
 		nl.vga ? "vga" : "qvga", nl.crisp ? "crisp" : "smooth", nl.height);
+	if (nl.src == PL_DPI_IMPLAUSIBLE && !p->dpi_warned) {
+		say("warning: the output says %dx%d mm for mode %dx%d, that is %d ppi, outside %d to %d: "
+			"not used (set [output] size_mm right, or --dpi)", in.mm_w, in.mm_h, in.mode_w, in.mode_h,
+			pl_density_ppi(in.mode_w, in.mode_h, in.mm_w, in.mm_h), PL_DPI_PLAUSIBLE_MIN,
+			PL_DPI_PLAUSIBLE_MAX);
+		p->dpi_warned = true;
+	}
 	bool changed = p->look_set && (nl.crisp != p->crisp || nl.height != p->height);
 
 	p->look = nl;

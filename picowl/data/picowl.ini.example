@@ -25,6 +25,8 @@ format = RGB565
 # a wrong size, since picowl-panel works the density of the display out from it
 # (README, Panel, Density). size_mm is for every output, NAME.size_mm for one;
 # a name wins over the general entry. Whole millimetres, 1..2000. Restart needed.
+# A size that works out to less than 60 or more than 400 ppi is taken for a typo
+# and ignored by the panel (it warns and uses the class of the mode).
 #   h2200                         53x71
 #   h5xxx (older kernels say 53x71)  57x77
 #   h3800, h3900 (landscape scan frame)  77x57
