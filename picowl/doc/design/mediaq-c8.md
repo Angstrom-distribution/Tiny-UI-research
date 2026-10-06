@@ -335,6 +335,48 @@ picowl-buffer-v1 version 3: the manager advertises `format` C8 in addition to RG
 | K5 | Optional option K: fixed-palette conversion in the copy loop behind a plane property or module parameter | measure first (E4) | 1-2 days |
 | K6 | Row-hash scroll detection and unchanged-tile skip in `atomic_update` (7.4) | the largest terminal win at any depth | 2-4 days |
 
+### 8.6 An engine back end: what the 2D engine could do for picowl
+
+The question this answers: with video memory holding more than the scanout frame, could picowl keep several buffers or surfaces there and compose them with the 2D engine, in C8 or in RGB565? Source for everything in the next two tables: the revival MediaQ reference, §1.4, 2.3, 3.2, 4.1 to 4.8 and 5.1, as sent by its session; none of it was run by me.
+
+**Established or documented.**
+
+| Fact | Evidence |
+|---|---|
+| Fills (`PATCOPY` 0xf0) and VRAM-to-VRAM copies (`SRCCOPY` 0xcc, both directions, overlap-correct) work on the MQ1188 with scanout running: 240x224 fill 551 us (185 MB/s), 240x112 copy 368 us (135 MB/s), a 16x4 fill 17.9 us including the first poll; a fill or copy is 4 register writes | [meas\*] §4.1, 5.2 |
+| The engine addresses memory independently of the scanout window (base GE0B, stride GE0A), and fills and copies at rows 320 to 339, below the 240x320 frame, were exact with scanout running | [datasheet\*], [meas\*] §4.1, 3.2.4 |
+| Surface limits: X and Y 12 bit, stride a 10-bit byte count (at most 1023 bytes per row: 511 pixels at 16 bpp, 1023 at 8 bpp), base address 8-byte aligned, clipping needs a stride that is a multiple of 8, depth field 00 = 8 bpp and 01 = 16 bpp | [datasheet\*] §4.1 |
+| All 256 ROP3 codes; BitBLT and Bresenham line; colour transparency on the source or the destination ('blue screen') with a key (8 bpp: low byte), polarity selectable; monochrome 8x8 patterns only (no colour patterns); clip rectangle; monochrome expansion with a transparent background; horizontal and vertical mirror by copy direction (the start corner is set by software) | [datasheet\*] §4.2 to 4.8; WinCE uses ROPs, source key on host blits, mono expansion for glyphs and the 0xaaf0 mask blit, never the clip rectangle or the destination key [decomp\*] |
+| No scaler, no alpha, no colour-space conversion (MQ1132 datasheet; on the MQ1188 only "not observed"). A stretch is many small replicated copies | [datasheet\*] §4.8 |
+| Sources are video memory or the host source FIFO (the CPU writes 32-bit words to chip+0xc00..0xfff; FIFOs 16 entries). **No bus mastering from system RAM is documented.** `mq11xx.present_dma` is not the engine: it is the PXA255's DMA controller copying a bounce buffer into video memory, 8.1 to 8.7 MB/s, no faster than the CPU because the VLIO bus is the limit | [datasheet\*] §4.1, [code\*], [meas\*] §5.1 |
+| Video memory is 256 KiB on both chips. The driver's layout: frame at 0, off-screen pool 0x25800 to 0x3fbff (107,520 bytes), the 1 KiB cursor image at 0x3fc00; the page-flip back buffer lives in the pool only when two frames fit (8 bpp 76,800 bytes) | [code\*] §5.1 |
+| **At 8 bpp** the frame is 76,800 bytes, which leaves 184,320 bytes (about 2.4 more screens), of which the back buffer takes 76,800, so about 107,520 bytes remain for surfaces; at 16 bpp the pool is 107,520 bytes (under 0.7 of a screen) | [inf], arithmetic from the row above |
+| One image window with one depth field and one 256-entry palette for the whole chip. No second graphics window, overlay, blend or colour key between windows is documented, none observed on the MQ1188. The "alternate window" (GC00[11:10]) is only a second buffer address with the same format (inconclusive on the MQ1188). The window start GC0C is latched at the frame boundary (tear-free flip) | [datasheet\*], [meas\*] §3.2 |
+| The lower 256 KiB aperture is serialised with the engine: CPU access to video memory is held off while the engine draws, without a timeout. The upper alias (chip+0x42000..) is not serialised and can race the engine. Scanout and engine share the memory interface; the arbitration priority is unknown | [datasheet\*] §1.4, 4.7 |
+| A register access on the 16-bit bus is about 0.22 to 0.25 us per 16-bit beat, so issuing one fill or copy costs roughly 2 us of CPU plus the poll reads (not measured). Busy is bit 16 of CC01; there is an idle interrupt bit, unproven | [inf], [datasheet\*] §4.7 |
+
+**Not established, and what a back end depends on:** every engine command at 8 bpp (fills, copies, key, mono expansion) and its rate; the host source FIFO and mono expansion under Linux; colour key; the clip rectangle; auto-execute batching; the engine idle interrupt; the arbitration between scanout and engine; the command window (GE0C).
+
+**What follows.**
+
+1. **Different surfaces, one depth.** Video memory can hold several surfaces and the engine can compose them into the scanout frame, but all of them share the chip-wide depth and palette. In C8 every surface is C8 with the same palette (the fixed-palette options of section 7.5); no C8 window beside an RGB565 window, no hardware blending of windows.
+2. **The engine cannot blend, so translucency stays in software.** The popup row's `--popup-alpha` and any other alpha would be composed by the CPU in system RAM, as now. What the engine can do is hard-edged: opaque copies, fills, source colour key (a surface with a transparent colour) and a 1-bit mask with a transparent background (text over an arbitrary background without reading it back).
+3. **Content still has to cross the bus once.** A client's pixels live in system RAM and the engine cannot fetch them, so each changed pixel costs one trip at 7.9 to 9.1 MB/s (CPU or DMA). The engine saves the repeat trips: moving, raising, exposing and uncovering a surface that is already in video memory.
+4. **Where that pays.** Keyboard pan and popup open and close, today a full-frame upload, become an engine copy of at most the frame: 76,800 bytes at 135 MB/s is about 0.6 ms, 153,600 bytes about 1.1 ms [est], against about 9 ms (C8) or 17.5 ms (RGB565) of upload. Scrolling is the same trade (section 7.4). Painting a solid background and drawing text from a 1-bit source never touch the bus with pixels.
+5. **Space is the limit.** About 107,520 bytes of pool either way: at 8 bpp that is the room left after the double buffer, at 16 bpp there is no double buffer. That holds the popup's save-under (a 240x54 strip is 12,960 bytes at 8 bpp and 25,920 at 16 bpp), a glyph atlas, or one more small window, not a second screen.
+
+**Three ways to build it, in order of cost.**
+
+| | What | Interface | Verdict |
+|---|---|---|---|
+| **E-a** | Driver only: detect scrolls and unchanged tiles in the damage the driver already sees, engine-copy within video memory, upload the rest (section 7.4, items 1 and 2) | none | Cheapest, covers pan and popup and scroll. Needs the double-buffered C8 path handled and the 8 bpp engine enabled |
+| **E-b** | picowl tells the driver what moved (a "copy this rectangle" hint with the damage), and keeps the popup save-under and similar surfaces in the pool | a new plane property, or a private ioctl | Exact where E-a only guesses. Needs a kernel interface the project does not have; DRM has no 2D interface |
+| **E-c** | A full command list from clients or picowl: fills, copies, key blits, 1-bit mask blits, host blits through the source FIFO | private ioctl plus protocol | Largest work. Only worth it if a register write on this bus costs about 1 us or less and the FIFO and mono-expansion paths work, none of which is measured. A glyph costs about 8 bus writes [inf], against 132 bytes of RGB565 through the CPU (about 15 us) |
+
+**Recommendation.** E-a first, and only after the experiments below. Do not design E-c until the host FIFO and mono expansion have been run once on the board.
+
+**Experiments to add to section 11** (all on the h2200, none run): EN1 8 bpp fill and copy rates with scanout running; EN2 a 1 bpp mono expansion through the source FIFO with a transparent background, correctness and time per glyph; EN3 source colour key on a copy; EN4 the cost of issuing a command (time 1000 back-to-back 16x4 fills, with and without the poll); EN5 a copy while the full frame is being scanned out, to see whether arbitration shows as tearing or stalls; EN6 the engine idle interrupt.
+
 ## 9. Staged plan
 
 | Stage | Content | Decides | Effort [est] |
