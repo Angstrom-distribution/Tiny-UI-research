@@ -1730,6 +1730,32 @@ wait_for "$DIR/v.out" '^placement edge=top transform=0 surface=240x18 .*' 5 "W r
 stop_panel W
 stop_picowl
 
+# Blank and unblank (the power key, 116) on this path: the unblank commit must be
+# the one the hardware path makes, transform normal on the rotated mode, or the
+# view is turned twice. A client that connects after it sees wl_output as at the
+# start, and the strip is still on the physical top.
+for rot in 90 270; do
+	v_picowl $rot horizontal_rgb
+	VSUB=4; [ $rot = 270 ] && VSUB=5
+	EDGE=right; TR=1; [ $rot = 270 ] && { EDGE=left; TR=3; }
+	start_panel v --subpixel auto
+	"$KEYS" 116 || fail "W $rot: key client failed (blank)"
+	sleep 0.5
+	"$KEYS" 116 || fail "W $rot: key client failed (unblank)"
+	sleep 0.5
+	WAYLAND_DEBUG=1 "$PANEL" --dump-state --subpixel auto >"$DIR/w.out" 2>"$DIR/w.err" || fail "W $rot: the panel failed after unblank"
+	grep -q "wl_output[#@][0-9]*.geometry(.*, $VSUB, \"[^\"]*\", \"[^\"]*\", 0)" "$DIR/w.err" ||
+		fail "W $rot: after blank and unblank wl_output.geometry is not 'subpixel $VSUB, transform normal': $(grep 'geometry' "$DIR/w.err" | head -n 2)"
+	has "$DIR/w.out" '^rotation hint=hardware$' "W $rot: after unblank the hint says the display turns the output"
+	has "$DIR/w.out" "^placement edge=$EDGE transform=$TR surface=18x240 input=0,0,18,240\$" "W $rot: after unblank the strip is on the physical top"
+	M=$(mapped)
+	[ "$M" = 302x240 ] || fail "W $rot: after blank and unblank a toplevel is $M, wanted 302x240"
+	kill -0 "$PANELPID" 2>/dev/null || fail "W $rot: the panel died over a blank"
+	stop_panel W
+	stop_picowl
+done
+echo "panel-e2e: W blank and unblank at 90 and 270: wl_output and the placement are as before"
+
 # Without the hint (older picowl, another compositor) the panel does what it
 # did before: the bar stays on the top of the view it is shown.
 export PICOWL_TEST_NO_ROTATION_HINT=1

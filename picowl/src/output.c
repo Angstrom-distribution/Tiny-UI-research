@@ -671,11 +671,16 @@ static void output_set_power(struct pw_output *o, bool on)
 		if (wlr_output_is_drm(wo)) {
 			ok = output_enable_rotated(o);
 		} else {
+			/* The test path for hardware rotation keeps its rotated mode over
+			 * a blank, so the transform is the one the hardware path commits:
+			 * normal. The rotation here would turn the view a second time. */
+			enum wl_output_transform sent = o->hw_rotation ?
+				WL_OUTPUT_TRANSFORM_NORMAL : o->rotation;
 			struct wlr_output_state state;
 			wlr_output_state_init(&state);
 			wlr_output_state_set_enabled(&state, true);
-			wlr_output_state_set_transform(&state, o->rotation);
-			output_set_subpixel(o, &state, o->rotation);
+			wlr_output_state_set_transform(&state, sent);
+			output_set_subpixel(o, &state, sent);
 			ok = wlr_output_commit_state(wo, &state);
 			wlr_output_state_finish(&state);
 		}
