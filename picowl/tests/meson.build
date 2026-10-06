@@ -279,5 +279,5 @@ if panel_built
     args: [files('panel-e2e.sh'), picowl_exe, picowl_panel_exe, pw_test_client,
            pw_key_client, pw_fake_ctl, pw_bare_server, pw_capture_client,
            pw_pointer_client],
-    timeout: 600)
+    timeout: 900)
 endif

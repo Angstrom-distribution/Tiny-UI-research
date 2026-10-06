@@ -45,6 +45,15 @@
 #     the portrait bar, placement, exclusive zone, buffer transform and usable
 #     area, --edge top, a rotation while the panel runs, and taps, a slider drag
 #     and the auto-close through a virtual pointer at the logical position.
+#  X: the look follows the density of the output, worked out at run time: the
+#     physical size comes from [output] size_mm (the headless backend has none),
+#     auto is crisp at 240x320 on 57x77 mm (exactly the palette of the crisp
+#     style) and smooth, 34 px high, with subpixel text at 480x640 on 60x80 mm;
+#     the fallback without a size, --style, --dpi and --height win, a bad
+#     size_mm or --dpi is refused, a mode turned by hardware rotation has the
+#     same density, a rotation changes nothing, and a new density at run time
+#     (test hook) swaps the style, the height, the exclusive zone, the buffer
+#     and the fonts, closes the open row and leaves no stale pixels.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
@@ -1735,6 +1744,267 @@ VHW=0
 unset PICOWL_TEST_VIRTUAL_POINTER
 cp "$DIR/picowl.base" "$DIR/picowl.ini"
 echo "panel-e2e: W ok"
+
+# ---- X: the look follows the density of the output ----
+# The panel works the style and the height out from the density of the output it
+# is on, at run time: the diagonal of the mode in use over the diagonal of the
+# physical size wl_output reports. The headless output has no size, so picowl is
+# given one with [output] size_mm. This is the program itself, not the script
+# that puts --style smooth in front of it.
+PANEL=$PANEL_REAL
+cp "$DIR/picowl.base" "$DIR/picowl.base.orig"
+# x_picowl SIZE INI: picowl with a headless output of SIZE, INI (with \n for
+# line breaks) after the base configuration
+x_picowl() {
+	cp "$DIR/picowl.base.orig" "$DIR/picowl.ini"
+	printf '%b\n' "$2" >>"$DIR/picowl.ini"
+	XOLD=$PICOWL_HEADLESS_SIZE
+	export PICOWL_HEADLESS_SIZE=$1
+	start_picowl
+	export PICOWL_HEADLESS_SIZE=$XOLD
+}
+# x_look FILE STYLE PPI SOURCE CLASS HEIGHT MODE SIZE_MM
+x_look() {
+	has "$1" "^look style=$2 ppi=$3 source=$4 class=$5 height=$6 mode=$7 size_mm=$8\$" "X the look"
+}
+# x_colours X,Y,W,H: how many colours the capture of the rectangle has
+x_colours() {
+	"$CAPTURE" --palette "$1" >"$DIR/x.cap" 2>&1 || fail "X: capture failed: $(head -c 300 "$DIR/x.cap")"
+	XN=$(sed -n 's/.*palette \([0-9]*\)$/\1/p' "$DIR/x.cap")
+	[ -n "$XN" ] || fail "X: no palette in the capture"
+}
+x_infos() { grep -c 'info:' "$1"; }
+
+# The QVGA iPAQs: 57x77 mm at 240x320 is 106 ppi, crisp, 18 px, and the pixels of
+# the bar are exactly the palette of the crisp style, as with --style crisp.
+x_picowl 240x320 '[output]\nsize_mm = 57x77'
+grep -q 'physical size 57x77 mm from the config' "$DIR/picowl.log" || fail "X: picowl does not say that it took the size from the config"
+dump x.out
+x_look "$DIR/x.out" crisp 106 reported qvga 18 240x320 57x77
+has "$DIR/x.out" '^style crisp font=pixel ' "X auto is crisp at 106 ppi"
+has "$DIR/x.out.err" 'info: 106 ppi (reported: 57x77 mm, mode 240x320), qvga class, style crisp, height 18' "X the decision is logged"
+[ "$(x_infos "$DIR/x.out.err")" = 1 ] || fail "X: the decision is logged $(x_infos "$DIR/x.out.err") times, wanted once"
+UAUTO=1
+UFONT=fixed
+u_scene "X auto crisp, closed bar" 18 73 Discharging "w1" "" $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL
+u_scene "X auto crisp, backlight row" 54 73 Charging "ibl" "" $C_BG $C_LINE $C_FG $C_EMPTY $C_CHARGING \
+	$C_HL $C_ACCENT $C_ROW $C_ROWLINE $C_TRACK $C_THUMB $C_RING
+u_scene "X auto crisp, date row over a pattern" 54 73 Discharging "icl" "--pattern" $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL \
+	$C_HL $C_ROW $C_ROWLINE
+UAUTO=0
+# the explicit styles, --dpi and --height win over what the output says
+dump x.out --style smooth
+x_look "$DIR/x.out" smooth 106 reported qvga 18 240x320 57x77
+has "$DIR/x.out" '^style font=' "X --style smooth on a QVGA panel"
+dump x.out --height 40
+x_look "$DIR/x.out" crisp 106 reported qvga 40 240x320 57x77
+dump x.out --dpi 203
+x_look "$DIR/x.out" smooth 203 override vga 34 240x320 57x77
+has "$DIR/x.out" '^panel width=240 height=34 bar=34 ' "X --dpi 203: the bar is 34 px"
+dump x.out --dpi 203 --height 24
+x_look "$DIR/x.out" smooth 203 override vga 24 240x320 57x77
+dump x.out --dpi 203 --style crisp
+x_look "$DIR/x.out" crisp 203 override vga 18 240x320 57x77
+dump x.out --style auto --height auto --dpi 100
+x_look "$DIR/x.out" crisp 100 override qvga 18 240x320 57x77
+for bad in 0 19 1001 abc -5 ""; do
+	"$PANEL" --dpi "$bad" --dump-state >"$DIR/x.out" 2>"$DIR/x.err"
+	[ $? -eq 2 ] || fail "X: --dpi '$bad' is not an error"
+	has "$DIR/x.err" "^picowl-panel: --dpi: '$bad' is not a number from 20 to 1000" "X the message for --dpi '$bad'"
+done
+"$PANEL" --dpi >"$DIR/x.out" 2>"$DIR/x.err"
+[ $? -eq 2 ] || fail "X: --dpi without a value is not an error"
+"$PANEL" --help | grep -q -e '--dpi N' || fail "X: --dpi is not in the usage text"
+"$PANEL" --help | grep -q -e 'auto (default), smooth or crisp' || fail "X: the usage text does not say that auto is the default style"
+echo "panel-e2e: X QVGA output: crisp, the palette is exact; --style, --dpi and --height win"
+stop_picowl
+
+# The VGA iPAQ (hx4700): 480x640 on 60x80 mm is 203 ppi, smooth, 34 px, with
+# subpixel text where the output says horizontal RGB.
+x_picowl 480x640 '[output]\nsize_mm = 60x80\nsubpixel = horizontal_rgb'
+dump x.out
+x_look "$DIR/x.out" smooth 203 reported vga 34 480x640 60x80
+has "$DIR/x.out" '^panel width=480 height=34 bar=34 row=0 ' "X VGA: a 34 px bar"
+has "$DIR/x.out" '^style font=' "X auto is smooth at 203 ppi"
+has "$DIR/x.out" '^surface exclusive=34 ' "X VGA: the exclusive zone is the bar"
+has "$DIR/x.out" '^text subpixel=rgb$' "X VGA: subpixel text"
+has "$DIR/x.out.err" 'info: 203 ppi (reported: 60x80 mm, mode 480x640), vga class, style smooth, height 34' "X VGA: the decision is logged"
+start_panel h
+sleep 0.3
+M=$(mapped)
+[ "$M" = 480x606 ] || fail "X VGA: a toplevel is $M, wanted 480x606 (640 less the 34 px bar)"
+h_clock "X VGA auto" rgb HIGH
+x_colours "0,0,480,34"
+[ "$XN" -gt 30 ] || fail "X VGA: the bar has $XN colours: it is not anti-aliased"
+stop_panel X
+start_panel h --subpixel none
+sleep 0.3
+h_clock "X VGA, --subpixel none" none LOW
+stop_panel X
+# an explicit style wins, at the height of its own class
+dump x.out --style crisp
+x_look "$DIR/x.out" crisp 203 reported vga 18 480x640 60x80
+has "$DIR/x.out" '^panel width=480 height=18 bar=18 ' "X VGA --style crisp: 18 px, not scaled"
+dump x.out --style crisp --height 36
+x_look "$DIR/x.out" crisp 203 reported vga 36 480x640 60x80
+dump x.out --dpi 100
+x_look "$DIR/x.out" crisp 100 override qvga 18 480x640 60x80
+dump x.out --height 50
+x_look "$DIR/x.out" smooth 203 reported vga 50 480x640 60x80
+echo "panel-e2e: X VGA output: smooth, 34 px, subpixel text with fringes; the explicit options win"
+stop_picowl
+
+# Without a size from the kernel (0x0, older kernels), or with a size_mm that
+# is refused: the class of the mode.
+x_picowl 480x640 ''
+dump x.out
+x_look "$DIR/x.out" smooth 200 fallback vga 34 480x640 0x0
+has "$DIR/x.out.err" 'info: 200 ppi (fallback: 0x0 mm, mode 480x640), vga class, style smooth, height 34' "X the fallback is logged"
+stop_picowl
+for bad in '60x' 'x80' '0x80' '60x0' '2001x80' '-60x80' '60 x 80' '60x80x1' 'big'; do
+	x_picowl 480x640 "[output]\nsize_mm = $bad"
+	grep -q 'Invalid size_mm' "$DIR/picowl.log" || fail "X: size_mm = $bad is not refused in the log"
+	dump x.out
+	x_look "$DIR/x.out" smooth 200 fallback vga 34 480x640 0x0
+	stop_picowl
+done
+x_picowl 240x320 ''
+dump x.out
+x_look "$DIR/x.out" crisp 110 fallback qvga 18 240x320 0x0
+has "$DIR/x.out" '^style crisp font=pixel ' "X the QVGA class is crisp"
+stop_picowl
+x_picowl 640x480 ''
+dump x.out
+x_look "$DIR/x.out" smooth 200 fallback vga 34 640x480 0x0
+stop_picowl
+# size_mm for one output wins over the one for all, whichever comes first
+x_picowl 240x320 '[output]\nHEADLESS-1.size_mm = 60x80\nsize_mm = 57x77'
+grep -q 'output HEADLESS-1: physical size 60x80 mm from the config' "$DIR/picowl.log" || fail "X: size_mm for HEADLESS-1 is not used: $(grep 'physical size' "$DIR/picowl.log")"
+dump x.out
+x_look "$DIR/x.out" crisp 102 reported qvga 18 240x320 60x80
+stop_picowl
+x_picowl 240x320 '[output]\nsize_mm = 57x77\nHEADLESS-1.size_mm = 60x80'
+dump x.out
+x_look "$DIR/x.out" crisp 102 reported qvga 18 240x320 60x80
+stop_picowl
+x_picowl 480x640 '[output]\nOTHER-1.size_mm = 57x77\nsize_mm = 60x80'
+dump x.out
+x_look "$DIR/x.out" smooth 203 reported vga 34 480x640 60x80
+stop_picowl
+echo "panel-e2e: X the fallback class, bad size_mm and the per-output size_mm"
+
+# A rotation and a mode turned by the display: the diagonals do not care. The
+# software rotation changes the transform in wl_output.geometry, the hardware
+# one the mode the client sees (and sends the transform normal).
+cp "$DIR/picowl.base.orig" "$DIR/picowl.base"
+printf '\n[output]\nsize_mm = 57x77\n' >>"$DIR/picowl.base"
+export PICOWL_TEST_VIRTUAL_POINTER=1
+for vhw in 0 1; do
+	VHW=$vhw
+	for rot in 90 270; do
+		v_picowl $rot horizontal_rgb
+		dump x.out --subpixel auto
+		has "$DIR/x.out" '^look style=crisp ppi=106 source=reported class=qvga height=18 ' "X hw=$vhw rotation $rot: the same density"
+		echo "panel-e2e: X hardware=$vhw rotation $rot: $(grep '^look ' "$DIR/x.out")"
+		stop_picowl
+	done
+done
+# a rotation while the panel runs: no new decision, the look stays
+VHW=0
+v_picowl normal
+start_panel x --subpixel none
+sleep 0.3
+XLOOK=$(grep '^look ' "$DIR/x.out" | tail -n1)
+"$KEYS" 397 || fail "X: key client failed"
+wait_for "$DIR/x.out" '^placement edge=right transform=1 surface=18x240 ' 5 "X rotating to 90"
+"$KEYS" 397 || fail "X: key client failed"
+"$KEYS" 397 || fail "X: key client failed"
+wait_for "$DIR/x.out" '^placement edge=left transform=3 surface=18x240 ' 5 "X rotating to 270"
+sleep 0.3
+[ "$(x_infos "$DIR/x.err")" = 1 ] || fail "X: a rotation made a new decision: $(grep info: "$DIR/x.err")"
+dump x.out2 --subpixel none
+[ "$(grep '^look ' "$DIR/x.out2" | sed 's/ mode=.*//')" = "$(echo "$XLOOK" | sed 's/ mode=.*//')" ] || fail "X: the look after a rotation is not the one before"
+stop_panel X
+stop_picowl
+unset PICOWL_TEST_VIRTUAL_POINTER
+VHW=0
+cp "$DIR/picowl.base.orig" "$DIR/picowl.base"
+echo "panel-e2e: X rotation, software and hardware: the same density, no new decision"
+
+# The look worked out again while the panel runs (the test hook d N does what a
+# mode switch or a hotplug that changes the density does; headless picowl cannot
+# change its mode): the style, the height, the exclusive zone, the buffer, the
+# fonts and the rows follow, an open row is closed and nothing of the old bar
+# is left on the screen.
+x_picowl 240x320 '[output]\nsize_mm = 57x77'
+u_bat 73 Discharging
+# crisp 18 -> smooth 34, with the backlight row open on the way
+start_panel x --popup-alpha 255 --inject "ibl;d203;w400"
+x_look "$DIR/x.out" smooth 203 override vga 34 240x320 57x77
+has "$DIR/x.out" '^panel width=240 height=34 bar=34 row=0 .*popup=none$' "X the row is closed and the surface is the 34 px bar"
+has "$DIR/x.out" '^surface exclusive=34 input=0,0,240,34$' "X the exclusive zone is the new bar"
+has "$DIR/x.out" '^style font=' "X the fonts are the smooth ones"
+[ "$(mapped)" = 240x286 ] || fail "X: with the 34 px bar a toplevel is $(mapped), wanted 240x286"
+x_colours "0,0,240,34"
+[ "$XN" -gt 30 ] || fail "X: the new smooth bar has $XN colours"
+x_colours "0,34,240,54"
+[ "$XN" = 1 ] || fail "X: below the new bar there are $XN colours, the old row or bar is left on the screen"
+stop_panel X
+# the same twice and back: crisp 18 again, exactly the palette, no smooth left
+start_panel x --popup-alpha 255 --inject "ibl;d203;w400;ivol;w300;d0;w600"
+x_look "$DIR/x.out" crisp 106 reported qvga 18 240x320 57x77
+has "$DIR/x.out" '^panel width=240 height=18 bar=18 row=0 .*popup=none$' "X back to the 18 px bar, the row is closed"
+has "$DIR/x.out" '^surface exclusive=18 input=0,0,240,18$' "X the exclusive zone is 18 again"
+has "$DIR/x.out" '^style crisp font=pixel ' "X the pixel fonts are back"
+[ "$(mapped)" = 240x302 ] || fail "X: with the 18 px bar again a toplevel is $(mapped), wanted 240x302"
+x_colours "0,0,240,18"
+u_want $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL >"$DIR/x.want"
+u_got "$DIR/x.cap" >"$DIR/x.got"
+cmp -s "$DIR/x.want" "$DIR/x.got" || { echo wanted; cat "$DIR/x.want"; echo got; cat "$DIR/x.got"; fail "X: after smooth and back the bar is not exactly the crisp palette"; }
+x_colours "0,18,240,54"
+[ "$XN" = 1 ] || fail "X: below the bar there are $XN colours after the way back"
+[ "$(x_infos "$DIR/x.err")" = 3 ] || fail "X: $(x_infos "$DIR/x.err") decisions logged, wanted 3 (start, 203, back)"
+stop_panel X
+# the same height in the other style: no configure comes, the buffer is rebuilt
+# in place
+start_panel x --popup-alpha 255 --height 24 --inject "w300;d203;w300"
+x_look "$DIR/x.out" smooth 203 override vga 24 240x320 57x77
+has "$DIR/x.out" '^redraw look$' "X the same size in the other style is rebuilt"
+x_colours "0,0,240,24"
+[ "$XN" -gt 30 ] || fail "X: the rebuilt bar has $XN colours, still crisp"
+stop_panel X
+start_panel x --popup-alpha 255 --height 24 --inject "w300;d203;w300;d0;w300"
+x_look "$DIR/x.out" crisp 106 reported qvga 24 240x320 57x77
+x_colours "0,0,240,24"
+[ "$XN" -lt 14 ] || fail "X: the bar after the way back has $XN colours, not crisp"
+[ "$(grep -c '^redraw look$' "$DIR/x.out")" = 2 ] || fail "X: the way there and back was not rebuilt in place twice"
+stop_panel X
+# --style explicit stays whatever the density does
+start_panel x --style crisp --inject "d203;w300"
+x_look "$DIR/x.out" crisp 203 override vga 18 240x320 57x77
+stop_panel X
+# on the wire: the exclusive zone follows the bar, once per change
+WAYLAND_DEBUG=1 "$PANEL" --dump-state --popup-alpha 255 --inject "d203;w300;d0;w300" >"$DIR/w.out" 2>"$DIR/w.err" || fail "X: the panel failed with WAYLAND_DEBUG"
+grep -q 'protocol error' "$DIR/w.err" && fail "X: protocol error on a change of the look"
+[ "$(grep 'set_exclusive_zone' "$DIR/w.err" | sed 's/.*set_exclusive_zone(\([0-9]*\)).*/\1/' | tr '\n' ' ')" = "18 34 18 " ] || fail "X: the exclusive zones sent: $(grep 'set_exclusive_zone' "$DIR/w.err" | sed 's/.*set_exclusive_zone/zone/' | tr '\n' ' ')"
+[ "$(grep 'set_size' "$DIR/w.err" | sed 's/.*set_size(\(.*\)).*/\1/' | tr '\n' ' ')" = "0, 18 0, 34 0, 18 " ] || fail "X: the sizes asked for: $(grep 'set_size' "$DIR/w.err" | sed 's/.*set_size/s/' | tr '\n' ' ')"
+# a run of changes leaves nothing behind: the resident size does not grow with
+# the number of changes
+rss_kb() { sed -n 's/^VmRSS:[^0-9]*\([0-9]*\) kB.*/\1/p' /proc/$1/status; }
+x_toggles() { t=""; n=$1; while [ "$n" -gt 0 ]; do t="${t}d203;d0;"; n=$((n - 1)); done; echo "$t"; }
+start_panel x --popup-alpha 255 --inject "$(x_toggles 5)"
+R5=$(rss_kb "$PANELPID")
+stop_panel X
+start_panel x --popup-alpha 255 --inject "$(x_toggles 45)"
+R45=$(rss_kb "$PANELPID")
+[ "$(x_infos "$DIR/x.err")" = 91 ] || fail "X: $(x_infos "$DIR/x.err") decisions for 45 round trips, wanted 91"
+stop_panel X
+echo "panel-e2e: X resident size after 5 round trips of the look: $R5 kB, after 45: $R45 kB"
+[ "$R45" -le $((R5 + 256)) ] || fail "X: the resident size grew from $R5 to $R45 kB over 40 more changes of the look"
+stop_picowl
+PANEL=$DIR/picowl-panel-smooth
+cp "$DIR/picowl.base.orig" "$DIR/picowl.ini"
+echo "panel-e2e: X ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then
