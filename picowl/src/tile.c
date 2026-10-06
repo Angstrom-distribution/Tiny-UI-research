@@ -4,7 +4,7 @@
 #include "tile.h"
 
 bool pw_tile_layout(const struct pw_tile_box *usable,
-	const struct pw_tile_hint hints[2], struct pw_tile_box out[2])
+	const struct pw_tile_hint hints[2], int second_min, struct pw_tile_box out[2])
 {
 	if (!usable || !hints || !out || usable->w <= 0 || usable->h <= 0)
 		return false;
@@ -36,14 +36,24 @@ bool pw_tile_layout(const struct pw_tile_box *usable,
 		size = extent / 2;
 	}
 
-	/* A hint is only a preference: a wide clip must not squeeze the other
-	 * app to nothing (nor a tall one the first), so each keeps a quarter.
-	 * Rounded up, so the share is never below the percentage. */
+	/* A hint is only a preference: a tall clip must not squeeze the first
+	 * app to nothing, and a wide one must not take the room the second app
+	 * (a terminal next to a player) needs to be usable, so the first is
+	 * capped to leave the second its share. Both are rounded up, so a share
+	 * is never below its percentage. The cap can fall under the first's
+	 * floor only through that rounding, and the floor then wins. */
+	if (second_min < PW_TILE_SECOND_MIN_LO)
+		second_min = PW_TILE_SECOND_MIN_LO;
+	if (second_min > PW_TILE_SECOND_MIN_HI)
+		second_min = PW_TILE_SECOND_MIN_HI;
 	int64_t min = (extent * PW_TILE_MIN_PERCENT + 99) / 100;
+	int64_t max = extent - (extent * second_min + 99) / 100;
+	if (max < min)
+		max = min;
+	if (size > max)
+		size = max;
 	if (size < min)
 		size = min;
-	if (size > extent - min)
-		size = extent - min;
 
 	if (portrait) {
 		out[0] = (struct pw_tile_box){ usable->x, usable->y, usable->w, (int)size };

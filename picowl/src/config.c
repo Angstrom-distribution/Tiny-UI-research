@@ -11,6 +11,7 @@
 #include <drm_fourcc.h>
 #include "picowl.h"
 #include "subpixel.h"
+#include "tile.h"
 
 
 /* --- Helpers ----------------------------------------------------------- */
@@ -451,6 +452,7 @@ struct pw_config *pw_config_default(void)
 	c->osk_restart = true;
 	c->pan[0] = strdup("wvkbd");
 	c->n_pan = c->pan[0] ? 1 : 0;
+	c->second_min = PW_TILE_SECOND_MIN_DEFAULT;
 	c->hold_animation = NULL;
 	c->cursor_fill = 0x2050c0;
 	c->cursor_outline = 0xffffff;
@@ -850,6 +852,9 @@ struct pw_config *pw_config_load(const char *path)
 				parse_layout_stack(c, val);
 			} else if (strcmp(key, "pan") == 0) {
 				parse_layout_pan(c, val);
+			} else if (strcmp(key, "second_min") == 0) {
+				parse_int_log(val, "[layout] second_min", PW_TILE_SECOND_MIN_LO,
+					PW_TILE_SECOND_MIN_HI, &c->second_min);
 			} else if (strcmp(key, "focus") == 0) {
 				/* checked against stack once the whole file is read, so
 				 * the order of the two keys does not matter */

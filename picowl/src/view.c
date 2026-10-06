@@ -167,7 +167,7 @@ static bool tile_active(struct pw_server *server, struct pw_view **first,
 			hints[i].aspect_h = rule->aspect_h;
 		}
 	}
-	if (!pw_tile_layout(&usable, hints, out))
+	if (!pw_tile_layout(&usable, hints, server->config->second_min, out))
 		return false;
 	if (pan)
 		*pan = panned ? pw_tile_pan(output->pan_zone, output->full_area.height,

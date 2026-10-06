@@ -53,7 +53,7 @@ int main(void)
 	struct pw_tile_box area = { 0, 0, W, H }, slot[2];
 	struct pw_tile_hint hints[2] = {{0}, {0}};
 
-	assert(pw_tile_layout(&area, hints, slot));
+	assert(pw_tile_layout(&area, hints, PW_TILE_SECOND_MIN_DEFAULT, slot));
 	int pan = pw_tile_pan(zone, H, slot[1].y);
 	assert(pan == zone);
 

@@ -958,6 +958,33 @@ static int test_layout_config(void)
 		pw_config_free(c);
 	}
 
+	/* [layout] second_min: 25..75, default 50; a bad value keeps the one before */
+	c = pw_config_default();
+	assert(c != NULL && c->second_min == 50);
+	pw_config_free(c);
+	static const struct { const char *text; int want; } second_cases[] = {
+		{ "[layout]\nsecond_min = 25\n", 25 },
+		{ "[layout]\nsecond_min = 75\n", 75 },
+		{ "[layout]\nsecond_min =  60 \n", 60 },
+		{ "[layout]\nsecond_min = 24\n", 50 },
+		{ "[layout]\nsecond_min = 76\n", 50 },
+		{ "[layout]\nsecond_min = -1\n", 50 },
+		{ "[layout]\nsecond_min = 50%\n", 50 },
+		{ "[layout]\nsecond_min = half\n", 50 },
+		{ "[layout]\nsecond_min =\n", 50 },
+		{ "[layout]\nsecond_min = 30\nsecond_min = 99\n", 30 },
+		{ "[layout]\nsecond_min = 30\nsecond_min = 40\n", 40 },
+	};
+	for (unsigned i = 0; i < sizeof(second_cases) / sizeof(second_cases[0]); i++) {
+		path = write_tmp_ini("picowl-test-layout.ini", second_cases[i].text);
+		c = pw_config_load(path);
+		remove(path);
+		if (!c || c->second_min != second_cases[i].want)
+			fprintf(stderr, "second_min case %u failed\n", i);
+		assert(c != NULL && c->second_min == second_cases[i].want);
+		pw_config_free(c);
+	}
+
 	printf("✓ test_layout_config\n");
 	return 0;
 }

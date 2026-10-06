@@ -218,9 +218,16 @@ code:155 = rotate
 # repeated name is skipped, and tiling stays off unless two distinct names remain.
 # The first window's share of the screen follows its natural aspect ratio:
 # the client's fixed size (min_size == max_size) if it has one, else
-# '[app.<id>] aspect = W:H' (1..4096), else half. Each window keeps at least
-# 25 percent. alt+Tab moves the keyboard between the two while one has it.
+# '[app.<id>] aspect = W:H' (1..4096), else half. The first window never gets
+# more than 100 - second_min percent, and keeps at least 25 percent. alt+Tab
+# moves the keyboard between the two while one has it.
 # stack = mediaplayer, havoc
+#
+# second_min: the share of the split axis (the height in portrait, the width in
+# landscape) the second window keeps at least, 25..75 percent, default 50. A
+# wide player clip then cannot take the room the terminal needs. 25 gives the
+# older rule, where only a quarter was guaranteed. A bad value keeps the default.
+# second_min = 50
 #
 # focus: one of the two stack apps keeps the keyboard when the other one maps,
 # so a player which starts or restarts later does not take the keys of the

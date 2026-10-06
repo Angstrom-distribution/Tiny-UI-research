@@ -219,6 +219,10 @@ struct pw_config {
 	char *stack[2];
 	int n_stack;
 
+	/* [layout] second_min: percent of the split axis the second tiled window
+	 * keeps at least, PW_TILE_SECOND_MIN_LO..HI, default 50. */
+	int second_min;
+
 	/* [layout] focus: the stack app which keeps the keyboard when the other
 	 * one maps. NULL (default) or one of the two stack names. */
 	char *focus;

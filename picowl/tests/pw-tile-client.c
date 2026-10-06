@@ -561,18 +561,18 @@ static void landscape(void)
 
 	/* the client's own fixed size beats the config */
 	set_fixed(&a, 300, 300);
-	expect_size("fixed 1:1", &a, 720, 720);
-	expect_size("fixed 1:1", &b, 560, 720);
+	expect_size("fixed 1:1", &a, 640, 720);
+	expect_size("fixed 1:1", &b, 640, 720);
 
 	/* a new clip: the hint changes at run time */
 	set_fixed(&a, 200, 300);
 	expect_size("fixed 2:3", &a, 480, 720);
 	expect_size("fixed 2:3", &b, 800, 720);
 
-	/* too wide to fit: the other app keeps a quarter */
+	/* too wide to fit: the other app keeps half */
 	set_fixed(&a, 400, 200);
-	expect_size("clamped", &a, 960, 720);
-	expect_size("clamped", &b, 320, 720);
+	expect_size("clamped", &a, 640, 720);
+	expect_size("clamped", &b, 640, 720);
 
 	/* hint dropped: back to the config */
 	set_fixed(&a, 0, 0);
