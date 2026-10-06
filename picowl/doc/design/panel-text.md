@@ -62,3 +62,15 @@ A standalone prototype (not part of the panel build) rendered Liberation Sans, D
 - Does the engine mono expansion work on the MQ1188 under Linux, and at what cost per glyph? (Section 6.)
 - How does a hinted bi-level DejaVu bar look on the real panel, compared with misc-fixed? Only host renders exist.
 - Which look does the user prefer for the rows: the large hand-drawn pixel fonts or hinted TrueType at 12 px?
+
+## 8. Idea, not built: pixel-aligned fonts in havoc
+
+**Status:** recorded, nothing implemented. Source read: havoc at commit 73e3467149 (`glyph.c`, `main.c`, `font_scale`) [read].
+
+- **Today.** havoc has its own rasteriser derived from stb_truetype in `glyph.c`. `get_glyph(id, codepoint, cwidth)` returns an 8-bit coverage bitmap the size of one cell (width x cwidth, height), cached per glyph; `main.c` blends the foreground and background colours with that coverage. `font_scale(size)` scales the outline, so the text is unhinted and anti-aliased, and the cell size follows the configured `size` [read].
+- **The idea.** A bitmap-font backend behind the same `get_glyph` interface that returns only 0 or 255. Cells then contain exactly the two theme colours, no blending, no fringes, which is the crisp look the panel has. Cell sizes become fixed by the font (6x10, 6x12, 6x13, 7x13 and so on), so `size` picks the nearest font and the zoom keys step through them. Wide (CJK) cells fall back to the current rendering at first.
+- **Font source.** The X11 misc-fixed fonts: public domain, made for terminals (xterm's classic default is 6x13). The panel's copies are cut to printable ASCII; a terminal also needs Latin-1, Greek, Cyrillic and box drawing. That the full BDFs cover them, and how large they are as const data, is [unverified]; check before choosing sizes. Hinted DejaVu Sans Mono was only "fine but wide" in the prototype (section 4) [host].
+- **Speed.** Two colours turn a cell into a 1-bit lookup, the fast path of section 6, and a solid-background cell paint needs no blend [est].
+- **Delivery.** A new havoc patch 0003 (the series is 0001 text-input, 0002 per-cell damage), behind a config switch so the current look stays the default. Tests: the damage and golden harness in `oe/recipes-graphics/havoc/tests` does not depend on the font; add a check that every pixel of every painted cell is one of two colours, as the panel's crisp end-to-end test does.
+- **Open:** which sizes to ship; how `size` maps to a font; whether bold and italic are needed (not checked in havoc); the look at 10 px or so on the real panel, which is hard-edged and old-school.
+
