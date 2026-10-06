@@ -61,13 +61,16 @@ enum {
 
 struct panel {
 	/* options */
-	int height;		/* the bar */
+	int height;		/* the bar, as the look resolved it (or --height) */
+	int height_opt;		/* --height, 0 for auto */
+	enum pl_styleopt style_opt;	/* --style */
+	int dpi_opt;		/* --dpi, 0 for none */
 	bool bottom;
 	const char *font_path;
 	int font_px;
 	int bar_alpha, popup_alpha;
 	enum pl_subopt subopt;
-	bool crisp;		/* --style crisp: pixel fonts and whole-pixel shapes */
+	bool crisp;		/* the style in effect: pixel fonts and whole-pixel shapes */
 	enum pl_crisp_font crisp_font;	/* --crisp-font */
 	bool edge_top;		/* --edge top: the bar stays on a top edge when rotated */
 	int battery_mah;	/* capacity given by the user, 0 unknown */
@@ -88,13 +91,22 @@ struct panel {
 	struct out_info {
 		struct wl_output *wl;
 		int subpixel, transform;
+		/* the mode in use and the physical size, as the client sees them */
+		int mode_w, mode_h, mm_w, mm_h;
 		struct pl_rot_hint hint;
 		struct picowl_rotation_v1 *rot;
 	} outs[MAX_OUTPUTS];
 	struct picowl_rotation_manager_v1 *rot_mgr;
 	struct wl_output *surf_out;
 	enum pl_sub sub;
-	bool assets_ready;
+	bool assets_ready, font_warned;
+	/* The look (style, height) follows the density of the bar's output and is
+	 * worked out again whenever the output says it is done. relook: the assets
+	 * are the new look's, the buffer and layout are still the old one's, so
+	 * nothing is drawn until the surface has been rebuilt. */
+	struct pl_look look;
+	bool look_set, relook;
+	int req_zone;		/* the exclusive zone last sent */
 	bool shm_565;
 	bool configured, closed, need_buffer, first;
 	int cfg_w, cfg_h;
@@ -224,13 +236,18 @@ static uint32_t anchor_for(enum pl_strip strip, bool bottom)
 /* State for a surface of the given thickness (bar and row) in the current
  * mode: along the edge the compositor decides (size 0), so the bar spans the
  * short side of a rotated output. The anchor is sent only when the mode
- * changes, the exclusive zone never. */
+ * changes, the exclusive zone only when the bar's height does (a new look),
+ * never for the row. */
 static void request_surface(struct panel *p, int want)
 {
 	if (p->strip != p->req_strip || !p->req_h)
 		zwlr_layer_surface_v1_set_anchor(p->ls, anchor_for(p->strip, p->bottom));
 	p->req_h = want;
 	p->req_strip = p->strip;
+	if (p->req_zone != p->height) {
+		zwlr_layer_surface_v1_set_exclusive_zone(p->ls, p->height);
+		p->req_zone = p->height;
+	}
 	if (p->strip != PL_STRIP_NONE)
 		zwlr_layer_surface_v1_set_size(p->ls, want, 0);
 	else
@@ -239,7 +256,8 @@ static void request_surface(struct panel *p, int want)
 
 /* Ask for the surface the open or closed row needs, or for the other edge
  * when the output was rotated. The exclusive zone is never touched: the bar
- * keeps its strip, the row only covers windows. Done after a pending
+ * keeps its strip, the row only covers windows. A new look is asked for the
+ * same way, with the exclusive zone of its bar. Done after a pending
  * configure has been answered with its buffer, so that a commit never carries
  * an acknowledged size and a buffer of another one. */
 static void sync_size(struct panel *p)
@@ -253,6 +271,25 @@ static void sync_size(struct panel *p)
 	wl_surface_commit(p->surface);
 }
 
+static bool rebuild(struct panel *p, int w, int h);
+
+/* A new look whose surface has the size of the buffer (the same height in
+ * the other style, or the size answered already): no configure is coming, so
+ * the buffer is rebuilt here. A new size is rebuilt by the configure. */
+static void relook_now(struct panel *p)
+{
+	if (!p->configured || p->need_buffer || !p->buffer || p->req_h != p->canvas.h ||
+			p->strip != p->req_strip || p->strip != p->buf_strip)
+		return;
+	if (!rebuild(p, p->canvas.w, p->canvas.h)) {
+		p->exit_code = 1;
+		p->quit = true;
+		return;
+	}
+	if (p->watch)
+		dump_state(p, "look");
+}
+
 /* Draw the widgets that changed into the buffer and send them. */
 static void flush_redraw(struct panel *p)
 {
@@ -261,6 +298,10 @@ static void flush_redraw(struct panel *p)
 	int open = p->pop.open;
 
 	sync_size(p);
+	if (p->relook) {
+		relook_now(p);
+		return;
+	}
 	if (!p->buffer || !p->dirty)
 		return;
 	if (p->dirty & W_CLOCK) {
@@ -411,6 +452,7 @@ static bool rebuild(struct panel *p, int w, int h)
 
 	p->dirty = 0;
 	p->n_dmg = 0;
+	p->relook = false;
 	add_damage(p, (struct pl_rect){ 0, 0, w, h });
 	commit(p);
 
@@ -881,6 +923,72 @@ static const struct out_info *bar_output(const struct panel *p)
 	return oi;
 }
 
+/* The fonts and the icons for the look in effect. The smooth style reads its
+ * font file once per look, glyphs are rasterized into memory and the file is
+ * let go; without one the panel still works, in the bitmap font. */
+static void assets_load(struct panel *p)
+{
+	if (p->assets_ready)
+		pl_assets_free(&p->assets);
+	if (p->crisp) {
+		pl_assets_init_crisp(&p->assets, p->height, p->bar_alpha, p->popup_alpha,
+			p->crisp_font);
+		p->font_ttf = false;
+	} else {
+		int px = p->font_px ? p->font_px : pl_default_font_px(p->height);
+		p->font_ttf = pl_assets_init(&p->assets, p->font_path, px, p->bar_alpha,
+			p->popup_alpha);
+		if (!p->font_warned && !p->font_ttf && p->font_path)
+			say("cannot use the font '%s', using the built-in bitmap font", p->font_path);
+		else if (!p->font_warned && !p->font_ttf)
+			say("no usable font file found, using the built-in bitmap font");
+		p->font_warned = true;
+		p->assets.sub = p->sub;
+	}
+	p->assets_ready = true;
+}
+
+static void popup_close(struct panel *p);
+
+/* The look of the output the bar is on: its density says which style the
+ * display can carry (see pl_look_resolve). Done at start and whenever an
+ * output is done with its events, so a rotation, a mode switch or a hotplug
+ * that changes the mode or the size changes the look at run time. A change
+ * of style or height loads the assets of the new look and has the surface
+ * rebuilt for it; the open row is closed, its size is the old look's. */
+static void look_update(struct panel *p)
+{
+	const struct out_info *oi = bar_output(p);
+	struct pl_look_in in = { p->style_opt, p->dpi_opt, p->height_opt, 0, 0, 0, 0 };
+	struct pl_look nl;
+
+	if (oi) {
+		in.mode_w = oi->mode_w;
+		in.mode_h = oi->mode_h;
+		in.mm_w = oi->mm_w;
+		in.mm_h = oi->mm_h;
+	}
+	pl_look_resolve(&in, &nl);
+	if (p->look_set && pl_look_same(&nl, &p->look))
+		return;
+	say("info: %d ppi (%s: %dx%d mm, mode %dx%d), %s class, style %s, height %d",
+		nl.ppi, pl_dpi_src_name(nl.src), in.mm_w, in.mm_h, in.mode_w, in.mode_h,
+		nl.vga ? "vga" : "qvga", nl.crisp ? "crisp" : "smooth", nl.height);
+	bool changed = p->look_set && (nl.crisp != p->crisp || nl.height != p->height);
+
+	p->look = nl;
+	p->look_set = true;
+	p->crisp = nl.crisp;
+	p->height = nl.height;
+	if (!changed || !p->assets_ready)
+		return;
+	assets_load(p);
+	popup_close(p);
+	p->touch.down = false;
+	p->touch.slider = PL_SLIDER_NONE;
+	p->relook = true;
+}
+
 /* The text mode follows the output the bar is on: its subpixel layout and
  * transform come in wl_output.geometry, which is sent again when the output is
  * rotated. So does the edge: the strip on a short side is for the outputs the
@@ -920,12 +1028,14 @@ static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int
 	int32_t ph, int32_t subpixel, const char *make, const char *model, int32_t transform)
 {
 	struct panel *p = d;
-	(void)x; (void)y; (void)pw; (void)ph; (void)make; (void)model;
+	(void)x; (void)y; (void)make; (void)model;
 
 	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
 		if (p->outs[i].wl == o) {
 			p->outs[i].subpixel = subpixel;
 			p->outs[i].transform = transform;
+			p->outs[i].mm_w = pw;
+			p->outs[i].mm_h = ph;
 		}
 	sub_update(p);
 }
@@ -953,11 +1063,26 @@ static void rot_attach(struct panel *p, int i)
 	p->outs[i].rot = picowl_rotation_manager_v1_get_rotation(p->rot_mgr, p->outs[i].wl);
 	picowl_rotation_v1_add_listener(p->outs[i].rot, &rot_listener, p);
 }
+/* The mode in use; the other modes an output lists are not what is shown. */
 static void out_mode(void *d, struct wl_output *o, uint32_t f, int32_t w, int32_t h, int32_t r)
 {
-	(void)d; (void)o; (void)f; (void)w; (void)h; (void)r;
+	struct panel *p = d;
+	(void)r;
+
+	if (!(f & WL_OUTPUT_MODE_CURRENT))
+		return;
+	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
+		if (p->outs[i].wl == o) {
+			p->outs[i].mode_w = w;
+			p->outs[i].mode_h = h;
+		}
 }
-static void out_done(void *d, struct wl_output *o) { (void)d; (void)o; }
+/* geometry, mode and scale are one atomic update, which done closes. */
+static void out_done(void *d, struct wl_output *o)
+{
+	(void)o;
+	look_update(d);
+}
 static void out_scale(void *d, struct wl_output *o, int32_t f) { (void)d; (void)o; (void)f; }
 static const struct wl_output_listener out_listener = {
 	.geometry = out_geometry, .mode = out_mode, .done = out_done, .scale = out_scale,
@@ -968,6 +1093,7 @@ static void surf_enter(void *d, struct wl_surface *s, struct wl_output *o)
 	struct panel *p = d;
 	(void)s;
 	p->surf_out = o;
+	look_update(p);
 	sub_update(p);
 }
 static void surf_leave(void *d, struct wl_surface *s, struct wl_output *o)
@@ -1189,6 +1315,12 @@ static void run_inject(struct panel *p)
 			tap_button(p, PL_BTN_CLOCK);
 		} else if (!strcmp(tok, "ibat")) {
 			tap_button(p, PL_BTN_BATTERY);
+		} else if (tok[0] == 'd' && sscanf(tok + 1, "%d", &x) == 1) {
+			/* The look worked out again as if the output's density had
+			 * changed (a mode switch, a hotplug): headless picowl cannot
+			 * change its mode while it runs. 0 takes the override back. */
+			p->dpi_opt = x < 0 ? 0 : x;
+			look_update(p);
 		} else if (tok[0] == 'w' && sscanf(tok + 1, "%d", &x) == 1) {
 			flush_redraw(p);
 			wait_ms(p, x);
@@ -1253,6 +1385,14 @@ static void dump_state(const struct panel *p, const char *why)
 		p->bar_alpha, p->popup_alpha,
 		!p->crisp ? "" : p->crisp_font == PL_CRISP_DEJAVU ? " crisp_font=dejavu" :
 		" crisp_font=fixed");
+	{
+		const struct out_info *bo = bar_output(p);
+
+		printf("look style=%s ppi=%d source=%s class=%s height=%d mode=%dx%d size_mm=%dx%d\n",
+			p->crisp ? "crisp" : "smooth", p->look.ppi, pl_dpi_src_name(p->look.src),
+			p->look.vga ? "vga" : "qvga", p->height, bo ? bo->mode_w : 0,
+			bo ? bo->mode_h : 0, bo ? bo->mm_w : 0, bo ? bo->mm_h : 0);
+	}
 	printf("text subpixel=%s\n", p->assets.sub == PL_SUB_RGB ? "rgb" :
 		p->assets.sub == PL_SUB_BGR ? "bgr" : "none");
 	const struct out_info *oi = bar_output(p);
@@ -1332,7 +1472,9 @@ static void usage(FILE *out)
 {
 	fprintf(out,
 		"usage: picowl-panel [options]\n"
-		"  --height N          height of the bar in pixels, %d..%d (default %d)\n"
+		"  --height N          height of the bar in pixels, %d..%d, or auto (default):\n"
+		"                      %d for the crisp style, for the smooth one 18 at 110 ppi\n"
+		"                      scaled with the density, made even\n"
 		"  --bottom            anchor at the bottom edge (default: top)\n"
 		"  --edge MODE         auto (default) or top. On an output that is rotated by 90\n"
 		"                      or 270 degrees auto puts the bar on the short side, the\n"
@@ -1344,10 +1486,17 @@ static void usage(FILE *out)
 		"                      with hardware rotation) the turn comes from\n"
 		"                      picowl-rotation-v1; a compositor without it is seen as\n"
 		"                      not turned\n"
-		"  --style STYLE       smooth (default) or crisp: crisp draws nothing\n"
+		"  --style STYLE       auto (default), smooth or crisp: crisp draws nothing\n"
 		"                      anti-aliased, with built-in pixel fonts and icons on\n"
 		"                      whole pixels, and ignores --font, --font-size and\n"
-		"                      --subpixel\n"
+		"                      --subpixel. auto looks at the density of the output\n"
+		"                      the bar is on, again whenever the output changes:\n"
+		"                      below %d ppi crisp, from there smooth. The density is\n"
+		"                      the diagonal of the mode in use over the diagonal of\n"
+		"                      the physical size the compositor reports; without a\n"
+		"                      size it is %d for a mode with a long side of %d or\n"
+		"                      more, else %d\n"
+		"  --dpi N             use this density, %d..%d, instead of the output's\n"
 		"  --crisp-font F      fixed (default) or dejavu: the pixel font of the crisp\n"
 		"                      style. fixed is the monospaced X11 misc-fixed, dejavu\n"
 		"                      is DejaVu Sans hinted to bi-level, proportional\n"
@@ -1376,9 +1525,12 @@ static void usage(FILE *out)
 		"                      (p X,Y press; m X,Y motion; e X,Y enter; r release;\n"
 		"                      ibl, ivol, icl, ibat tap the backlight, volume, clock\n"
 		"                      or battery button; w MS wait; b RAW sets the\n"
-		"                      backlight), before the dump\n"
+		"                      backlight; d N works the look out again for N ppi,\n"
+		"                      0 for the output's own), before the dump\n"
 		"  --help              this text\n",
 		PL_HEIGHT_MIN, PL_HEIGHT_MAX, PL_HEIGHT_DEFAULT,
+		PL_DPI_SMOOTH_MIN, PL_DPI_FALLBACK_VGA, PL_VGA_LONG_SIDE, PL_DPI_FALLBACK_QVGA,
+		PL_DPI_MIN, PL_DPI_MAX,
 		pl_default_font_px(PL_HEIGHT_DEFAULT), PL_ALPHA_BAR_DEFAULT,
 		PL_ALPHA_POPUP_DEFAULT);
 }
@@ -1411,6 +1563,17 @@ static int parse_args(struct panel *p, int argc, char **argv)
 			p->watch = true;
 		} else if (!strcmp(a, "--exit-after-frame")) {
 			p->exit_after_frame = true;
+		} else if (!strcmp(a, "--height") && i + 1 < argc &&
+				!strcmp(argv[i + 1], "auto")) {
+			i++;
+			p->height_opt = 0;
+		} else if (!strcmp(a, "--dpi") && i + 1 < argc) {
+			if (!parse_int(argv[++i], &v) || v < PL_DPI_MIN || v > PL_DPI_MAX) {
+				say("--dpi: '%s' is not a number from %d to %d", argv[i], PL_DPI_MIN,
+					PL_DPI_MAX);
+				return -1;
+			}
+			p->dpi_opt = v;
 		} else if ((!strcmp(a, "--height") || !strcmp(a, "--font-size") ||
 				!strcmp(a, "--bar-alpha") || !strcmp(a, "--popup-alpha")) &&
 				i + 1 < argc) {
@@ -1419,7 +1582,7 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				return -1;
 			}
 			if (!strcmp(a, "--height"))
-				p->height = pl_clamp_height(v);
+				p->height_opt = pl_clamp_height(v);
 			else if (!strcmp(a, "--font-size"))
 				p->font_px = v < 8 ? 8 : v > 48 ? 48 : v;
 			else if (!strcmp(a, "--bar-alpha"))
@@ -1458,12 +1621,14 @@ static int parse_args(struct panel *p, int argc, char **argv)
 			}
 		} else if (!strcmp(a, "--style") && i + 1 < argc) {
 			const char *v = argv[++i];
-			if (!strcmp(v, "smooth")) {
-				p->crisp = false;
+			if (!strcmp(v, "auto")) {
+				p->style_opt = PL_STYLE_AUTO;
+			} else if (!strcmp(v, "smooth")) {
+				p->style_opt = PL_STYLE_SMOOTH;
 			} else if (!strcmp(v, "crisp")) {
-				p->crisp = true;
+				p->style_opt = PL_STYLE_CRISP;
 			} else {
-				say("--style: '%s' is not smooth or crisp", v);
+				say("--style: '%s' is not auto, smooth or crisp", v);
 				return -1;
 			}
 		} else if (!strcmp(a, "--crisp-font") && i + 1 < argc) {
@@ -1527,6 +1692,13 @@ static bool handle_buffer(struct panel *p)
 			(p->strip != PL_STRIP_NONE ? p->cfg_w > p->cfg_h : p->cfg_w < p->cfg_h) &&
 			p->strip != p->buf_strip)
 		return true;
+	/* The same for the thickness of a surface that was configured before
+	 * the new look's size was asked for. */
+	if (p->relook && p->cfg_w > 0 && p->cfg_h > 0 &&
+			p->req_h != pl_surface_height(p->height, false) &&
+			(p->strip != PL_STRIP_NONE ? p->cfg_w : p->cfg_h) !=
+				pl_surface_height(p->height, false))
+		return true;
 	int sw = p->cfg_w > 0 ? p->cfg_w :
 		p->strip != PL_STRIP_NONE ? pl_surface_height(p->height, false) : 240;
 	int sh = p->cfg_h > 0 ? p->cfg_h :
@@ -1536,7 +1708,7 @@ static bool handle_buffer(struct panel *p)
 	pl_strip_buffer_size(p->strip, sw, sh, &w, &h);
 	bool turned = p->buf_strip != p->strip;
 	p->buf_strip = p->strip;
-	if (p->buffer && w == p->canvas.w && h == p->canvas.h) {
+	if (p->buffer && w == p->canvas.w && h == p->canvas.h && !p->relook) {
 		/* Same size again: nothing to draw, but the configure is
 		 * answered by a commit. A bar that moved to another edge has the
 		 * same buffer and other regions: they are in surface coordinates. */
@@ -1734,20 +1906,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* The font is read once, here: glyphs are rasterized into memory and the
-	 * file is let go. Without one the panel still works, in the bitmap font. */
-	if (p.crisp) {
-		pl_assets_init_crisp(&p.assets, p.height, p.bar_alpha, p.popup_alpha, p.crisp_font);
-	} else {
-		int px = p.font_px ? p.font_px : pl_default_font_px(p.height);
-		p.font_ttf = pl_assets_init(&p.assets, p.font_path, px, p.bar_alpha, p.popup_alpha);
-		if (!p.font_ttf && p.font_path)
-			say("cannot use the font '%s', using the built-in bitmap font", p.font_path);
-		else if (!p.font_ttf)
-			say("no usable font file found, using the built-in bitmap font");
-		p.assets.sub = p.sub;
-	}
-	p.assets_ready = true;
+	/* The density of the output is known by now (done came with the second
+	 * roundtrip), so the first surface is already the right one. */
+	look_update(&p);
+	assets_load(&p);
 
 	p.st.hour = p.st.min = -1;
 	p.st.year = p.st.mon = p.st.mday = p.st.wday = -1;
@@ -1776,10 +1938,10 @@ int main(int argc, char **argv)
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
 	wl_surface_add_listener(p.surface, &surf_listener, &p);
 	zwlr_layer_surface_v1_add_listener(p.ls, &ls_listener, &p);
+	/* The exclusive zone, sent with the request, is the bar's strip only: the
+	 * slider row is taller than that and covers the windows instead of
+	 * pushing them. */
 	request_surface(&p, p.height);
-	/* The bar's strip only: the slider row is taller than that and covers
-	 * the windows instead of pushing them. */
-	zwlr_layer_surface_v1_set_exclusive_zone(p.ls, p.height);
 	zwlr_layer_surface_v1_set_keyboard_interactivity(p.ls,
 		ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
 	wl_surface_commit(p.surface);

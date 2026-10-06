@@ -50,7 +50,7 @@
 # the minute timer fires.
 # usage: panel-e2e.sh PICOWL PANEL PW_TEST_CLIENT PW_KEY_CLIENT PW_FAKE_CTL PW_BARE_SERVER PW_CAPTURE_CLIENT PW_POINTER_CLIENT
 PICOWL=$1
-PANEL=$2
+PANEL_REAL=$2
 CLIENT=$3
 KEYS=$4
 # alsa-lib opens the plugin by the path it is given, so it must not depend on
@@ -62,6 +62,13 @@ POINTER=$8
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
+# The headless output has no physical size, so the panel's own default is the
+# QVGA class, the crisp style. Sections A to W are about the smooth style and
+# its 18 px geometry: they run the panel through a script that puts --style
+# smooth first (an option given later wins), section X the program itself.
+PANEL=$DIR/picowl-panel-smooth
+printf '#!/bin/sh\nexec "%s" --style smooth "$@"\n' "$PANEL_REAL" >"$PANEL"
+chmod +x "$PANEL"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 export PICOWL_HEADLESS_SIZE=240x320
 unset DISPLAY WAYLAND_DISPLAY
@@ -1205,6 +1212,7 @@ q565() {
 C_BG=1c1f24 C_LINE=363b44 C_ROW=252930 C_ROWLINE=3d434d C_FG=e8eaed C_ACCENT=4c8dff
 C_HL=2b3a57 C_TRACK=454b55 C_THUMB=ffffff C_RING=aeb4be C_FILL=c9cdd3 C_EMPTY=30353c
 C_LOW=e5484d C_CHARGING=3fb950
+UAUTO=0
 u_want() { for c in "$@"; do q565 "$c"; done | sort -u; }
 u_got() { sed -n 's/^pw-capture-client: colour \([0-9a-f]*\) .*/\1/p' "$1" | sort -u; }
 # u_bat PCT STATUS
@@ -1220,7 +1228,11 @@ u_scene() {
 		CLIENTPID=$!
 		wait_for "$DIR/client.out" 'mapped' 5 "U client"
 	fi
-	start_panel u --style crisp --crisp-font "$UFONT" --popup-alpha 255 --inject "$inj"
+	if [ "$UAUTO" = 1 ]; then
+		start_panel u --popup-alpha 255 --inject "$inj"
+	else
+		start_panel u --style crisp --crisp-font "$UFONT" --popup-alpha 255 --inject "$inj"
+	fi
 	[ "$uh" -gt 18 ] && wait_for "$DIR/u.out" '^row ' 5 "U $name row open"
 	sleep 0.3
 	"$CAPTURE" --palette "0,0,240,$uh" --dump "0,0,240,$uh" >"$DIR/u.cap" 2>&1 || fail "U $name: capture failed: $(head -c 300 "$DIR/u.cap")"
@@ -1310,7 +1322,7 @@ h_picowl horizontal_rgb
 dump u.out --style crisp --subpixel rgb --font /nonexistent/font.ttf --font-size 30 --inject "ibl"
 has "$DIR/u.out" '^style crisp font=pixel size=13 small=13 ' "U the style line"
 has "$DIR/u.out" '^text subpixel=none$' "U crisp text is never subpixel text"
-[ ! -s "$DIR/u.out.err" ] || fail "U: --font and --font-size are ignored with a message: $(cat "$DIR/u.out.err")"
+[ -z "$(grep -v "picowl-panel: info: " "$DIR/u.out.err")" ] || fail "U: --font and --font-size are ignored with a message: $(cat "$DIR/u.out.err")"
 TH=$(val "$DIR/u.out" row thumb)
 [ "$(comp "$TH" 3)" -eq 21 ] && [ "$(comp "$TH" 4)" -eq 21 ] || fail "U: the thumb is $TH, wanted 21 px"
 has "$DIR/u.out" ' crisp_font=fixed$' "U the style line names the default pixel font"
@@ -1322,7 +1334,7 @@ dump u.out --style crisp --crisp-font dejavu --subpixel rgb --font /nonexistent/
 has "$DIR/u.out" '^style crisp font=pixel size=12 small=12 .* crisp_font=dejavu$' "U the style line of the DejaVu font"
 has "$DIR/u.out" '^text subpixel=none$' "U crisp DejaVu text is never subpixel text"
 has "$DIR/u.out" '^row kind=date .* size=13 ' "U the date is in the 13 px cell of Bold 12"
-[ ! -s "$DIR/u.out.err" ] || fail "U: --crisp-font dejavu printed a message: $(cat "$DIR/u.out.err")"
+[ -z "$(grep -v "picowl-panel: info: " "$DIR/u.out.err")" ] || fail "U: --crisp-font dejavu printed a message: $(cat "$DIR/u.out.err")"
 "$PANEL" --crisp-font comic --dump-state >"$DIR/u.out" 2>"$DIR/u.err"
 [ $? -eq 2 ] || fail "U: --crisp-font comic is not an error"
 has "$DIR/u.err" "is not fixed or dejavu" "U the message for a bad crisp font"
@@ -1332,7 +1344,7 @@ dump u.out --style smooth
 has "$DIR/u.out" '^style font=' "U --style smooth is the default style"
 "$PANEL" --style fancy --dump-state >"$DIR/u.out" 2>"$DIR/u.err"
 [ $? -eq 2 ] || fail "U: --style fancy is not an error"
-has "$DIR/u.err" "is not smooth or crisp" "U the message for a bad style"
+has "$DIR/u.err" "is not auto, smooth or crisp" "U the message for a bad style"
 stop_picowl
 echo "panel-e2e: U ok"
 

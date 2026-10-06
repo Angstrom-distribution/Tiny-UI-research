@@ -56,9 +56,13 @@ color = #101010
 # --font PATH and --font-size PX (the text is rasterized from a TrueType font,
 # by default the first Liberation Sans or DejaVu Sans file that exists, else a
 # built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
-# translucent), --style smooth|crisp (default smooth; crisp draws no anti-aliasing at
+# translucent), --style auto|smooth|crisp (default auto: the panel works out the
+# density of the output when it runs and takes crisp below 150 ppi, the QVGA
+# iPAQs, and smooth from there, the hx4700; crisp draws no anti-aliasing at
 # all, with built-in pixel fonts and icons on whole pixels, and ignores --font,
-# --font-size and --subpixel), --crisp-font fixed|dejavu (default fixed; the
+# --font-size and --subpixel; smooth and crisp win over the density), --dpi N
+# (use this density, 20..1000, for a board whose size is unknown), --height
+# N|auto (default auto: 18 for crisp, scaled with the density for smooth), --crisp-font fixed|dejavu (default fixed; the
 # pixel font of the crisp style: the monospaced misc-fixed set or DejaVu Sans
 # Bold, proportional), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
 # (default auto: LCD text in the order [output] subpixel advertises, in

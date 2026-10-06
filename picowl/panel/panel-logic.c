@@ -1,4 +1,5 @@
 /* panel-logic.c - the pure part of picowl-panel. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "panel-logic.h"
@@ -847,4 +848,57 @@ int pl_text_width(const char *s, int scale)
 {
 	int n = (int)strlen(s);
 	return n ? (n * 6 - 1) * scale : 0;
+}
+
+/* ---- the look ---- */
+
+int pl_density_ppi(int mode_w, int mode_h, int mm_w, int mm_h)
+{
+	if (mode_w <= 0 || mode_h <= 0 || mm_w <= 0 || mm_h <= 0)
+		return 0;
+	double px = sqrt((double)mode_w * mode_w + (double)mode_h * mode_h);
+	double mm = sqrt((double)mm_w * mm_w + (double)mm_h * mm_h);
+
+	return (int)(px / (mm / 25.4) + 0.5);
+}
+
+int pl_height_for_ppi(int ppi)
+{
+	int h = (18 * ppi + PL_DPI_FALLBACK_QVGA / 2) / PL_DPI_FALLBACK_QVGA;
+
+	if (h & 1)
+		h++;
+	return pl_clamp_height(h);
+}
+
+void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out)
+{
+	int ppi = in->dpi_opt > 0 ? clampi(in->dpi_opt, PL_DPI_MIN, PL_DPI_MAX) : 0;
+
+	if (ppi) {
+		out->src = PL_DPI_OVERRIDE;
+	} else if ((ppi = pl_density_ppi(in->mode_w, in->mode_h, in->mm_w, in->mm_h)) > 0) {
+		out->src = PL_DPI_REPORTED;
+	} else {
+		int lng = in->mode_w > in->mode_h ? in->mode_w : in->mode_h;
+
+		ppi = lng >= PL_VGA_LONG_SIDE ? PL_DPI_FALLBACK_VGA : PL_DPI_FALLBACK_QVGA;
+		out->src = PL_DPI_FALLBACK;
+	}
+	out->ppi = ppi;
+	out->vga = ppi >= PL_DPI_SMOOTH_MIN;
+	out->crisp = in->style_opt == PL_STYLE_AUTO ? !out->vga : in->style_opt == PL_STYLE_CRISP;
+	out->height = in->height_opt > 0 ? pl_clamp_height(in->height_opt) :
+		out->crisp ? PL_HEIGHT_DEFAULT : pl_height_for_ppi(ppi);
+}
+
+bool pl_look_same(const struct pl_look *a, const struct pl_look *b)
+{
+	return a->ppi == b->ppi && a->src == b->src && a->vga == b->vga &&
+		a->crisp == b->crisp && a->height == b->height;
+}
+
+const char *pl_dpi_src_name(enum pl_dpi_src s)
+{
+	return s == PL_DPI_REPORTED ? "reported" : s == PL_DPI_FALLBACK ? "fallback" : "override";
 }

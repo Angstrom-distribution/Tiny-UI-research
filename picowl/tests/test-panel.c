@@ -3670,6 +3670,142 @@ static void test_sys(void)
  * degrees, drawn in its own orientation and turned by the buffer transform. */
 /* The turn and the panel's layout an output has for the panel: the hint when it
  * says the display turns the output, else geometry. */
+/* ---- the look: style and height from the density ---- */
+
+static struct pl_look look_of(enum pl_styleopt st, int dpi, int height, int w, int h, int mw,
+	int mh)
+{
+	struct pl_look_in in = { st, dpi, height, w, h, mw, mh };
+	struct pl_look l;
+
+	pl_look_resolve(&in, &l);
+	return l;
+}
+
+static void test_look(void)
+{
+	struct pl_look l;
+
+	/* The boards, as their kernels report them. */
+	CHECK_EQ(pl_density_ppi(240, 320, 53, 71), 115, "h2200 53x71: 115 ppi");
+	CHECK_EQ(pl_density_ppi(240, 320, 57, 77), 106, "h5xxx 57x77: 106 ppi");
+	CHECK_EQ(pl_density_ppi(320, 240, 77, 57), 106, "h3900 77x57 in the landscape scan frame: 106");
+	CHECK_EQ(pl_density_ppi(240, 320, 77, 57), 106, "the same panel, the mode in portrait");
+	CHECK_EQ(pl_density_ppi(480, 640, 60, 80), 203, "hx4700 480x640 on 60x80: 203 ppi");
+	CHECK_EQ(pl_density_ppi(240, 320, 60, 80), 102, "hx4700 240x320 on 60x80: 102 ppi");
+	/* The diagonal does not care how the mode or the size is turned. */
+	CHECK_EQ(pl_density_ppi(640, 480, 60, 80), 203, "mode swapped (hardware rotation): the same");
+	CHECK_EQ(pl_density_ppi(640, 480, 80, 60), 203, "both swapped: the same");
+	CHECK_EQ(pl_density_ppi(0, 320, 57, 77), 0, "no mode: unknown");
+	CHECK_EQ(pl_density_ppi(240, 320, 0, 0), 0, "0x0 mm (old kernels): unknown");
+	CHECK_EQ(pl_density_ppi(240, 320, 57, 0), 0, "a zero side: unknown");
+	CHECK_EQ(pl_density_ppi(240, 320, -1, 77), 0, "a negative size: unknown");
+
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 53, 71);
+	CHECK(l.crisp && !l.vga && l.src == PL_DPI_REPORTED && l.height == 18, "h2200: crisp, 18");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 57, 77);
+	CHECK(l.crisp && l.ppi == 106 && l.height == 18, "h5xxx: crisp, 18");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 320, 240, 77, 57);
+	CHECK(l.crisp && l.ppi == 106 && l.height == 18, "h3900 in the scan frame: crisp, 18");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 480, 640, 60, 80);
+	CHECK(!l.crisp && l.vga && l.ppi == 203 && l.src == PL_DPI_REPORTED, "hx4700 VGA: smooth");
+	CHECK_EQ(l.height, 34, "hx4700 VGA: 18 * 203 / 110 = 33.2, 33, made even: 34");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 60, 80);
+	CHECK(l.crisp && l.ppi == 102 && l.height == 18, "hx4700 QVGA mode on the same size: crisp, 18");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 640, 480, 60, 80);
+	CHECK(!l.crisp && l.ppi == 203, "hx4700 with the mode reported swapped: still smooth");
+
+	/* Without a size: the class of the mode. */
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 0, 0);
+	CHECK(l.crisp && l.src == PL_DPI_FALLBACK && l.ppi == 110 && !l.vga && l.height == 18,
+		"0 mm, 240x320: the QVGA class");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 480, 640, 0, 0);
+	CHECK(!l.crisp && l.src == PL_DPI_FALLBACK && l.ppi == 200 && l.vga && l.height == 34,
+		"0 mm, 480x640: the VGA class");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 640, 480, 0, 0);
+	CHECK(l.vga && l.src == PL_DPI_FALLBACK, "0 mm, 640x480: the VGA class, the long side counts");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 639, 400, 0, 0);
+	CHECK(!l.vga, "0 mm, a long side of 639: QVGA");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 0, 0, 0, 0);
+	CHECK(l.src == PL_DPI_FALLBACK && !l.vga && l.crisp, "nothing at all: the QVGA class");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 800, 600, 0, 0);
+	CHECK(l.vga && !l.crisp, "0 mm, larger than VGA: the VGA class");
+
+	/* The threshold: at 150 smooth, below crisp, decided on the rounded ppi
+	 * that is logged. */
+	l = look_of(PL_STYLE_AUTO, 150, 0, 240, 320, 0, 0);
+	CHECK(!l.crisp && l.vga && l.ppi == 150, "--dpi 150: at the threshold, smooth");
+	l = look_of(PL_STYLE_AUTO, 149, 0, 240, 320, 0, 0);
+	CHECK(l.crisp && !l.vga && l.ppi == 149, "--dpi 149: crisp");
+	CHECK_EQ(pl_density_ppi(240, 320, 40, 54), 151, "40x54 mm: 151 ppi");
+	CHECK_EQ(pl_density_ppi(240, 320, 40, 55), 149, "40x55 mm: 149 ppi");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 40, 54);
+	CHECK(!l.crisp && l.ppi == 151 && l.height == 26, "151 ppi reported: smooth, 18 * 151 / 110 = 24.7: 26");
+	l = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 40, 55);
+	CHECK(l.crisp && l.ppi == 149 && l.height == 18, "149 ppi reported: crisp");
+
+	/* The override. */
+	l = look_of(PL_STYLE_AUTO, 300, 0, 240, 320, 57, 77);
+	CHECK(!l.crisp && l.src == PL_DPI_OVERRIDE && l.ppi == 300, "--dpi 300 over a QVGA output: smooth");
+	l = look_of(PL_STYLE_AUTO, 100, 0, 480, 640, 60, 80);
+	CHECK(l.crisp && l.src == PL_DPI_OVERRIDE && l.ppi == 100 && l.height == 18, "--dpi 100 over a VGA output: crisp");
+	l = look_of(PL_STYLE_AUTO, 1, 0, 240, 320, 0, 0);
+	CHECK_EQ(l.ppi, PL_DPI_MIN, "the override is held to its range (low)");
+	l = look_of(PL_STYLE_AUTO, 99999, 0, 240, 320, 0, 0);
+	CHECK_EQ(l.ppi, PL_DPI_MAX, "the override is held to its range (high)");
+
+	/* The explicit styles win over the density. */
+	l = look_of(PL_STYLE_SMOOTH, 0, 0, 240, 320, 57, 77);
+	CHECK(!l.crisp && l.ppi == 106 && l.height == 18, "--style smooth on a QVGA panel: 18");
+	l = look_of(PL_STYLE_CRISP, 0, 0, 480, 640, 60, 80);
+	CHECK(l.crisp && l.ppi == 203 && l.height == 18, "--style crisp on a VGA panel: 18, not scaled");
+	l = look_of(PL_STYLE_SMOOTH, 0, 0, 480, 640, 60, 80);
+	CHECK(!l.crisp && l.height == 34, "--style smooth on a VGA panel: scaled");
+	l = look_of(PL_STYLE_CRISP, 300, 0, 240, 320, 57, 77);
+	CHECK(l.crisp && l.ppi == 300, "--style crisp with --dpi 300: crisp, the density is still known");
+
+	/* The height: an explicit one wins in both classes, within the range. */
+	l = look_of(PL_STYLE_AUTO, 0, 40, 480, 640, 60, 80);
+	CHECK_EQ(l.height, 40, "--height 40 on a VGA panel");
+	l = look_of(PL_STYLE_AUTO, 0, 40, 240, 320, 57, 77);
+	CHECK_EQ(l.height, 40, "--height 40 on a QVGA panel (crisp, whole-number scales)");
+	l = look_of(PL_STYLE_AUTO, 0, 500, 480, 640, 60, 80);
+	CHECK_EQ(l.height, PL_HEIGHT_MAX, "--height too large: clamped");
+	l = look_of(PL_STYLE_AUTO, 0, 3, 480, 640, 60, 80);
+	CHECK_EQ(l.height, PL_HEIGHT_MIN, "--height too small: clamped");
+
+	/* The height of the smooth style: 18 at 110, even, within the range. */
+	CHECK_EQ(pl_height_for_ppi(110), 18, "110 ppi: 18");
+	CHECK_EQ(pl_height_for_ppi(106), 18, "106 ppi: 17.3, 17, made even: 18");
+	CHECK_EQ(pl_height_for_ppi(150), 26, "150 ppi: 24.5, 25, made even: 26");
+	CHECK_EQ(pl_height_for_ppi(200), 34, "200 ppi: 32.7, 33, made even: 34");
+	CHECK_EQ(pl_height_for_ppi(220), 36, "220 ppi: 36");
+	CHECK_EQ(pl_height_for_ppi(20), PL_HEIGHT_MIN, "20 ppi: the least");
+	CHECK_EQ(pl_height_for_ppi(1000), PL_HEIGHT_MAX, "1000 ppi: the most");
+	for (int ppi = PL_DPI_MIN; ppi <= PL_DPI_MAX; ppi++) {
+		int h = pl_height_for_ppi(ppi);
+
+		if (h < PL_HEIGHT_MIN || h > PL_HEIGHT_MAX || (h & 1) || h < pl_height_for_ppi(ppi - 1 < PL_DPI_MIN ? PL_DPI_MIN : ppi - 1)) {
+			CHECK(0, "the height is in range, even and does not shrink with the density");
+			break;
+		}
+	}
+
+	/* The re-evaluation: what a mode switch, a rotation or a hotplug does. */
+	struct pl_look a = look_of(PL_STYLE_AUTO, 0, 0, 480, 640, 60, 80), b;
+	b = look_of(PL_STYLE_AUTO, 0, 0, 640, 480, 60, 80);
+	CHECK(pl_look_same(&a, &b), "a rotation (the mode turned) changes nothing");
+	b = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 60, 80);
+	CHECK(!pl_look_same(&a, &b) && b.crisp && b.height == 18, "the hx4700 switched to 240x320: crisp, 18");
+	a = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 0, 0);
+	b = look_of(PL_STYLE_AUTO, 0, 0, 240, 320, 57, 77);
+	CHECK(!pl_look_same(&a, &b) && a.crisp == b.crisp && a.height == b.height,
+		"the size arrived: the source changed, the look did not");
+	CHECK_STR(pl_dpi_src_name(PL_DPI_REPORTED), "reported", "source name");
+	CHECK_STR(pl_dpi_src_name(PL_DPI_FALLBACK), "fallback", "source name");
+	CHECK_STR(pl_dpi_src_name(PL_DPI_OVERRIDE), "override", "source name");
+}
+
 static void test_rot_hint(void)
 {
 	struct pl_rot_hint none = { 0 };
@@ -3775,6 +3911,7 @@ int main(void)
 	test_layout_bottom();
 	test_strip();
 	test_rot_hint();
+	test_look();
 	test_touch();
 	test_popup();
 	test_text_buttons();

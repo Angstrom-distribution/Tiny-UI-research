@@ -483,6 +483,61 @@ struct pl_rect pl_rect_to_surface(enum pl_strip strip, struct pl_rect r, int bw,
 /* A point of the surface, as a pointer event reports it, in the buffer. */
 void pl_point_to_buffer(enum pl_strip strip, int sx, int sy, int bw, int bh, int *x, int *y);
 
+/* ---- the look: style and height from the density of the display ---- */
+
+/* A QVGA iPAQ (about 106 to 115 ppi) cannot carry anti-aliased text at 18 px,
+ * a VGA one (hx4700, about 203 ppi) can. The panel finds out at run time, from
+ * what the compositor says about the output, so that one binary serves both. */
+#define PL_DPI_SMOOTH_MIN 150	/* at or above this: the smooth style */
+#define PL_DPI_FALLBACK_QVGA 110
+#define PL_DPI_FALLBACK_VGA 200
+/* The long side from which a mode without a physical size counts as VGA. */
+#define PL_VGA_LONG_SIDE 640
+#define PL_DPI_MIN 20
+#define PL_DPI_MAX 1000
+
+enum pl_styleopt { PL_STYLE_AUTO, PL_STYLE_SMOOTH, PL_STYLE_CRISP };
+enum pl_dpi_src { PL_DPI_REPORTED, PL_DPI_FALLBACK, PL_DPI_OVERRIDE };
+
+/* What the look is made from: the options (style_opt, dpi_opt 0 for none,
+ * height_opt 0 for auto) and the output as the client sees it (the mode in
+ * use, 0x0 when none came; the physical size in mm, 0 when unknown). */
+struct pl_look_in {
+	enum pl_styleopt style_opt;
+	int dpi_opt;
+	int height_opt;
+	int mode_w, mode_h;
+	int mm_w, mm_h;
+};
+
+struct pl_look {
+	int ppi;
+	enum pl_dpi_src src;
+	bool vga;		/* the density class: ppi at or above the threshold */
+	bool crisp;		/* the style in effect */
+	int height;
+};
+
+/* Pixels per inch of a mode on a panel of mm_w x mm_h, rounded: the ratio of
+ * the diagonals, so that the orientation, a rotation and a scan frame turned
+ * against the panel (the h3900 reports 77x57) do not matter. 0 when the size
+ * or the mode is missing. */
+int pl_density_ppi(int mode_w, int mode_h, int mm_w, int mm_h);
+
+/* The bar height of the smooth style for a density: 18 px at 110 ppi, scaled
+ * with it, rounded up to even, within the valid range. */
+int pl_height_for_ppi(int ppi);
+
+/* Resolves the style, the density and the height. The density is the override,
+ * else what the output reports, else the class of the mode (see
+ * PL_VGA_LONG_SIDE). The style is the option, or crisp below the threshold and
+ * smooth from it. The height is the option, else 18 for crisp (whole-number
+ * scales) and pl_height_for_ppi for smooth. */
+void pl_look_resolve(const struct pl_look_in *in, struct pl_look *out);
+
+bool pl_look_same(const struct pl_look *a, const struct pl_look *b);
+const char *pl_dpi_src_name(enum pl_dpi_src s);
+
 /* ---- fallback font ---- */
 
 /* 7 rows of a 5 pixel wide glyph, bit 4 of each byte is the leftmost pixel.
