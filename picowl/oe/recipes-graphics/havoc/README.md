@@ -1,8 +1,8 @@
 # havoc
 
-The havoc recipe itself lives in meta-handhelds, not in this layer. This directory only carries the patches that make havoc show picowl's on-screen keyboard and keep the bytes it sends the compositor small.
+This directory carries two patches for the terminal havoc: one makes havoc show picowl's on-screen keyboard, the other keeps the bytes it sends the compositor small. The layer has no havoc recipe and no bbappend. The havoc recipe is expected in meta-handhelds, which is not checked here, so the patches are meant to be added to that recipe's `SRC_URI`.
 
-The files in `files/` go into the `SRC_URI` of that recipe, in this order (`file://0001-...patch` and `file://0002-...patch`, with this directory on `FILESEXTRAPATHS` in a bbappend). Both have `Upstream-Status: Pending`.
+The files in `files/` go into the `SRC_URI` of that recipe, in this order (`file://0001-...patch` and `file://0002-...patch`, with this directory on `FILESEXTRAPATHS` in a bbappend). Both carry `Upstream-Status: Pending`.
 
 | Patch | What it is for |
 |---|---|
@@ -20,13 +20,13 @@ git am /path/to/0001-Bind-text-input-v3-so-an-on-screen-keyboard-can-appe.patch 
 
 ## 0001: text-input-v3
 
-havoc did not bind `zwp_text_input_manager_v3`, so the compositor never learned that the terminal takes text and the on-screen keyboard (`wvkbd-ipaq --auto`, driven by picowl's text-input to input-method relay, `doc/design/osk.md` part 3) stayed hidden. With the patch havoc creates a text input for its seat and, when the compositor sends `enter` for the surface, sends `enable`, content type terminal, the cursor cell as cursor rectangle and `commit`. On `leave` it sends `disable` and `commit`.
+havoc did not bind `zwp_text_input_manager_v3`, so the compositor never learned that the terminal takes text and the on-screen keyboard (`wvkbd-ipaq --auto`, driven by picowl's text-input to input-method relay, [`doc/design/osk.md`](../../../doc/design/osk.md) part 3, section 4) stayed hidden. With the patch havoc creates a text input for its seat and, when the compositor sends `enter` for the surface, sends `enable`, content type terminal, the cursor cell as cursor rectangle and `commit`. On `leave` it sends `disable` and `commit`.
 
 It enables once per focus, never per key. Hiding the keyboard with the toggle button therefore stays in effect until the focus leaves and comes back. Typing is unchanged: keys, including those from the on-screen keyboard, still arrive through `wl_keyboard`, and the text-input text events are ignored. Without a text-input manager nothing is created and nothing changes. The patch also adds `text-input-unstable-v3.xml` to the Makefile's generated protocols, copied from wayland-protocols like the others, so the recipe needs no new dependency.
 
 ## 0002: per-cell damage and an opaque region
 
-Before the patch every redraw sent `wl_surface.damage_buffer(0, 0, width, height)`, so one typed character made the compositor take in the whole frame again: 153,600 bytes at 240x320 RGB565, about 17 to 19 ms of bus on an iPAQ h2200 at the 7.9 to 9.1 MB/s the MediaQ copy path reaches (`doc/design/mediaq-c8.md`, bus limit). libtsm's cell ages cannot tell what changed, because libtsm stamps the whole screen on every erase, scroll, selection and colour change (its own "more sophisticated ageing" TODOs), which is exactly what editing a line at a prompt does.
+Before the patch every redraw sent `wl_surface.damage_buffer(0, 0, width, height)`, so one typed character made the compositor take in the whole frame again: 153,600 bytes at 240x320 RGB565, about 17 to 19 ms of bus on an iPAQ h2200 at the 7.9 to 9.1 MB/s the MediaQ copy path reaches ([`doc/design/mediaq-c8.md`](../../../doc/design/mediaq-c8.md), bus limit; 153,600 / 9.1e6 = 16.9 ms and 153,600 / 7.9e6 = 19.4 ms, an estimate from that measured rate). libtsm's cell ages cannot tell what changed, because libtsm stamps the whole screen on every erase, scroll, selection and colour change (its own "more sophisticated ageing" TODOs), which is exactly what editing a line at a prompt does.
 
 With the patch havoc reduces each cell to a key of what decides its pixels (symbol, width, and the two colours with the cursor, selection and inverse mode already applied) and keeps two sets of keys:
 
@@ -52,12 +52,12 @@ When the configured opacity is 255 (the code default, not the 230 of the sample 
    - `damage`: typing one character, at the end of a line and past it, cursor moves, a newline, selection start, drag and stop, a palette change, output that changes nothing (no commit), a scroll, scrolling blank lines, padding, resize shrink then grow, and a scale change. Each is held to a bound computed from the cell size (a character is at most 3 cells, a selection step at most 10, and always 100 times less than the buffer).
    - `lifecycle`: a compositor that never releases a buffer (havoc must stop drawing after both are held), one that releases after a delay, and one that releases at the next commit.
    - `opaque`: the opaque region and buffer format for opacity 255 and 230, after a resize, at scale 1.5 and with padding.
-   - `golden`: a scripted sequence (typing, colours and attributes, cursor movement, erase, insert and delete of lines and characters, scroll regions, wide characters and overwriting half of them, selection with the cursor hidden and shown over it, scroll then edit, alternate screen, palette changes, reverse video, shrink then grow) followed by 70 seeded random steps, 194 steps in all, each with a snapshot of the window. The sequence runs with `HAVOC_FULL_REDRAW=1` as the reference and again incrementally with each release policy, and every snapshot must be byte identical to the reference's. A second configuration (scrollback and padding) runs the reference and one incremental run.
-   `HAVOC_TEST_GROUPS="damage golden" tests/run.sh DIR` runs only some groups. The whole run takes about 3 minutes.
+   - `golden`: a scripted sequence (typing, colours and attributes, cursor movement, erase, insert and delete of lines and characters, scroll regions, wide characters and overwriting half of them, selection with the cursor hidden and shown over it, scroll then edit, alternate screen, palette changes, reverse video, shrink then grow) followed by 70 seeded random steps, each with a snapshot of the window. The sequence runs with `HAVOC_FULL_REDRAW=1` as the reference and again incrementally with each release policy, and every snapshot must be byte identical to the reference's. A second configuration (scrollback and padding) runs the reference and one incremental run.
+   `HAVOC_TEST_GROUPS="damage golden" tests/run.sh DIR` runs only some groups. The run time (about 3 minutes in the last run) and the number of golden steps (194) were reported when the tests were written and were not re-checked for this text.
 
 `tests/mutations.sh PATCHED_HAVOC_SOURCE_DIR` breaks the damage code in the ways listed in `tests/mutate.py` (the cursor cell, the cell the cursor left, damage from the buffer's own state instead of what is shown, drawing into a held buffer, never reusing a released buffer, no full damage on resize or scale, no handling of wide cells, a rectangle one cell short) and checks that the tests fail for each.
 
-`tests/run.sh --measure HAVOC_WITHOUT_0002 PATCHED_HAVOC_SOURCE_DIR` builds both without the sanitizers and prints the damaged bytes of some scenarios for each. For the 80x24 window of the container (800x432 pixels, 1,382,400 bytes per full frame):
+`tests/run.sh --measure HAVOC_WITHOUT_0002 PATCHED_HAVOC_SOURCE_DIR` builds both without the sanitizers and prints the damaged bytes of some scenarios for each. The measurement is [meas, container]: damaged pixels times 4 bytes, counted by the fake compositor, not bus time and not a board. For the 80x24 window of the container (800x432 pixels, cells of 10x18, 1,382,400 bytes per full frame):
 
 | scenario | commits before | bytes before | commits after | bytes after | reduction |
 |---|---:|---:|---:|---:|---:|
@@ -67,10 +67,10 @@ When the configured opacity is 255 (the code default, not the 230 of the sample 
 | top-like refresh, 20 times | 40 | 55,296,000 | 40 | 3,774,240 | 15x |
 | scroll of one line | 1 | 1,382,400 | 1 | 1,002,240 | 1.4x |
 
-One typed character is 1,440 bytes (the cell it fills and the cell the cursor moves to). A scroll changes almost every cell, so there is nothing to save, and the commit counts of `seq` depend on how the output is split into reads, so its row says more about the commit count than the damage. havoc has no cursor blink timer; hide and show (DECTCEM) is what a blinking program or a future timer would send.
+One typed character is 1,440 bytes (the cell it fills and the cell the cursor moves to, 10x18 pixels at 4 bytes each). On the panel the same two cells are about half that at RGB565 (an estimate). A scroll changes almost every cell, so there is nothing to save, and the commit counts of `seq` depend on how the output is split into reads, so its row says more about the commit count than the damage. havoc has no cursor blink timer; hide and show (DECTCEM) is what a blinking program or a future timer would send.
 
 The tests need gcc, make, pkg-config, wayland-scanner, wayland-protocols, libwayland-dev, libxkbcommon-dev (plus xkb-data at run time) and python3 (python3-pil is not needed). On a Mac they are meant to run in a container (`container run`, debian:trixie), with the sources copied into the container.
 
-### Not covered
+### Not verified
 
-A real compositor and a board. Whether picowl's wlroots accepts the damage as sent, releases shm buffers at commit or holds them, takes a fractional-scale viewport's rounding at the one pixel the patch adds, and what the damage costs on the panel's bus are not tested; the fake compositor takes the protocol at its word. The opacity the board runs with is not known (the code default is 255, the sample configuration 230): at 230 only the damage applies, not the opaque region. The tests use havoc's built-in font, so what it draws for wide characters is whatever that font has.
+Everything above ran against the fake compositor in `tests/fake-compositor.c`, which takes the protocol at its word. Not verified: havoc with picowl's own compositor or on a board, whether picowl's wlroots accepts the damage as sent, whether it releases shm buffers at commit or holds them, how it rounds a fractional-scale viewport at the one pixel the patch adds, and what the damage costs on the panel's bus. These checks are on the [roadmap](../../../doc/design/roadmap.md). The opacity the board runs with is not known (the code default is 255, the sample configuration 230): at 230 only the damage applies, not the opaque region. The tests use havoc's built-in font, so what it draws for wide characters is whatever that font has.

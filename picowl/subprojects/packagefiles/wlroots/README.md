@@ -19,7 +19,21 @@ They are applied by:
   entries in `SRC_URI`
 
 A host build against a wlroots prefix needs that wlroots built from the patched
-tree: picowl does not compile against an unpatched one.
+tree: picowl does not compile against an unpatched one. When meson finds an
+installed `wlroots-0.19` instead of building the wrap, `meson.build` probes it
+at configure time and stops with an error in two cases: the header
+`wlr/backend/drm.h` lacks `wlr_drm_connector_set_copy_type` (patch 0003, the
+message names 0001 to 0003) or lacks `WLR_DRM_LEASE_OVERLAY_PLANES` (patch
+0004). Patches 0001, 0002 and 0005 add nothing to a header, so a wlroots that
+has 0003 and 0004 but not those three passes the check. The wrapped build
+applies all five and is not probed.
+
+Upstream status, from the `Upstream-Status` line in each patch header: 0001 to
+0004 are `Inappropriate [picowl specific]`, and 0005 is `Pending`. None has been
+submitted upstream as far as the repository shows. The headers still say
+`[PATCH n/3]` (0001 to 0003) and `[PATCH 4/4]`, `[PATCH 5/5]`; the numbering
+was not updated when patches were added, and the order is the one in the
+filenames.
 
 New public API (`include/wlr/backend/drm.h`, patch 0003):
 
@@ -229,9 +243,9 @@ hx4700 w100 overlay). Separately, the grant is a use-after-free (below).
    connectors are always withdrawn by a grant, so the lease now keeps none
    (`connectors = NULL`, `n_connectors = 0`).
 
-Whether a later upstream release fixes (3) was not checked (no network access
-when the patch was written). The overlay planes of the out-of-tree iPAQ
-drivers are unverified: check `modetest -p` for their `possible_crtcs`.
+Not verified: whether a later upstream release fixes (3), and the overlay
+planes of the out-of-tree iPAQ drivers (their `possible_crtcs` show in
+`modetest -p` on a board). See the [roadmap](../../../doc/design/roadmap.md).
 
 **Tests:** none run in the build container (no `/dev/dri`).
 `tests/lease-vkms.sh` runs a full lease on vkms (opt-in with `PW_LEASE_VKMS=1`, needs root); with ASan builds
@@ -258,7 +272,7 @@ updates recompute their regions.
 
 **Tests:** `tests/test-scene-opaque.c` replays the commit sequence on a bare
 scene and checks the visible region of a node below; `tests/panel-e2e.sh`
-section H opens the row over a window that was already playing and checks the
+section I opens the row over a window that was already playing and checks the
 pixel under the row.
 
 ## Updating the patches
@@ -298,4 +312,4 @@ On a device with the features, check rotation (the hardware rotation commit, tou
 calibration, no flicker while rotating), copy-type (the swapchain stays at one
 slot, the output is not disabled when a framebuffer is dropped) and the
 kernel's CLOSEFB (swapchain replacement and rotation do not flicker). See
-`doc/zero-copy.md`, section "Hardware-only checklist", for the full list.
+[doc/zero-copy.md](../../../doc/zero-copy.md), section "Hardware-only checklist", for the full list.
