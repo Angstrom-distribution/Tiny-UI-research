@@ -74,8 +74,11 @@ FILES:${PN} += "${nonarch_base_libdir}/udev/rules.d/90-picowl-backlight.rules"
 # as root) has.
 PACKAGES =+ "${PN}-panel"
 FILES:${PN}-panel = "${bindir}/picowl-panel"
-# The panel draws its text from a TrueType font it finds at run time; without one it falls back
-# to a blocky built-in bitmap font. liberation-fonts installs the faces it looks for.
+# The smooth style of the panel (chosen from 150 ppi, the hx4700) draws its text from a TrueType
+# font it finds at run time; without one it falls back to a blocky built-in bitmap font.
+# liberation-fonts installs the faces it looks for. The crisp style of the QVGA boards has its
+# fonts compiled in and never loads it, but one package serves every board, so the recommendation
+# stays; an image for QVGA boards only can drop it.
 RRECOMMENDS:${PN}-panel = "liberation-fonts"
 
 CONFFILES:${PN} += "${sysconfdir}/picowl.ini"
