@@ -40,10 +40,15 @@
 #     colours, the proportional DejaVu bitmaps add none), the smooth style has
 #     hundreds, the 1 px lines of the battery are whole rows and columns,
 #     --font, --font-size and --subpixel are ignored.
+#  V: the bar on the short side of an output rotated by 90 or 270 degrees (the
+#     strip): the raw scanout of the bar and of the rows is pixel-identical to
+#     the portrait bar, placement, exclusive zone, buffer transform and usable
+#     area, --edge top, a rotation while the panel runs, and taps, a slider drag
+#     and the auto-close through a virtual pointer at the logical position.
 # Opt-in with PW_PANEL_TEST_SETTIME=1 (needs root, sets the system clock and
 # puts it back): a change of the system time updates the clock at once, and
 # the minute timer fires.
-# usage: panel-e2e.sh PICOWL PANEL PW_TEST_CLIENT PW_KEY_CLIENT PW_FAKE_CTL PW_BARE_SERVER PW_CAPTURE_CLIENT
+# usage: panel-e2e.sh PICOWL PANEL PW_TEST_CLIENT PW_KEY_CLIENT PW_FAKE_CTL PW_BARE_SERVER PW_CAPTURE_CLIENT PW_POINTER_CLIENT
 PICOWL=$1
 PANEL=$2
 CLIENT=$3
@@ -53,6 +58,7 @@ KEYS=$4
 FAKECTL=$(cd "$(dirname "$5")" && pwd)/$(basename "$5")
 BARE=$6
 CAPTURE=$7
+POINTER=$8
 DIR=$(mktemp -d)
 chmod 700 "$DIR"
 export XDG_RUNTIME_DIR=$DIR
@@ -1329,6 +1335,275 @@ has "$DIR/u.out" '^style font=' "U --style smooth is the default style"
 has "$DIR/u.err" "is not smooth or crisp" "U the message for a bad style"
 stop_picowl
 echo "panel-e2e: U ok"
+
+# ---- V: the bar on the short side of a rotated output ----
+# [output] * = 90 or 270 turns the 240x320 output into a 320x240 view; the bar
+# is then a vertical strip on the edge that is the physical top of the device,
+# drawn as in portrait and turned onto the strip by the buffer transform. The
+# raw scanout (the capture is in the panel's own orientation) must show the
+# same bar as at normal: the headless backend rotates in software, hardware
+# rotation is not testable here.
+export PICOWL_TEST_VIRTUAL_POINTER=1
+# v_picowl ROT [SUBPIXEL]: picowl whose output is turned by ROT with software
+# rotation, advertising SUBPIXEL if given
+v_picowl() {
+	cp "$DIR/picowl.base" "$DIR/picowl.ini"
+	printf '\n[output]\n* = %s\n' "$1" >>"$DIR/picowl.ini"
+	[ -n "$2" ] && printf 'subpixel = %s\n' "$2" >>"$DIR/picowl.ini"
+	printf '\n[rotation]\n* = software\n' >>"$DIR/picowl.ini"
+	start_picowl
+}
+# v_rows NAME HEIGHT: HEIGHT rows of the scanout from row $VY (the top), in
+# $DIR/NAME.rows
+VY=0
+v_rows() {
+	"$CAPTURE" --dump "0,$VY,240,$2" >"$DIR/$1.cap" 2>&1 || fail "V: capture failed: $(cat "$DIR/$1.cap")"
+	grep '^pw-capture-client: row ' "$DIR/$1.cap" >"$DIR/$1.rows"
+	[ "$(wc -l <"$DIR/$1.rows")" -eq "$2" ] || fail "V: the capture of $1 has $(wc -l <"$DIR/$1.rows") rows, wanted $2"
+}
+# v_shot NAME ROT HEIGHT SUBPIXEL PANEL-ARGS...: one run of picowl and the panel
+v_shot() {
+	vn=$1; vrot=$2; vh=$3; vsp=$4; shift 4
+	v_picowl "$vrot" "$vsp"
+	start_panel "$vn" "$@"
+	sleep 0.4
+	v_rows "$vn" "$vh"
+	stop_panel "$vn"
+	stop_picowl
+}
+# v_same WHAT HEIGHT SUBPIXEL PANEL-ARGS...: the top HEIGHT rows of the scanout
+# at 90 and at 270 are the ones of the portrait bar, pixel for pixel. A minute
+# that turns during the three runs makes the clocks differ: the runs are
+# repeated.
+v_same() {
+	vwhat=$1; vh=$2; vsp=$3; shift 3
+	vtry=0
+	while :; do
+		vtry=$((vtry + 1))
+		v_shot vref normal "$vh" "$vsp" "$@"
+		v_shot v90 90 "$vh" "$vsp" "$@"
+		v_shot v270 270 "$vh" "$vsp" "$@"
+		C0=$(val "$DIR/vref.out" clock text)
+		[ "$(val "$DIR/v90.out" clock text)" = "$C0" ] && [ "$(val "$DIR/v270.out" clock text)" = "$C0" ] && break
+		[ $vtry -ge 3 ] && fail "V $vwhat: the clock changed in each of three tries"
+	done
+	VCOLOURS=$(sed 's/^[^ ]* [^ ]* [^ ]* //' "$DIR/vref.rows" | tr ' ' '\n' | sort -u | wc -l)
+	[ "$VCOLOURS" -ge 3 ] || fail "V $vwhat: the portrait bar has only $VCOLOURS colours, nothing to compare"
+	for vt in 90 270; do
+		VDIFF=$(diff "$DIR/vref.rows" "$DIR/v$vt.rows" | grep -c '^<')
+		[ "$VDIFF" -eq 0 ] || fail "V $vwhat: at $vt $VDIFF of the $vh rows of the scanout differ from the portrait bar: $(diff "$DIR/vref.rows" "$DIR/v$vt.rows" | head -n 4 | cut -c1-150)"
+	done
+	echo "panel-e2e: V $vwhat: pixel-identical to portrait at 90 and 270 ($vh rows, $VCOLOURS colours, clock $C0)"
+}
+# The bar, the slider row (translucent, over the background) and the date row,
+# grayscale text; then with the stripes the output advertises.
+v_same "bar" 18 none --subpixel none
+v_same "slider row" 54 none --subpixel none --inject "ibl"
+v_same "date row" 54 none --subpixel none --inject "icl"
+v_same "battery row" 54 none --subpixel none --inject "ibat"
+v_same "bar with subpixel text" 18 horizontal_rgb --subpixel auto
+v_same "date row with subpixel text" 54 horizontal_rgb --subpixel auto --inject "icl"
+v_same "crisp bar" 18 none --style crisp
+v_same "crisp slider row" 54 none --style crisp --inject "ibl"
+# --bottom is the physical bottom: the last rows of the scanout.
+VY=302
+v_same "bottom bar" 18 none --subpixel none --bottom
+VY=0
+
+# Subpixel text in the strip: the panel's own stripes count, so the portrait
+# rule holds and the clock has colour fringes in the scanout.
+v_picowl 90 horizontal_rgb
+start_panel v --subpixel auto
+has "$DIR/v.out" '^text subpixel=rgb$' "V the strip draws subpixel text with the native stripes"
+sleep 0.3
+CR=$(val "$DIR/v.out" clock rect)
+h_spread "$(comp "$CR" 1),$(comp "$CR" 2),$(comp "$CR" 3),$(comp "$CR" 4)"
+[ "$HINK" -gt 30 ] || fail "V: the clock has $HINK ink pixels in the scanout"
+awk "BEGIN { exit !($HSPREAD > 0.35) }" || fail "V: spread $HSPREAD: no colour fringes on the clock in the strip"
+echo "panel-e2e: V subpixel text in the strip: spread $HSPREAD over $HINK pixels"
+stop_panel V
+stop_picowl
+
+# Where the surface is: the edge, the transform, the sizes, the input region in
+# surface coordinates, the exclusive zone and the usable area.
+for rot in 90 270; do
+	if [ $rot = 90 ]; then
+		EDGE=right; TR=1; ANCH=11; SIDE=right
+	else
+		EDGE=left; TR=3; ANCH=7; SIDE=left
+	fi
+	v_picowl $rot
+	start_panel v --subpixel none
+	has "$DIR/v.out" "^placement edge=$EDGE transform=$TR surface=18x240 input=0,0,18,240\$" "V $rot placement"
+	has "$DIR/v.out" '^panel width=240 height=18 bar=18 row=0 ' "V $rot the layout is the portrait one"
+	has "$DIR/v.out" '^surface exclusive=18 input=0,0,240,18$' "V $rot the bar's own frame"
+	M=$(mapped)
+	[ "$M" = 302x240 ] || fail "V $rot: a toplevel beside the strip is $M, wanted 302x240 (the strip's width, not height, is taken)"
+	stop_panel V
+	# with the row open the surface grows by the row's height, the zone does not
+	start_panel v --subpixel none --inject "ibl"
+	has "$DIR/v.out" "^placement edge=$EDGE transform=$TR surface=54x240 input=0,0,54,240\$" "V $rot placement with the row open"
+	has "$DIR/v.out" '^panel width=240 height=54 bar=18 row=36 ' "V $rot the row is in the buffer"
+	M=$(mapped)
+	[ "$M" = 302x240 ] || fail "V $rot: with the row open a toplevel is $M, wanted 302x240"
+	stop_panel V
+	stop_picowl
+	# on the wire
+	v_picowl $rot
+	WAYLAND_DEBUG=1 "$PANEL" --dump-state --subpixel none --inject "ibl;ibl" >"$DIR/w.out" 2>"$DIR/w.err" || fail "V $rot: the panel failed with WAYLAND_DEBUG"
+	grep -q 'protocol error' "$DIR/w.err" && fail "V $rot: protocol error"
+	grep -q "set_anchor($ANCH)" "$DIR/w.err" || fail "V $rot: the anchor is not $EDGE|top|bottom ($ANCH)"
+	[ "$(grep -c 'set_anchor' "$DIR/w.err")" = 1 ] || fail "V $rot: the anchor was sent more than once"
+	[ "$(grep -c 'set_exclusive_zone(18)' "$DIR/w.err")" = 1 ] || fail "V $rot: the exclusive zone is not the bar's width, once"
+	grep 'set_size' "$DIR/w.err" | sed 's/.*set_size/set_size/' | tr '\n' ' ' >"$DIR/w.sizes"
+	[ "$(cat "$DIR/w.sizes")" = "set_size(18, 0) set_size(54, 0) set_size(18, 0) " ] || fail "V $rot: the sizes asked for: $(cat "$DIR/w.sizes")"
+	grep -q "set_buffer_transform($TR)" "$DIR/w.err" || fail "V $rot: the buffer transform is not $TR"
+	grep -q 'set_buffer_transform(0)' "$DIR/w.err" && fail "V $rot: a buffer was attached with the transform 0"
+	grep 'create_buffer' "$DIR/w.err" | sed 's/.*create_buffer/create_buffer/; s/new id wl_buffer[#@][0-9]*, //' | tr '\n' ' ' >"$DIR/w.bufs"
+	grep -q '^create_buffer(0, 240, 18, 480, 909199186) create_buffer(0, 240, 54, 960, 0) create_buffer(0, 240, 18, 480, 909199186) $' "$DIR/w.bufs" ||
+		fail "V $rot: the buffers are in the panel's own orientation, 240 wide: $(cat "$DIR/w.bufs")"
+	stop_picowl
+done
+echo "panel-e2e: V placement, exclusive zone, transform and usable area ok"
+
+# --edge top: the old place, at any rotation: along the long edge of the
+# rotated view, which is a column of the scanout.
+v_picowl 90
+start_panel v --edge top --subpixel none
+has "$DIR/v.out" '^panel width=320 height=18 bar=18 ' "V --edge top: laid out for the long edge"
+has "$DIR/v.out" '^placement edge=top transform=0 surface=320x18 ' "V --edge top: on the top of the view"
+M=$(mapped)
+[ "$M" = 320x222 ] || fail "V --edge top: a toplevel is $M, wanted 320x222"
+sleep 0.3
+"$CAPTURE" --palette 18,0,222,18 >"$DIR/v.cap" 2>&1 || fail "V: capture failed"
+has "$DIR/v.cap" 'palette 1$' "V --edge top: nothing of the bar in the physical top rows beyond the first 18 columns"
+"$CAPTURE" --palette 0,0,18,320 >"$DIR/v.cap" 2>&1 || fail "V: capture failed"
+grep -q 'palette 1$' "$DIR/v.cap" && fail "V --edge top: the bar is not on the first 18 columns"
+stop_panel V
+stop_picowl
+"$PANEL" --edge sideways --dump-state >"$DIR/v.out" 2>"$DIR/v.err"
+[ $? -eq 2 ] || fail "V: --edge sideways is not an error"
+has "$DIR/v.err" "is not auto or top" "V the message for a bad edge"
+"$PANEL" --help | grep -q -- '--edge MODE' || fail "V: --edge is not in the usage text"
+# the other transforms keep the bar on the top: 180, and flipped ones
+for rot in 180 flipped flipped-90; do
+	v_picowl $rot
+	start_panel v --subpixel none
+	has "$DIR/v.out" '^placement edge=top transform=0 ' "V $rot: the bar stays on the top edge"
+	stop_panel V
+	stop_picowl
+done
+echo "panel-e2e: V --edge and the other transforms ok"
+
+# A rotation while the panel runs: normal -> 90 -> 180 -> 270 -> normal, each
+# time the edge, the buffer and the scanout follow.
+v_picowl normal
+start_panel v --subpixel none
+sleep 0.3
+v_rows vref 18
+"$KEYS" 397 || fail "V: key client failed"
+wait_for "$DIR/v.out" '^placement edge=right transform=1 surface=18x240 ' 5 "V rotating to 90"
+sleep 0.4
+v_rows vlive 18
+C0=$(val "$DIR/v.out" clock text)
+if [ "$(diff "$DIR/vref.rows" "$DIR/vlive.rows" | grep -c '^<')" -ne 0 ]; then
+	# a minute that turned is the only excuse
+	[ "$C0" != "$(date +%H:%M)" ] || fail "V: after the rotation to 90 the scanout differs from the portrait bar"
+fi
+M=$(mapped)
+[ "$M" = 302x240 ] || fail "V: after the rotation to 90 a toplevel is $M, wanted 302x240"
+"$KEYS" 397 || fail "V: key client failed"
+wait_for "$DIR/v.out" '^placement edge=top transform=0 surface=240x18 ' 5 "V rotating to 180"
+M=$(mapped)
+[ "$M" = 240x302 ] || fail "V: at 180 a toplevel is $M, wanted 240x302"
+"$KEYS" 397 || fail "V: key client failed"
+wait_for "$DIR/v.out" '^placement edge=left transform=3 surface=18x240 ' 5 "V rotating to 270"
+sleep 0.4
+v_rows vlive 18
+if [ "$(diff "$DIR/vref.rows" "$DIR/vlive.rows" | grep -c '^<')" -ne 0 ]; then
+	[ "$(val "$DIR/v.out" clock text)" != "$(date +%H:%M)" ] || fail "V: after the rotation to 270 the scanout differs from the portrait bar"
+fi
+M=$(mapped)
+[ "$M" = 302x240 ] || fail "V: after the rotation to 270 a toplevel is $M, wanted 302x240"
+"$KEYS" 397 || fail "V: key client failed"
+wait_for "$DIR/v.out" '^placement edge=top transform=0 surface=240x18 .*' 5 "V rotating back to normal"
+[ "$(grep -c '^placement edge=top transform=0 ' "$DIR/v.out")" -ge 3 ] || fail "V: no return to the top edge"
+stop_panel V
+stop_picowl
+echo "panel-e2e: V rotation while the panel runs ok"
+
+# Touch: the pointer is put where the physical bar is, in the logical view
+# (the scanout turned back: at 90 the physical top is the right edge, at 270
+# the left one), and everything works as in portrait.
+# v_at ROT PX PY: the position in the 320x240 view of the point PX,PY of the
+# 240x320 scanout
+v_at() {
+	if [ "$1" = 90 ]; then echo "$((319 - $3)),$2"; else echo "$3,$((239 - $2))"; fi
+}
+# v_popup FILE: the row the panel last said is open
+v_popup() { grep '^panel ' "$1" | tail -n 1 | sed 's/.* popup=//'; }
+# v_wait_popup FILE POPUP SECONDS WHAT: wait until the panel's last state has
+# POPUP open (an earlier line does not count)
+v_wait_popup() {
+	i=0
+	while [ "$(v_popup "$1")" != "$2" ]; do
+		i=$((i + 1)); [ $i -gt $(($3 * 20)) ] && fail "$4: the row is '$(v_popup "$1")', wanted '$2'"
+		sleep 0.05
+	done
+}
+[ -x "$POINTER" ] || fail "V: no pointer client ($POINTER)"
+for rot in 90 270; do
+	v_picowl $rot
+	echo 600 >"$BL/brightness"
+	start_panel v --subpixel none
+	CR=$(val "$DIR/v.out" clock rect)
+	PX=$(( $(comp "$CR" 1) + $(comp "$CR" 3) / 2 ))
+	"$POINTER" --size 320x240 tap "$(v_at $rot $PX 8)" || fail "V $rot: the pointer client failed"
+	wait_for "$DIR/v.out" '^panel .* popup=clock$' 3 "V $rot: a tap on the physical clock opens the date row"
+	has "$DIR/v.out" '^placement edge=.* surface=54x240 ' "V $rot: the surface grew by the row"
+	# 3 s after the touch: open at 2 s, closed by 3.6 s
+	sleep 2
+	[ "$(v_popup "$DIR/v.out")" = clock ] || fail "V $rot: the date row closed before its 3 s"
+	v_wait_popup "$DIR/v.out" none 3 "V $rot: the date row closes by itself"
+	# The surface shrinks after that, and at 90 the bar's place in it moves with
+	# its thickness (the row grows inward from the edge): let it settle.
+	sleep 0.5
+	# a tap on the sun opens the slider row, a press on the track and a drag set the value
+	BB=$(val "$DIR/v.out" backlight button)
+	"$POINTER" --size 320x240 tap "$(v_at $rot $(( $(comp "$BB" 1) + 10 )) 8)" || fail "V $rot: the pointer client failed"
+	wait_for "$DIR/v.out" '^row slider=backlight ' 3 "V $rot: a tap on the physical backlight button opens its row"
+	TRACK=$(val "$DIR/v.out" row track)
+	TX=$(comp "$TRACK" 1); TW=$(comp "$TRACK" 3)
+	[ "$(cat "$BL/brightness")" = 600 ] || fail "V $rot: opening the row set the brightness"
+	# One process for the whole drag: a virtual pointer that goes away with
+	# its button down leaves the press behind.
+	"$POINTER" --size 320x240 move "$(v_at $rot $((TX + TW / 4)) 36)" down wait 300 \
+		move "$(v_at $rot $((TX + TW * 3 / 4)) 36)" wait 300 up || fail "V $rot: the pointer client failed"
+	has "$DIR/v.out" '^backlight available=1 value=2[0-9] ' "V $rot: a press at a quarter of the track sets about 25 percent"
+	has "$DIR/v.out" '^backlight available=1 value=7[0-9] ' "V $rot: dragging to three quarters sets about 75 percent"
+	RAW=$(cat "$BL/brightness")
+	[ "$RAW" -gt 700 ] && [ "$RAW" -lt 900 ] || fail "V $rot: the drag left the brightness at $RAW, wanted about 75 percent of 1023"
+	# a press near the start of the track, then out of the panel's surface into
+	# the window area: the touch ends there and does not stay down, which would
+	# keep the row open for good
+	"$POINTER" --size 320x240 move "$(v_at $rot $((TX + TW / 10)) 36)" down wait 200 \
+		move "$(v_at $rot $((TX + TW / 10)) 150)" wait 200 up || fail "V $rot: the pointer client failed"
+	RAW2=$(cat "$BL/brightness")
+	[ "$RAW2" -lt 300 ] || fail "V $rot: a press near the start of the track left $RAW2, wanted about 10 percent"
+	# the row closes 3 s after the last touch
+	v_wait_popup "$DIR/v.out" none 5 "V $rot: the slider row closes by itself"
+	# a tap in the window area, away from the strip, does nothing to the panel
+	N=$(grep -c '^redraw ' "$DIR/v.out")
+	"$POINTER" --size 320x240 tap 150,120 || fail "V $rot: the pointer client failed"
+	sleep 0.3
+	[ "$(grep -c '^redraw ' "$DIR/v.out")" = "$N" ] || fail "V $rot: a tap away from the strip redrew the panel"
+	stop_panel V
+	stop_picowl
+	echo "panel-e2e: V $rot: taps, the slider drag and the 3 s auto-close work on the strip"
+done
+unset PICOWL_TEST_VIRTUAL_POINTER
+cp "$DIR/picowl.base" "$DIR/picowl.ini"
+echo "panel-e2e: V ok"
 
 # ---- opt-in: the system clock ----
 if [ "$PW_PANEL_TEST_SETTIME" = 1 ]; then

@@ -7,6 +7,9 @@
 # side by side, shrinks it (a keyboard with a zone) or leaves it (one without).
 # [layout] focus keeps the wl_keyboard focus on one app of the pair while the
 # other maps; the client holds a virtual keyboard to get a wl_keyboard at all.
+# The panel's strip on a short edge of a landscape view (a layer surface
+# anchored right, top and bottom with an exclusive zone, what picowl-panel is on
+# an output turned by 90 degrees) takes width, not height, from the usable area.
 # usage: tile-e2e.sh PICOWL PW_TILE_CLIENT
 PICOWL=$1
 CLIENT=$2
@@ -92,6 +95,19 @@ cat >"$DIR/pan-landscape.ini" <<EOF
 stack = tile-a, tile-b
 EOF
 run pan-landscape "$DIR/pan-landscape.ini"
+# The panel's strip on the short edge of a landscape view (picowl-panel on an
+# output turned by 90 degrees): the pair is side by side in the usable area
+# without the strip's 18 columns.
+# (A panel on the TOP layer is hidden by autohide while a window has the focus,
+# and its zone with it, so that stays off as it does for the panel on a screen.)
+cat >"$DIR/strip.ini" <<EOF
+[zerocopy]
+panel_autohide = false
+
+[layout]
+stack = tile-a, tile-b
+EOF
+run strip "$DIR/strip.ini"
 
 # the keyboard stays with the named app when the other maps or restarts, and
 # goes to the newest window as before without the key

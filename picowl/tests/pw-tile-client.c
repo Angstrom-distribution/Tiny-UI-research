@@ -22,6 +22,12 @@
  *                              which asks for less than half; the second keeps
  *                              at least [layout] second_min (default 50, the
  *                              25 variant sets it to 25 for the old rule)
+ *   pw-tile-client strip       output 1280x720, the panel's strip on the right
+ *                              edge (anchored right, top and bottom, 18 wide,
+ *                              exclusive zone 18, as picowl-panel is on an
+ *                              output turned by 90 degrees): the usable area
+ *                              loses 18 columns, the pair is side by side in
+ *                              the rest, a keyboard with a zone shrinks it
  *   pw-tile-client pixels DIR  portrait pair drawn red (tile-a) and blue
  *                              (tile-b), keyboard green; stops at each step for
  *                              tests/pan-e2e.sh, which takes a screenshot and
@@ -358,6 +364,77 @@ static void kbd_hide(void)
 	wl_surface_attach(kb.surface, NULL, 0, 0);
 	wl_surface_commit(kb.surface);
 	wl_display_roundtrip(dpy);
+}
+
+/* ---- the panel's strip stand-in -------------------------------------- */
+
+#define STRIP_W 18
+static struct {
+	struct wl_surface *surface;
+	struct zwlr_layer_surface_v1 *ls;
+	int w, h;
+	int n_configures;
+} strip;
+
+static void strip_configure(void *d, struct zwlr_layer_surface_v1 *ls, uint32_t serial,
+	uint32_t width, uint32_t height)
+{
+	(void)d;
+	zwlr_layer_surface_v1_ack_configure(ls, serial);
+	strip.w = width;
+	strip.h = height;
+	strip.n_configures++;
+	/* A buffer in the panel's own orientation, turned like picowl-panel's. */
+	size_t size = (size_t)height * width * 4;
+	int fd = memfd_create("picowl-strip", MFD_CLOEXEC);
+	if (fd < 0 || ftruncate(fd, size) < 0)
+		fail("memfd");
+	uint32_t *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED)
+		fail("mmap");
+	for (size_t i = 0; i < (size_t)height * width; i++)
+		map[i] = 0xff00ff00;
+	munmap(map, size);
+	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+	struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, height, width, height * 4,
+		WL_SHM_FORMAT_XRGB8888);
+	wl_shm_pool_destroy(pool);
+	close(fd);
+	wl_surface_set_buffer_transform(strip.surface, WL_OUTPUT_TRANSFORM_90);
+	wl_surface_attach(strip.surface, buf, 0, 0);
+	wl_surface_damage_buffer(strip.surface, 0, 0, height, width);
+	wl_surface_commit(strip.surface);
+	wl_buffer_destroy(buf);
+}
+static void strip_closed(void *d, struct zwlr_layer_surface_v1 *ls)
+{
+	(void)d; (void)ls;
+	fail("strip layer surface was closed");
+}
+static const struct zwlr_layer_surface_v1_listener strip_listener = { strip_configure, strip_closed };
+
+static void strip_show(void)
+{
+	int64_t end = now_ms() + 3000;
+
+	if (!layer_shell)
+		fail("no zwlr_layer_shell_v1");
+	strip.surface = wl_compositor_create_surface(compositor);
+	strip.ls = zwlr_layer_shell_v1_get_layer_surface(layer_shell, strip.surface, NULL,
+		ZWLR_LAYER_SHELL_V1_LAYER_TOP, "panel");
+	zwlr_layer_surface_v1_add_listener(strip.ls, &strip_listener, NULL);
+	zwlr_layer_surface_v1_set_size(strip.ls, STRIP_W, 0);
+	zwlr_layer_surface_v1_set_anchor(strip.ls, ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT |
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
+	zwlr_layer_surface_v1_set_exclusive_zone(strip.ls, STRIP_W);
+	wl_surface_commit(strip.surface);
+	while (!strip.n_configures && now_ms() < end)
+		pump(50);
+	if (!strip.n_configures)
+		fail("the strip surface was never configured");
+	wl_display_roundtrip(dpy);
+	if (strip.w != STRIP_W || strip.h != 720)
+		fail("the strip is configured %dx%d, expected %dx720", strip.w, strip.h, STRIP_W);
 }
 
 /* Let whatever the compositor wants to say arrive. */
@@ -765,6 +842,33 @@ static void nopan(void)
 }
 
 /* A side by side pair has no lower window to lift, so it shrinks. */
+/* The panel's strip on a short edge of a landscape view: the usable area loses
+ * its width, not height, and the pair is side by side in what is left. The
+ * strip is anchored to the top and the bottom too, so it is no keyboard to pan
+ * for, and a keyboard with a zone still shrinks the pair. */
+static void strip_landscape(void)
+{
+	struct win a, b;
+
+	open_win(&a, "tile-a");
+	strip_show();
+	expect_size("alone", &a, 1280 - STRIP_W, 720);
+	open_win(&b, "tile-b");
+	/* no hint and no aspect: half of the 1262 columns each */
+	expect_size("pair", &a, 631, 720);
+	expect_size("pair", &b, 631, 720);
+	kbd_show(KBD_ZONE);
+	expect_size("keyboard", &a, 631, 720 - KBD_ZONE);
+	expect_size("keyboard", &b, 631, 720 - KBD_ZONE);
+	kbd_hide();
+	expect_size("keyboard hidden", &a, 631, 720);
+	expect_size("keyboard hidden", &b, 631, 720);
+	close_win(&b);
+	expect_size("partner closed", &a, 1280 - STRIP_W, 720);
+	close_win(&a);
+	wl_display_roundtrip(dpy);
+}
+
 static void pan_landscape(void)
 {
 	struct win a, b;
@@ -828,14 +932,14 @@ int main(int argc, char **argv)
 {
 	static const char *const modes[] = { "landscape", "portrait", "pan", "pan-zone",
 		"nopan", "pan-landscape", "second50", "second25", "pixels", "pixels-zone", "focus-keep",
-		"focus-default" };
+		"focus-default", "strip" };
 	bool known = false;
 
 	for (unsigned i = 0; argc >= 2 && i < sizeof(modes) / sizeof(modes[0]); i++)
 		known |= !strcmp(argv[1], modes[i]);
 	if (!known || argc != (!strncmp(argv[1], "pixels", 6) ? 3 : 2)) {
 		fprintf(stderr, "usage: pw-tile-client landscape|portrait|pan|pan-zone|"
-			"nopan|pan-landscape|second50|second25|focus-keep|focus-default|pixels DIR|pixels-zone DIR\n");
+			"nopan|pan-landscape|second50|second25|strip|focus-keep|focus-default|pixels DIR|pixels-zone DIR\n");
 		return 2;
 	}
 	alarm(30);
@@ -863,6 +967,8 @@ int main(int argc, char **argv)
 		nopan();
 	else if (!strcmp(argv[1], "pan-landscape"))
 		pan_landscape();
+	else if (!strcmp(argv[1], "strip"))
+		strip_landscape();
 	else
 		pixels(argv[2]);
 	printf("pw-tile-client: ok %s\n", argv[1]);
