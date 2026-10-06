@@ -17,13 +17,14 @@ bool pl_assets_init(struct pl_assets *a, const char *font_path, int font_px,
 	return pl_font_load(&a->font, font_path, font_px, small < 8 ? 8 : small);
 }
 
-void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha)
+void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha,
+	enum pl_crisp_font font)
 {
 	memset(a, 0, sizeof(*a));
 	a->crisp = true;
 	a->bar_alpha = pl_clamp_alpha(bar_alpha);
 	a->popup_alpha = pl_clamp_alpha(popup_alpha);
-	pl_font_load_crisp(&a->font, bar_h);
+	pl_font_load_crisp(&a->font, bar_h, font);
 }
 
 static void masks_free(struct pl_assets *a)

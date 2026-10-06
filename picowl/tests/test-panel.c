@@ -2164,7 +2164,7 @@ static void crisp_env_init(struct env *e, bool row, int bar_h)
 {
 	struct pl_metrics m;
 
-	pl_assets_init_crisp(&e->a, bar_h, 255, 255);
+	pl_assets_init_crisp(&e->a, bar_h, 255, 255, PL_CRISP_FIXED);
 	pl_assets_metrics(&e->a, &m);
 	pl_layout_compute(&e->l, 240, bar_h, row, false, &m);
 	CHECK(pl_assets_prepare(&e->a, &e->l), "the crisp style has nothing to build");
@@ -2323,7 +2323,7 @@ static void test_crisp_formats(void)
 		struct env e;
 		struct pl_metrics m;
 
-		pl_assets_init_crisp(&e.a, BAR, 255, 255);
+		pl_assets_init_crisp(&e.a, BAR, 255, 255, PL_CRISP_FIXED);
 		pl_assets_metrics(&e.a, &m);
 		pl_layout_compute(&e.l, 240, BAR, true, false, &m);
 		canvas_init(&e.b, 240, e.l.h, fmts[k]);
@@ -2361,7 +2361,7 @@ static void test_crisp_wordings(void)
 	struct pl_font f;
 	char buf[64];
 
-	pl_font_load_crisp(&f, BAR);
+	pl_font_load_crisp(&f, BAR, PL_CRISP_FIXED);
 	CHECK(f.crisp && !f.ttf, "a crisp font is neither TrueType nor the 5x7 fallback");
 	/* Sizes by role. */
 	CHECK_EQ(pl_font_face_px(&f, PL_FACE_BAR), 13, "the bar text is a 13 px pixel font");
@@ -2463,21 +2463,21 @@ static void test_crisp_wordings(void)
 	pl_font_free(&f);
 
 	/* Integer scales only: a taller bar scales the font by a whole number. */
-	pl_font_load_crisp(&f, 38);
+	pl_font_load_crisp(&f, 38, PL_CRISP_FIXED);
 	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 2, "a 38 px bar has the bar font twice as big");
 	CHECK_EQ(pl_font_text_w(&f, PL_FACE_BAR, "88:88"), 70, "and twice as wide");
 	CHECK_EQ(pl_font_face_px(&f, PL_FACE_BAR), 26, "and tall");
 	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 1, "its 46 px row is still the normal size");
 	pl_font_free(&f);
-	pl_font_load_crisp(&f, 64);
+	pl_font_load_crisp(&f, 64, PL_CRISP_FIXED);
 	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 3, "a 64 px bar: scale 3");
 	CHECK_EQ(f.pix[PL_FACE_ROW].scale, 2, "and a 72 px row: scale 2");
 	CHECK_EQ(pl_font_text_w(&f, PL_FACE_ROW, "Monday"), 120, "Monday in 10x20 at scale 2");
 	pl_font_free(&f);
-	pl_font_load_crisp(&f, 80);
+	pl_font_load_crisp(&f, 80, PL_CRISP_FIXED);
 	CHECK_EQ(f.pix[PL_FACE_BAR].scale, 4, "an 80 px bar: scale 4");
 	pl_font_free(&f);
-	pl_font_load_crisp(&f, 18);
+	pl_font_load_crisp(&f, 18, PL_CRISP_FIXED);
 	CHECK(f.pix[PL_FACE_BAR].scale == 1 && f.pix[PL_FACE_ROW].scale == 1, "scales never fall below 1");
 	pl_font_free(&f);
 }
@@ -2528,7 +2528,7 @@ static void test_crisp_fit(void)
 		struct pl_state st = { .est = { PL_EST_TOFULL, 75, false }, .bat_pct = 94,
 			.year = 2026, .mon = 8, .mday = 30, .wday = 3 };
 
-		pl_assets_init_crisp(&a, BAR, 255, 255);
+		pl_assets_init_crisp(&a, BAR, 255, 255, PL_CRISP_FIXED);
 		pl_assets_metrics(&a, &m);
 		pl_layout_compute(&l, w, BAR, true, false, &m);
 		pl_row_text(&l, &a, &st, PL_BTN_CLOCK, &t);

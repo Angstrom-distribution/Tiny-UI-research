@@ -67,6 +67,7 @@ struct panel {
 	int bar_alpha, popup_alpha;
 	enum pl_subopt subopt;
 	bool crisp;		/* --style crisp: pixel fonts and whole-pixel shapes */
+	enum pl_crisp_font crisp_font;	/* --crisp-font */
 	int battery_mah;	/* capacity given by the user, 0 unknown */
 	bool dump_state, watch, exit_after_frame;
 	const char *inject;
@@ -1134,12 +1135,14 @@ static void dump_state(const struct panel *p, const char *why)
 		p->canvas.fmt == PL_FMT_RGB565 ? "RGB565" :
 		p->canvas.fmt == PL_FMT_ARGB8888 ? "ARGB8888" : "XRGB8888",
 		p->bottom ? "bottom" : "top", slider_name(p->pop.open));
-	printf("style %s=%s%s%s size=%d small=%d bar_alpha=%d popup_alpha=%d\n",
+	printf("style %s=%s%s%s size=%d small=%d bar_alpha=%d popup_alpha=%d%s\n",
 		p->crisp ? "crisp font" : "font",
 		p->crisp ? "pixel" : p->font_ttf ? "ttf" : "bitmap", p->font_ttf ? ":" : "",
 		p->font_ttf ? p->assets.font.path : "",
 		pl_font_face_px(&p->assets.font, 0), pl_font_face_px(&p->assets.font, 1),
-		p->bar_alpha, p->popup_alpha);
+		p->bar_alpha, p->popup_alpha,
+		!p->crisp ? "" : p->crisp_font == PL_CRISP_DEJAVU ? " crisp_font=dejavu" :
+		" crisp_font=fixed");
 	printf("text subpixel=%s\n", p->assets.sub == PL_SUB_RGB ? "rgb" :
 		p->assets.sub == PL_SUB_BGR ? "bgr" : "none");
 	/* What the compositor is told: the exclusive zone is the bar and never
@@ -1209,6 +1212,9 @@ static void usage(FILE *out)
 		"                      anti-aliased, with built-in pixel fonts and icons on\n"
 		"                      whole pixels, and ignores --font, --font-size and\n"
 		"                      --subpixel\n"
+		"  --crisp-font F      fixed (default) or dejavu: the pixel font of the crisp\n"
+		"                      style. fixed is the monospaced X11 misc-fixed, dejavu\n"
+		"                      is DejaVu Sans hinted to bi-level, proportional\n"
 		"  --font PATH         TrueType font file (default: the first of the\n"
 		"                      Liberation Sans and DejaVu Sans files that exist);\n"
 		"                      without a usable one the built-in bitmap font is used\n"
@@ -1312,6 +1318,16 @@ static int parse_args(struct panel *p, int argc, char **argv)
 				p->crisp = true;
 			} else {
 				say("--style: '%s' is not smooth or crisp", v);
+				return -1;
+			}
+		} else if (!strcmp(a, "--crisp-font") && i + 1 < argc) {
+			const char *v = argv[++i];
+			if (!strcmp(v, "fixed")) {
+				p->crisp_font = PL_CRISP_FIXED;
+			} else if (!strcmp(v, "dejavu")) {
+				p->crisp_font = PL_CRISP_DEJAVU;
+			} else {
+				say("--crisp-font: '%s' is not fixed or dejavu", v);
 				return -1;
 			}
 		} else if (!strcmp(a, "--font") && i + 1 < argc) {
@@ -1556,7 +1572,7 @@ int main(int argc, char **argv)
 	/* The font is read once, here: glyphs are rasterized into memory and the
 	 * file is let go. Without one the panel still works, in the bitmap font. */
 	if (p.crisp) {
-		pl_assets_init_crisp(&p.assets, p.height, p.bar_alpha, p.popup_alpha);
+		pl_assets_init_crisp(&p.assets, p.height, p.bar_alpha, p.popup_alpha, p.crisp_font);
 	} else {
 		int px = p.font_px ? p.font_px : pl_default_font_px(p.height);
 		p.font_ttf = pl_assets_init(&p.assets, p.font_path, px, p.bar_alpha, p.popup_alpha);

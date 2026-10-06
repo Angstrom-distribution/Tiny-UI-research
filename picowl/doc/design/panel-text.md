@@ -1,6 +1,6 @@
 # Text on the handheld: what WinCE did, what we can match, and what is worth accelerating
 
-**Status:** research and a decision record. The compiled-in pixel fonts of `picowl-panel --style crisp` are implemented; the hinted-TrueType bake recommended in section 5 is not. Nothing here was measured on a board unless it says so.
+**Status:** research and a decision record. The compiled-in pixel fonts of `picowl-panel --style crisp` are implemented, and so is the hinted-TrueType bake of section 5 as `--crisp-font dejavu` (the default stays `fixed`). Nothing here was measured on a board unless it says so.
 
 ## 1. Evidence tags
 
@@ -49,6 +49,7 @@ A standalone prototype (not part of the panel build) rendered Liberation Sans, D
 1. **Keep the compiled-in X11 misc-fixed fonts as the default of the crisp style.** They are public domain (each BDF header carries the `COPYRIGHT` line and the generator refuses a font without one), take about 10.2 KB, have no dependency, and are exactly pixel-aligned. This is what is implemented.
 2. **If the bar text should look like WinCE's, bake DejaVu Sans Bold 11 px (v35, mono) offline into const bitmaps** for the bar and keep the pixel fonts for the rows. The panel then needs no FreeType at run time. The alternative, linking FreeType (optional dependency) and rasterising about 70 glyphs per face once at start-up into 1-bit masks, costs a dependency and FreeType's resident memory for the same per-frame cost [est]; FreeType is already on the board for fontconfig.
 3. **Licence of the bake.** DejaVu's own changes are public domain, but the fonts derive from Bitstream Vera: "Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is a trademark of Bitstream, Inc." The Vera licence requires the copyright and trademark notices and the permission notice in all copies of the typefaces, allows modified fonts only if renamed to names without "Bitstream" or "Vera", and does not allow selling a typeface by itself. Bitmaps derived from DejaVu would need the notice shipped with them and, if distributed as a font, the rename. This is a reading of the licence text, not legal advice.
+4. **What was built** (`--crisp-font dejavu`, `panel/fonts/gen-dejavu-bitmaps.c`, `panel/panel-pixfont-dejavu.c`). The bake covers the rows too, not only the bar: Bold 11 for the bar and the slider value, and Bold 12, 11, 10 and 9 for the text rows, as the size ladder the fit logic steps down. The rows are Bold and not Regular because, in [host] renders on the dark theme, Regular 12 has 1 px stems and looks thin in the 36 px row while Bold 12 has the weight of the compiled-in bold fonts; the longest date takes 222 of the 224 px of the text area in Bold 12 and fits the largest face, where misc-fixed falls to 7x14 bold. The bar's colon is centred (misc-fixed 7x13 bold's sits low), `m`, `W` and `%` are legible at 11 and 12 px. Against that, the DejaVu rows are smaller than 10x20 bold in the 36 px row (digits 9 px high against 13), the bar's digits are 8 px high against 9 (4 rows above and 5 below in the 17 of the bar), and the proportional widths move the battery and the buttons 7 px left. The default stays `fixed` because both looks were only seen on a host.
 
 ## 6. Where text time really goes, and what is worth accelerating
 
@@ -60,8 +61,8 @@ A standalone prototype (not part of the panel build) rendered Liberation Sans, D
 ## 7. Open questions
 
 - Does the engine mono expansion work on the MQ1188 under Linux, and at what cost per glyph? (Section 6.)
-- How does a hinted bi-level DejaVu bar look on the real panel, compared with misc-fixed? Only host renders exist.
-- Which look does the user prefer for the rows: the large hand-drawn pixel fonts or hinted TrueType at 12 px?
+- How does the hinted bi-level DejaVu bar look on the real panel, compared with misc-fixed? Only host renders exist; the choice between `--crisp-font fixed` and `dejavu` as the default waits for it.
+- Which look is preferred for the rows: the large hand-drawn pixel fonts or hinted DejaVu Bold at 12 px?
 
 ## 8. Idea, not built: pixel-aligned fonts in havoc
 

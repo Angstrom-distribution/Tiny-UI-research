@@ -174,11 +174,18 @@ void pl_row_face_px(int px_bar, int px[PL_ROW_FACES]);
 bool pl_font_load(struct pl_font *f, const char *path, int px_bar, int px_small);
 void pl_font_free(struct pl_font *f);
 
-/* The pixel fonts for a bar of bar_h pixels, no files read. Faces 0 and 1 (the
- * bar and the value in the slider row) are 7x13 bold and the four text-row
- * faces are 10x20, 9x15, 7x14 and 6x10, each scaled by a whole number for bars
- * that are much taller than the default. */
-void pl_font_load_crisp(struct pl_font *f, int bar_h);
+/* Which pixel fonts the crisp style uses. */
+enum pl_crisp_font {
+	PL_CRISP_FIXED,		/* X11 misc-fixed: monospaced, hand drawn */
+	PL_CRISP_DEJAVU,	/* DejaVu Sans hinted to bi-level and baked: proportional */
+};
+
+/* The pixel fonts for a bar of bar_h pixels, no files read. With PL_CRISP_FIXED
+ * faces 0 and 1 (the bar and the value in the slider row) are 7x13 bold and the
+ * four text-row faces are 10x20, 9x15, 7x14 and 6x10; with PL_CRISP_DEJAVU they
+ * are DejaVu Sans Bold at 11 px and at 12, 11, 10 and 9 px. Each is scaled
+ * by a whole number for bars that are much taller than the default. */
+void pl_font_load_crisp(struct pl_font *f, int bar_h, enum pl_crisp_font which);
 
 /* The size a face is drawn at, in pixels: the point size of a TrueType face,
  * the cell height of a pixel font times its scale, 7 times the scale for the

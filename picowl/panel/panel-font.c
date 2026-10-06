@@ -118,18 +118,27 @@ static void pix_face_init(struct pl_face *fc, const struct pl_pixface *pf)
 	fc->digit_top = (f->ascent - first) * pf->scale;
 }
 
-void pl_font_load_crisp(struct pl_font *f, int bar_h)
+void pl_font_load_crisp(struct pl_font *f, int bar_h, enum pl_crisp_font which)
 {
 	/* The default bar has one scale, a bar twice as high gets glyphs twice as
 	 * big, and so on: a whole number, never a fraction. */
 	int sb = (bar_h + 2) / 20, sr = pl_row_height(bar_h) / 36;
-	static const struct pl_pixfont *const rows[PL_ROW_FACES] = {
+	static const struct pl_pixfont *const rows_fixed[PL_ROW_FACES] = {
 		&pl_pixfont_10x20, &pl_pixfont_9x15B, &pl_pixfont_7x14B, &pl_pixfont_6x10,
 	};
+	/* Four sizes to step down through, like the fixed fonts, so that a narrow
+	 * output loses size and not words. */
+	static const struct pl_pixfont *const rows_dejavu[PL_ROW_FACES] = {
+		&pl_pixfont_dv_bold_12, &pl_pixfont_dv_bold_11, &pl_pixfont_dv_bold_10,
+		&pl_pixfont_dv_bold_9,
+	};
+	bool dv = which == PL_CRISP_DEJAVU;
+	const struct pl_pixfont *const *rows = dv ? rows_dejavu : rows_fixed;
 
 	memset(f, 0, sizeof(*f));
 	f->crisp = true;
-	f->pix[PL_FACE_BAR] = (struct pl_pixface){ &pl_pixfont_7x13B, sb < 1 ? 1 : sb };
+	f->pix[PL_FACE_BAR] = (struct pl_pixface){ dv ? &pl_pixfont_dv_bold_11 : &pl_pixfont_7x13B,
+		sb < 1 ? 1 : sb };
 	f->pix[PL_FACE_SMALL] = f->pix[PL_FACE_BAR];
 	for (int i = 0; i < PL_ROW_FACES; i++)
 		f->pix[PL_FACE_ROW + i] = (struct pl_pixface){ rows[i], sr < 1 ? 1 : sr };
@@ -147,8 +156,8 @@ static int pix_text_w(const struct pl_pixface *pf, const char *s)
 	int n = 0;
 
 	for (; *s; s++)
-		n += *s >= PL_PIX_FIRST && *s <= PL_PIX_LAST;
-	return n * pf->f->w * pf->scale;
+		n += pl_pixfont_adv(pf->f, (unsigned char)*s);
+	return n * pf->scale;
 }
 
 /* One row of a glyph, as runs of set pixels: each run is a rectangle of one
@@ -174,12 +183,13 @@ static void pix_draw(const struct pl_canvas *c, const struct pl_pixface *pf, int
 				int run = 1;
 				while (col + run < f->w && pl_pixfont_bit(f, g, r, col + run))
 					run++;
-				pl_fill_px(c, (struct pl_rect){ x + col * sc, top + r * sc, run * sc, sc },
-					px);
+				/* The pen is ox columns into the cell. */
+				pl_fill_px(c, (struct pl_rect){ x + (col - f->ox) * sc, top + r * sc,
+					run * sc, sc }, px);
 				col += run;
 			}
 		}
-		x += f->w * sc;
+		x += pl_pixfont_adv(f, (unsigned char)*s) * sc;
 	}
 }
 

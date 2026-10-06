@@ -44,7 +44,9 @@ color = #101010
 # built-in bitmap font), --popup-alpha N (0..255, default 224: the row is
 # translucent), --style smooth|crisp (default smooth; crisp draws no anti-aliasing at
 # all, with built-in pixel fonts and icons on whole pixels, and ignores --font,
-# --font-size and --subpixel), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
+# --font-size and --subpixel), --crisp-font fixed|dejavu (default fixed; the
+# pixel font of the crisp style: the monospaced misc-fixed set or DejaVu Sans
+# Bold, proportional), --bar-alpha N (default 255) and --subpixel auto|rgb|bgr|none
 # (default auto: LCD text in the order [output] subpixel advertises, in
 # grayscale where the ground is translucent or the stripes do not run across)
 # and --battery-mah N (the battery's capacity, the last resort for the time left

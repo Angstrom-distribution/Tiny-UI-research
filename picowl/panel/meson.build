@@ -13,6 +13,7 @@ pwpanel_stb = static_library('pwpanel-stb', 'panel-stb.c',
 libm = cc.find_library('m', required: false)
 pwpanel_lib = static_library('pwpanel',
   'panel-logic.c', 'panel-gfx.c', 'panel-font.c', 'panel-crisp.c', 'panel-pixfont-data.c',
+  'panel-pixfont-dejavu.c',
   'panel-draw.c', 'panel-sys.c',
   '../src/subpixel.c',
   link_with: pwpanel_stb, dependencies: libm,

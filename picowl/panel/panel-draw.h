@@ -58,7 +58,8 @@ bool pl_assets_init(struct pl_assets *a, const char *font_path, int font_px,
 	int bar_alpha, int popup_alpha);
 /* The crisp style for a bar of bar_h pixels: built-in pixel fonts, no font
  * file. Never fails. */
-void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha);
+void pl_assets_init_crisp(struct pl_assets *a, int bar_h, int bar_alpha, int popup_alpha,
+	enum pl_crisp_font font);
 void pl_assets_free(struct pl_assets *a);
 
 /* Text widths for the layout, and whether the layout is for the crisp style. */
