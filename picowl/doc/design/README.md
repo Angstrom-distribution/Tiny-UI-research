@@ -6,6 +6,8 @@ These are the picowl-side work items from [mediaplayer-integration.md](../mediap
 
 | Plan | What it adds | Interfaces | Effort [est] |
 |---|---|---|---|
+| [roadmap.md](roadmap.md) | The state of the work, what was found, the plans in the proposed order, what only a board can verify, and the decisions that belong to the project owner. Start here | none | n/a |
+| [ipaq-displays.md](ipaq-displays.md) | Reference: panel sizes, densities, stripe orders and modes of the iPAQ families, what the kernel drivers report today, and how picowl-panel turns it into a style and bar height at run time | `wl_output` physical size and subpixel, `[output] size_mm`, `--style auto` | n/a |
 | [idle-inhibit.md](idle-inhibit.md) | **Implemented.** No dim or blank while a *visible* surface holds an inhibitor. The power key and output-power still blank. Per-profile `inhibit` key | `zwp_idle_inhibit_manager_v1` (wlroots); `pw_dim_set_inhibited`, `pw_power_inhibit` | ~1.5 days |
 | [buffer-budget.md](buffer-budget.md) | **Implemented** (`src/zbquota.c`, `src/zerocopy.c`). Configurable `picowl-buffer-v1` limits with per-`app_id` rules, so the player can have 7 buffers. Bytes accounted at the real allocated size | `[zerocopy]` and `[app.*]` config | ~2.5 days |
 | [caching-event.md](caching-event.md) | **Implemented** (`src/zbproto.c`, `src/copytype.c`). `picowl-buffer-v1` version 2: a `caching` event that says whether a buffer may be read back or decoded into. Replaces the `copy_type` stand-in | Protocol v2 (`since="2"`) | ~1.5 days + boards |
