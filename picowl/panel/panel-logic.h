@@ -447,6 +447,24 @@ enum pl_strip {
  * (or bottom) edge; force_top is --edge top. */
 enum pl_strip pl_strip_for(int transform, bool force_top);
 
+/* What picowl-rotation-v1 says of an output, when it is bound. With hardware
+ * rotation wl_output.geometry says the transform normal and the subpixel
+ * layout as the client sees it, so the turn and the panel's own layout come
+ * from here; with software rotation the geometry already says both and the
+ * hint is not used, so that a compositor that tells both ways is read one way. */
+struct pl_rot_hint {
+	bool present;		/* the event came */
+	bool hardware;		/* the display does the turning */
+	int transform;		/* wl_output.transform that turns the panel */
+	int subpixel;		/* wl_output.subpixel of the panel in its own orientation */
+};
+
+/* The transform and the native subpixel layout of an output: the hint's when
+ * it says the display turns the output, else what geometry said (older picowl,
+ * another compositor, software rotation). */
+void pl_rot_resolve(const struct pl_rot_hint *h, int geo_transform, int geo_subpixel,
+	int *transform, int *native_subpixel);
+
 enum pl_edge { PL_EDGE_TOP, PL_EDGE_BOTTOM, PL_EDGE_LEFT, PL_EDGE_RIGHT };
 
 /* The edge of the output's view the layer surface is anchored to. bottom is

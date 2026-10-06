@@ -40,6 +40,7 @@
 #include <linux/input-event-codes.h>
 #include <wayland-client.h>
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "picowl-rotation-v1-client-protocol.h"
 #include "panel-draw.h"
 #include "panel-logic.h"
 #include "panel-sys.h"
@@ -87,7 +88,10 @@ struct panel {
 	struct out_info {
 		struct wl_output *wl;
 		int subpixel, transform;
+		struct pl_rot_hint hint;
+		struct picowl_rotation_v1 *rot;
 	} outs[MAX_OUTPUTS];
+	struct picowl_rotation_manager_v1 *rot_mgr;
 	struct wl_output *surf_out;
 	enum pl_sub sub;
 	bool assets_ready;
@@ -881,19 +885,26 @@ static const struct out_info *bar_output(const struct panel *p)
  * transform come in wl_output.geometry, which is sent again when the output is
  * rotated. So does the edge: the strip on a short side is for the outputs the
  * compositor says are rotated by 90 or 270 degrees. An output with hardware
- * rotation says it is not (picowl sends the transform normal then, the
- * display does the turning), so there the bar stays on the top. A change of
- * the edge is asked for from the loop, after the pending configure. */
+ * rotation says it is not in wl_output (picowl sends the transform normal then,
+ * the display does the turning), so there the turn comes from
+ * picowl-rotation-v1; without that the bar stays on the top. A change of the
+ * edge is asked for from the loop, after the pending configure. */
 static void sub_update(struct panel *p)
 {
 	const struct out_info *oi = bar_output(p);
 
-	p->strip = oi ? pl_strip_for(oi->transform, p->edge_top) : PL_STRIP_NONE;
+	int transform = 0, native = 0;
+	if (oi)
+		pl_rot_resolve(&oi->hint, oi->transform, oi->subpixel, &transform, &native);
+	p->strip = oi ? pl_strip_for(transform, p->edge_top) : PL_STRIP_NONE;
 	/* A strip is drawn in the panel's own orientation, so its stripes run along
-	 * the bar whatever the output's transform is. */
-	enum pl_sub s = oi ? pl_subpixel_resolve(p->subopt, oi->subpixel,
-			p->strip != PL_STRIP_NONE ? 0 : oi->transform) :
-		pl_subpixel_resolve(p->subopt, 0, 0);
+	 * the bar whatever the output's transform is, and the layout that counts is
+	 * the panel's own: under hardware rotation that is the hint's, geometry
+	 * has it as the client sees it. Without a strip the bar is in the view's
+	 * orientation and geometry is what applies. */
+	enum pl_sub s = !oi ? pl_subpixel_resolve(p->subopt, 0, 0) :
+		p->strip != PL_STRIP_NONE ? pl_subpixel_resolve(p->subopt, native, 0) :
+		pl_subpixel_resolve(p->subopt, oi->subpixel, oi->transform);
 
 	if (s == p->sub)
 		return;
@@ -917,6 +928,30 @@ static void out_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int
 			p->outs[i].transform = transform;
 		}
 	sub_update(p);
+}
+static void rot_event(void *d, struct picowl_rotation_v1 *r, uint32_t transform,
+	uint32_t hardware, uint32_t subpixel)
+{
+	struct panel *p = d;
+
+	for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
+		if (p->outs[i].rot == r) {
+			p->outs[i].hint.present = true;
+			p->outs[i].hint.hardware = hardware != 0;
+			p->outs[i].hint.transform = transform > 7 ? 0 : (int)transform;
+			p->outs[i].hint.subpixel = (int)subpixel;
+		}
+	sub_update(p);
+}
+static const struct picowl_rotation_v1_listener rot_listener = { .rotation = rot_event };
+
+/* The manager and the outputs come in any order. */
+static void rot_attach(struct panel *p, int i)
+{
+	if (!p->rot_mgr || !p->outs[i].wl || p->outs[i].rot)
+		return;
+	p->outs[i].rot = picowl_rotation_manager_v1_get_rotation(p->rot_mgr, p->outs[i].wl);
+	picowl_rotation_v1_add_listener(p->outs[i].rot, &rot_listener, p);
 }
 static void out_mode(void *d, struct wl_output *o, uint32_t f, int32_t w, int32_t h, int32_t r)
 {
@@ -973,12 +1008,17 @@ static void reg_global(void *d, struct wl_registry *r, uint32_t name,
 	} else if (!strcmp(iface, zwlr_layer_shell_v1_interface.name)) {
 		p->layer_shell = wl_registry_bind(r, name,
 			&zwlr_layer_shell_v1_interface, 1);
+	} else if (!strcmp(iface, picowl_rotation_manager_v1_interface.name)) {
+		p->rot_mgr = wl_registry_bind(r, name, &picowl_rotation_manager_v1_interface, 1);
+		for (int i = 0; i < p->n_outputs && i < MAX_OUTPUTS; i++)
+			rot_attach(p, i);
 	} else if (!strcmp(iface, wl_output_interface.name)) {
 		if (p->n_outputs < MAX_OUTPUTS) {
 			struct wl_output *o = wl_registry_bind(r, name, &wl_output_interface,
 				ver < 2 ? ver : 2);
 			p->outs[p->n_outputs].wl = o;
 			wl_output_add_listener(o, &out_listener, p);
+			rot_attach(p, p->n_outputs);
 		}
 		p->n_outputs++;
 	}
@@ -1215,6 +1255,9 @@ static void dump_state(const struct panel *p, const char *why)
 		" crisp_font=fixed");
 	printf("text subpixel=%s\n", p->assets.sub == PL_SUB_RGB ? "rgb" :
 		p->assets.sub == PL_SUB_BGR ? "bgr" : "none");
+	const struct out_info *oi = bar_output(p);
+	printf("rotation hint=%s\n", !oi || !oi->hint.present ? "none" :
+		oi->hint.hardware ? "hardware" : "software");
 	/* What the compositor is told: the exclusive zone is the bar and never
 	 * the row; the input region is the bar and the row. */
 	struct pl_rect in = pl_input_rect(l, p->canvas.w, p->canvas.h);
@@ -1297,7 +1340,10 @@ static void usage(FILE *out)
 		"                      physical bottom with --bottom), drawn as in portrait and\n"
 		"                      turned by the buffer transform; top keeps it on the top\n"
 		"                      (bottom) edge of the rotated view. Other transforms are\n"
-		"                      not affected\n"
+		"                      not affected. When the display does the turning (picowl\n"
+		"                      with hardware rotation) the turn comes from\n"
+		"                      picowl-rotation-v1; a compositor without it is seen as\n"
+		"                      not turned\n"
 		"  --style STYLE       smooth (default) or crisp: crisp draws nothing\n"
 		"                      anti-aliased, with built-in pixel fonts and icons on\n"
 		"                      whole pixels, and ignores --font, --font-size and\n"

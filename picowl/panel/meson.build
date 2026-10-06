@@ -28,8 +28,10 @@ panel_built = false
 if panel_alsa.found() and panel_wl.found()
   panel_xdg_xml = wl_proto_dir / 'stable' / 'xdg-shell' / 'xdg-shell.xml'
   panel_ls_xml = files('../protocols/wlr-layer-shell-unstable-v1.xml')
+  panel_rot_xml = files('../protocols/picowl-rotation-v1.xml')
   panel_proto = []
-  foreach p : [['xdg-shell', panel_xdg_xml], ['wlr-layer-shell-unstable-v1', panel_ls_xml]]
+  foreach p : [['xdg-shell', panel_xdg_xml], ['wlr-layer-shell-unstable-v1', panel_ls_xml],
+             ['picowl-rotation-v1', panel_rot_xml]]
     panel_proto += custom_target('panel-' + p[0] + '-client-header',
       input: p[1], output: p[0] + '-client-protocol.h',
       command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'])

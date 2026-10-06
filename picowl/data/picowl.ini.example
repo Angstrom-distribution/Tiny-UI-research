@@ -20,6 +20,9 @@ format = RGB565
 #   iPAQs (h2200 and the other portrait panels)  horizontal_rgb
 #   h3900 (a landscape panel in hardware)        vertical_rgb
 # subpixel = horizontal_rgb
+# With hardware rotation wl_output says the transform normal; picowl-panel learns
+# the turn (and the layout above, in the panel's own orientation) from
+# picowl-rotation-v1, so the bar is on the short edge there too. No setting.
 
 [idle]
 # Legacy: milliseconds of inactivity before the screen is blanked; 0 disables.
