@@ -375,7 +375,7 @@ The question this answers: with video memory holding more than the scanout frame
 
 **Recommendation.** E-a first, and only after the experiments below. Do not design E-c until the host FIFO and mono expansion have been run once on the board.
 
-**Experiments to add to section 11** (all on the h2200, none run): EN1 8 bpp fill and copy rates with scanout running; EN2 a 1 bpp mono expansion through the source FIFO with a transparent background, correctness and time per glyph; EN3 source colour key on a copy; EN4 the cost of issuing a command (time 1000 back-to-back 16x4 fills, with and without the poll); EN5 a copy while the full frame is being scanned out, to see whether arbitration shows as tearing or stalls; EN6 the engine idle interrupt.
+**Experiments** are E9 to E14 in section 11 (all on the h2200, none run): 8 bpp engine rates, mono expansion, colour key, the cost of issuing a command, engine against scanout, and the idle interrupt.
 
 ## 9. Staged plan
 
@@ -427,6 +427,12 @@ Cheap and risk-free first. All need the current driver (K1).
 | E6 | Palette change at a frame flip: alternate two frames whose palettes differ, at 56 Hz, filmed with a phone at 240 fps | whether palette and GC0C land in the same vertical gap (6.5) | none |
 | E7 | After K2: 8 bpp engine fill through the guarded self-test | enables C8 solid-fill shortcut | low |
 | E8 | havoc before and after per-cell damage, `seq 1 3000` and typing at 10 characters per second, `mq11xx_copy_stats` bytes and picowl ticks | the terminal baseline C8 must beat | none |
+| E9 | Engine at 8 bpp with scanout running: fills and copies of 16x4, 240x112 and 240x224, reading the busy bit (section 8.6) | 8 bpp engine rates; the base for every engine plan | low |
+| E10 | Mono expansion through the source FIFO with a transparent background, a few glyphs at 6x11 | correctness and time per glyph (about 8 bus writes expected) | low |
+| E11 | Source colour key on a copy (8 and 16 bpp) | whether a keyed surface is usable | low |
+| E12 | Time 1000 back-to-back 16x4 fills, with and without the poll | the real cost of issuing a command on the 16-bit bus (about 2 us expected) | none |
+| E13 | A copy of 76,800 bytes while the frame is scanned out, filmed at 240 fps | whether engine and scanout arbitration shows as tearing or stalls | none |
+| E14 | Enable the engine idle interrupt (IN01 bit 12) | whether an idle interrupt arrives on GPIO14 | low |
 
 ## 12. Open questions
 
