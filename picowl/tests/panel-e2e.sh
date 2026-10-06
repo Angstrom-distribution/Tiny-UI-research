@@ -1958,6 +1958,35 @@ x_colours "0,0,240,34"
 x_colours "0,34,240,54"
 [ "$XN" = 1 ] || fail "X: below the new bar there are $XN colours, the old row or bar is left on the screen"
 stop_panel X
+# the touch comes after the look changed and before the surface was rebuilt for
+# it (the + leaves the configure unread until the tap has been made): the layout
+# is still the old one's, so the hit is dropped, and the bar ends up drawn at
+# 34 px in a surface of its own size, never the old 18 px buffer in a larger
+# surface
+start_panel x --popup-alpha 255 --inject "+d203;ibl;w800"
+x_look "$DIR/x.out" smooth 203 override vga 34 240x320 57x77
+XB=$(val "$DIR/x.out" panel bar); XH=$(val "$DIR/x.out" panel height); XR=$(val "$DIR/x.out" panel row)
+[ "$XB" = 34 ] && [ "$XH" = "$((XB + XR))" ] || fail "X: touch right after the look change: bar=$XB row=$XR height=$XH"
+has "$DIR/x.out" '^panel .* popup=none$' "X a touch before the surface is rebuilt does not open a row for the old layout"
+has "$DIR/x.out" '^surface exclusive=34 ' "X touch after the look change: the exclusive zone is the new bar"
+[ "$(mapped)" = 240x286 ] || fail "X: touch after the look change: a toplevel is $(mapped), wanted 240x286"
+x_colours "0,0,240,34"
+[ "$XN" -gt 30 ] || fail "X: touch after the look change: the bar has $XN colours, the old buffer is still shown"
+echo "panel-e2e: X a touch right after the change of look: bar $XB, row $XR, drawn in a surface of its own size"
+stop_panel X
+# two looks within one round trip to the compositor, with a flush in between
+start_panel x --popup-alpha 255 --inject "+d203;+d0;w800"
+x_look "$DIR/x.out" crisp 106 reported qvga 18 240x320 57x77
+has "$DIR/x.out" '^panel width=240 height=18 bar=18 row=0 .*popup=none$' "X two looks in a row: the 18 px bar"
+hasnt "$DIR/x.out" '^panel width=240 height=34 ' "X two looks in a row: the configure for the first one is not drawn"
+x_colours "0,0,240,18"
+u_want $C_BG $C_LINE $C_FG $C_EMPTY $C_FILL >"$DIR/x.want"
+u_got "$DIR/x.cap" >"$DIR/x.got"
+cmp -s "$DIR/x.want" "$DIR/x.got" || fail "X: two looks in a row: the bar is not exactly the crisp palette"
+x_colours "0,18,240,54"
+[ "$XN" = 1 ] || fail "X: two looks in a row: $XN colours below the bar"
+echo "panel-e2e: X two changes of look in a row: the 18 px bar, exactly the crisp palette"
+stop_panel X
 # the same twice and back: crisp 18 again, exactly the palette, no smooth left
 start_panel x --popup-alpha 255 --inject "ibl;d203;w400;ivol;w300;d0;w600"
 x_look "$DIR/x.out" crisp 106 reported qvga 18 240x320 57x77

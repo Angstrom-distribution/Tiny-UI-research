@@ -111,6 +111,9 @@ struct panel {
 	bool configured, closed, need_buffer, first;
 	int cfg_w, cfg_h;
 	int req_h;		/* the surface thickness (bar and row) last asked for */
+	/* A thickness was asked for that no configure has answered yet: a
+	 * configure for another one was sent before the request and is stale. */
+	bool req_pending;
 	/* The strip: on an output rotated by 90 or 270 degrees the bar is on the
 	 * short side, drawn in the panel's own orientation and turned by the
 	 * buffer transform. strip is what the output calls for now, req_strip what
@@ -242,6 +245,8 @@ static void request_surface(struct panel *p, int want)
 {
 	if (p->strip != p->req_strip || !p->req_h)
 		zwlr_layer_surface_v1_set_anchor(p->ls, anchor_for(p->strip, p->bottom));
+	if (p->req_h && want != p->req_h)
+		p->req_pending = true;
 	p->req_h = want;
 	p->req_strip = p->strip;
 	if (p->req_zone != p->height) {
@@ -784,6 +789,11 @@ static void touch_press(struct panel *p)
 	bool en[PL_BUTTONS] = { p->st.bl_pct >= 0, p->st.vol_pct >= 0, true, true };
 	struct pl_touch_out o;
 
+	/* The layout is still the old look's: a hit would open a row for buttons
+	 * that are not where they are drawn, and ask for a size that is no
+	 * longer the one the look needs. */
+	if (p->relook)
+		return;
 	/* set_slider ignores a value equal to the shown one, which must not be
 	 * a stale one. */
 	backlight_refresh(p);
@@ -1297,7 +1307,11 @@ static void tap_button(struct panel *p, int button)
  * button, "w MS" run the
  * event loop for MS milliseconds (the auto-close, for one), separated by ; or
  * space: the same handlers as the wl_pointer events, for tests without a
- * pointer. "b RAW" writes the backlight as another process would. */
+ * pointer. "b RAW" writes the backlight as another process would. "d N" is
+ * look_update for a density of N ppi. A token with a "+" in front is flushed
+ * but not settled: the compositor's answer to what it asked for is left to
+ * arrive later, which is how a touch or a second look can come before the
+ * configure of the first one. */
 static void run_inject(struct panel *p)
 {
 	char buf[MAX_INJECT * 12];
@@ -1307,6 +1321,10 @@ static void run_inject(struct panel *p)
 	for (char *tok = strtok_r(buf, "; ", &save); tok && !p->quit;
 			tok = strtok_r(NULL, "; ", &save)) {
 		int x, y;
+		bool defer = tok[0] == '+';
+
+		if (defer)
+			tok++;
 		if (tok[0] == 'e' && sscanf(tok + 1, "%d,%d", &x, &y) == 2) {
 			p->px = x;
 			p->py = y;
@@ -1345,7 +1363,8 @@ static void run_inject(struct panel *p)
 			say("bad --inject token '%s'", tok);
 		}
 		flush_redraw(p);
-		settle(p);
+		if (!defer)
+			settle(p);
 	}
 }
 
@@ -1699,13 +1718,22 @@ static bool handle_buffer(struct panel *p)
 			(p->strip != PL_STRIP_NONE ? p->cfg_w > p->cfg_h : p->cfg_w < p->cfg_h) &&
 			p->strip != p->buf_strip)
 		return true;
-	/* The same for the thickness of a surface that was configured before
-	 * the new look's size was asked for. */
-	if (p->relook && p->cfg_w > 0 && p->cfg_h > 0 &&
-			p->req_h != pl_surface_height(p->height, false) &&
-			(p->strip != PL_STRIP_NONE ? p->cfg_w : p->cfg_h) !=
-				pl_surface_height(p->height, false))
-		return true;
+	/* The same for the thickness: a configure for anything but the size
+	 * asked for last was sent before that request and is answered, not drawn
+	 * (drawn, it would put this look's layout into a buffer of the other
+	 * size for a frame). While a new look waits for its surface nothing has
+	 * been asked for yet, so what is configured is the old size. */
+	if (p->cfg_w > 0 && p->cfg_h > 0) {
+		int thick = p->strip != PL_STRIP_NONE ? p->cfg_w : p->cfg_h;
+
+		if (p->relook && p->req_h != pl_surface_height(p->height, false))
+			return true;
+		if (p->req_pending) {
+			if (thick != p->req_h)
+				return true;
+			p->req_pending = false;
+		}
+	}
 	int sw = p->cfg_w > 0 ? p->cfg_w :
 		p->strip != PL_STRIP_NONE ? pl_surface_height(p->height, false) : 240;
 	int sh = p->cfg_h > 0 ? p->cfg_h :
